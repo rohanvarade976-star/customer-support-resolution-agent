@@ -102,7 +102,7 @@ docker-compose.yml, .env.example, .gitignore, .pre-commit-config.yaml, LICENSE, 
 uv sync                          # install dependencies
 uv run pytest                    # run tests
 uv run ruff check . ; uv run ruff format .
-uv run mypy src
+uv run mypy src tests scripts
 uv run alembic upgrade head      # apply migrations
 ```
 

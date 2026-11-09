@@ -24,7 +24,9 @@ async def _table_names(url: str) -> set[str]:
 async def _has_vector_extension(url: str) -> bool:
     engine = create_async_engine(url, poolclass=NullPool)
     async with engine.connect() as conn:
-        found = await conn.scalar(text("SELECT 1 FROM pg_extension WHERE extname = 'vector'"))
+        found: int | None = await conn.scalar(
+            text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+        )
     await engine.dispose()
     return found == 1
 

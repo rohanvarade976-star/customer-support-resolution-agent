@@ -25,14 +25,18 @@ docker compose up -d              # start Postgres
 cd backend
 uv sync                           # install Python 3.12 + dependencies
 uv run pre-commit install         # run lint/type checks before each commit
+uv run alembic upgrade head       # create the tables
+uv run python scripts/seed_db.py  # add the demo customers and orders (safe to re-run)
 ```
+
+To start the demo data over: `uv run python scripts/seed_db.py --reset` and then seed again.
 
 ## Development commands (from `backend/`)
 
 ```powershell
 uv run pytest
 uv run ruff check . ; uv run ruff format .
-uv run mypy src
+uv run mypy src tests scripts
 ```
 
 ## Demo
