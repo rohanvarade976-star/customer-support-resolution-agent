@@ -1,0 +1,44 @@
+# Customer Support Resolution Agent
+
+A multi-agent customer support system that investigates complaints, checks refund
+policy, and proposes resolutions. The LLM proposes, code decides, and a human
+approves anything that moves money.
+
+> Status: under construction (M1 — Data foundation). Full spec: [docs/prd.html](docs/prd.html).
+
+## Architecture
+
+_To be written._ See `docs/architecture.md` (coming soon) and `docs/decisions.md`.
+
+## Tech stack
+
+Python 3.12 · FastAPI · PostgreSQL 16 + pgvector · SQLAlchemy 2 (async) · Alembic ·
+LangGraph · Groq / Gemini · React + TypeScript (later milestone).
+
+## Local setup (Windows / PowerShell)
+
+Prerequisites: [uv](https://docs.astral.sh/uv/), Docker Desktop, Git.
+
+```powershell
+Copy-Item .env.example .env       # then edit the values
+docker compose up -d              # start Postgres
+cd backend
+uv sync                           # install Python 3.12 + dependencies
+uv run pre-commit install         # run lint/type checks before each commit
+```
+
+## Development commands (from `backend/`)
+
+```powershell
+uv run pytest
+uv run ruff check . ; uv run ruff format .
+uv run mypy src
+```
+
+## Demo
+
+_To be added._
+
+## License
+
+MIT — see [LICENSE](LICENSE).

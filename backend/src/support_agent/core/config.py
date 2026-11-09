@@ -1,0 +1,46 @@
+"""Application settings, loaded once from environment variables and the `.env` file.
+
+Every other module reads config through `get_settings()`, never from `os.environ`.
+"""
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# config.py -> core -> support_agent -> src -> backend -> repo root
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        # Local dev reads the repo-root .env (shared with docker compose).
+        # In CI and production the file is absent and real env vars are used.
+        env_file=REPO_ROOT / ".env",
+        env_file_encoding="utf-8",
+        # .env also holds values for docker compose (POSTGRES_*); ignore those here.
+        extra="ignore",
+    )
+
+    app_env: Literal["local", "test", "production"] = "local"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    # Required: no default, so a missing value fails at startup instead of later.
+    # SecretStr hides the password if settings are ever printed or logged.
+    database_url: SecretStr
+
+    @field_validator("database_url")
+    @classmethod
+    def _require_async_driver(cls, value: SecretStr) -> SecretStr:
+        # The whole app is async, so the URL must use the asyncpg driver.
+        if not value.get_secret_value().startswith("postgresql+asyncpg://"):
+            raise ValueError("DATABASE_URL must start with 'postgresql+asyncpg://'")
+        return value
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return the settings, created once and reused (cached)."""
+    return Settings()  # values come from the environment / .env
