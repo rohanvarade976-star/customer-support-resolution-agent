@@ -1,0 +1,225 @@
+{
+  "customers": [
+    {
+      "name": "Priya Sharma",
+      "email": "priya@example.com",
+      "external_auth_subject": "seed|priya",
+      "orders": [
+        {
+          "order_number": "ORD-1001",
+          "status": "delivered",
+          "placed_days_ago": 16,
+          "delivered_days_ago": 12,
+          "items": [
+            {
+              "product_id": "SKU-HP-200",
+              "product_name": "Wireless Headphones",
+              "quantity": 1,
+              "paid_amount_minor": 249900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 9,
+              "received_days_ago": 5,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Arjun Mehta",
+      "email": "arjun@example.com",
+      "external_auth_subject": "seed|arjun",
+      "orders": [
+        {
+          "order_number": "ORD-1002",
+          "status": "shipped",
+          "placed_days_ago": 9,
+          "shipped_days_ago": 8,
+          "items": [
+            {
+              "product_id": "SKU-LT-550",
+              "product_name": "14-inch Laptop",
+              "quantity": 1,
+              "paid_amount_minor": 5499000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Meera Iyer",
+      "email": "meera@example.com",
+      "external_auth_subject": "seed|meera",
+      "orders": [
+        {
+          "order_number": "ORD-1003",
+          "status": "delivered",
+          "placed_days_ago": 4,
+          "delivered_days_ago": 1,
+          "items": [
+            {
+              "product_id": "SKU-PH-128",
+              "product_name": "Smartphone 128 GB",
+              "quantity": 1,
+              "paid_amount_minor": 1899900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Rahul Verma",
+      "email": "rahul@example.com",
+      "external_auth_subject": "seed|rahul",
+      "orders": [
+        {
+          "order_number": "ORD-1004",
+          "status": "delivered",
+          "placed_days_ago": 64,
+          "delivered_days_ago": 60,
+          "items": [
+            {
+              "product_id": "SKU-EP-010",
+              "product_name": "Wired Earphones",
+              "quantity": 1,
+              "paid_amount_minor": 129900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Kavya Nair",
+      "email": "kavya@example.com",
+      "external_auth_subject": "seed|kavya",
+      "orders": [
+        {
+          "order_number": "ORD-1005",
+          "status": "delivered",
+          "placed_days_ago": 24,
+          "delivered_days_ago": 20,
+          "items": [
+            {
+              "product_id": "SKU-SW-040",
+              "product_name": "Smartwatch",
+              "quantity": 1,
+              "paid_amount_minor": 399900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 15,
+              "received_days_ago": 12,
+              "inspection_status": "passed"
+            }
+          ],
+          "refund_history": {
+            "ticket_summary": "Customer returned the smartwatch and asked for a refund.",
+            "reason": "Return received and passed inspection within the return window.",
+            "opened_days_ago": 11,
+            "completed_days_ago": 10,
+            "reviewer_id": "seed|reviewer",
+            "provider_reference": "mockpay_rf_seed_1005"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Vikram Singh",
+      "email": "vikram@example.com",
+      "external_auth_subject": "seed|vikram",
+      "orders": [
+        {
+          "order_number": "ORD-1006",
+          "status": "delivered",
+          "placed_days_ago": 14,
+          "delivered_days_ago": 10,
+          "items": [
+            {
+              "product_id": "SKU-BS-300",
+              "product_name": "Bluetooth Speaker",
+              "quantity": 1,
+              "paid_amount_minor": 299900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 7,
+              "received_days_ago": 3,
+              "inspection_status": "failed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Aditya Rao",
+      "email": "aditya@example.com",
+      "external_auth_subject": "seed|aditya",
+      "orders": [
+        {
+          "order_number": "ORD-1007",
+          "status": "delivered",
+          "placed_days_ago": 10,
+          "delivered_days_ago": 6,
+          "items": [
+            {
+              "product_id": "SKU-BP-025",
+              "product_name": "Laptop Backpack",
+              "quantity": 1,
+              "paid_amount_minor": 179900
+            }
+          ],
+          "returns": [
+            {
+              "status": "requested",
+              "requested_days_ago": 2,
+              "inspection_status": "pending"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Sneha Kulkarni",
+      "email": "sneha@example.com",
+      "external_auth_subject": "seed|sneha",
+      "orders": [
+        {
+          "order_number": "ORD-1008",
+          "status": "delivered",
+          "placed_days_ago": 8,
+          "delivered_days_ago": 5,
+          "items": [
+            {
+              "product_id": "SKU-PC-007",
+              "product_name": "Phone Case",
+              "quantity": 1,
+              "paid_amount_minor": 49900
+            }
+          ]
+        },
+        {
+          "order_number": "ORD-1009",
+          "status": "delivered",
+          "placed_days_ago": 8,
+          "delivered_days_ago": 4,
+          "items": [
+            {
+              "product_id": "SKU-CH-065",
+              "product_name": "65W Fast Charger",
+              "quantity": 1,
+              "paid_amount_minor": 119900
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
