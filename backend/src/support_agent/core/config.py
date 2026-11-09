@@ -30,13 +30,16 @@ class Settings(BaseSettings):
     # Required: no default, so a missing value fails at startup instead of later.
     # SecretStr hides the password if settings are ever printed or logged.
     database_url: SecretStr
+    # Separate database used only by integration tests (they wipe it). Optional:
+    # without it, integration tests are skipped locally (and fail in CI).
+    test_database_url: SecretStr | None = None
 
-    @field_validator("database_url")
+    @field_validator("database_url", "test_database_url")
     @classmethod
-    def _require_async_driver(cls, value: SecretStr) -> SecretStr:
+    def _require_async_driver(cls, value: SecretStr | None) -> SecretStr | None:
         # The whole app is async, so the URL must use the asyncpg driver.
-        if not value.get_secret_value().startswith("postgresql+asyncpg://"):
-            raise ValueError("DATABASE_URL must start with 'postgresql+asyncpg://'")
+        if value is not None and not value.get_secret_value().startswith("postgresql+asyncpg://"):
+            raise ValueError("database URLs must start with 'postgresql+asyncpg://'")
         return value
 
 

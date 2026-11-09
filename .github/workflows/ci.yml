@@ -10,9 +10,30 @@ jobs:
     defaults:
       run:
         working-directory: backend
+
+    # A throwaway Postgres 16 + pgvector for the integration tests. The password is
+    # not a secret: the database only exists inside this CI run.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: support_agent_test
+        ports:
+          - 5432:5432
+        # Wait until Postgres accepts connections before the steps run.
+        options: >-
+          --health-cmd "pg_isready -U ci -d support_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
-      # Dummy value so settings load. Tests never connect with it, and it holds no secret.
+      # Required so settings load. Tests never connect with it.
       DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/ci
+      # Integration tests wipe and migrate this database.
+      TEST_DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/support_agent_test
       APP_ENV: test
     steps:
       - uses: actions/checkout@v5
