@@ -7,13 +7,27 @@ The full product spec is `docs/prd.html`. Read the relevant section before build
 
 ## How to work with Rohan
 
+This is a learning project. Rohan must understand every file before and after it is built.
+
+Before writing any code:
+1. Explain the goal of the task in simple terms.
+2. List every file you will create or modify, with a one-line purpose for each.
+3. Describe how the pieces will work together.
+4. Wait for Rohan to reply "go" before writing anything.
+
+After finishing:
+1. List every file created or changed and what it contains.
+2. Walk through the important code section by section in simple terms.
+3. Explain how it works end to end when it runs.
+4. Give PowerShell commands Rohan can run to see it working himself.
+
+General rules:
 - Do only the task you are given. Do not jump ahead to later milestones.
-- Before writing code, state in 2–4 lines what you will create and why.
-- After finishing, explain what each new file does and the key decisions, in simple terms.
-- Ask before adding any dependency that is not listed in this file or the PRD.
+- Ask before adding any dependency not listed in this file or the PRD.
 - Prefer small, readable code over clever code. Add short comments where intent is not obvious.
 - Rohan works on Windows with PowerShell. Give PowerShell commands, not bash.
 - Never print, log or commit secrets. Real keys live only in `.env`.
+- Do not commit unless Rohan asks.
 
 ## Non-negotiable rules (security and money)
 
