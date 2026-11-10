@@ -132,3 +132,62 @@ the Python member name.
 - Adding or removing a value is a migration that drops and recreates one CHECK constraint.
 - The enum lists live in two places (Python and the migration); a migration must
   accompany every enum change.
+
+---
+
+## ADR-004: Refund creation is never retried automatically
+
+- **Date:** 2026-11-10
+- **Status:** Accepted
+- **Milestone:** M2
+
+### Context
+
+Retrying a failed network call is normally the right thing to do, and our provider
+clients retry reads and ticket writes automatically. A refund is different: it moves
+money. If we send a refund request and the reply never arrives, we cannot tell whether
+the refund happened. Sending it again "just in case" relies entirely on the provider
+honouring our idempotency key; if it does not (bug, expired key, different provider),
+the customer is refunded twice.
+
+Not every failure is uncertain, though:
+
+- **Connect failure** (`ConnectError`, `ConnectTimeout`, `PoolTimeout`): we never
+  reached the provider, so nothing was sent and no refund can exist. This is safe to
+  report as a plain temporary failure.
+- **Read timeout, connection dropped after sending, any 5xx, a 504**: the request may
+  have arrived and been processed before things went wrong. The outcome is unknown.
+
+### Decision
+
+`PaymentClient.create_refund` makes exactly one attempt and never retries.
+
+- A connect failure raises `ProviderUnavailableError` with `request_sent=False`.
+- A read timeout, a dropped connection, a 5xx, or a 2xx we cannot parse raises
+  `OutcomeUnknownError`, carrying the idempotency key.
+- A 4xx raises `ProviderRejectedError` (404 raises `ResourceNotFoundError`).
+
+An unknown outcome is resolved only by **reconciliation**: ask the provider
+`find_refund_by_key(idempotency_key)`. If a refund is found, use its status. If the
+provider answers 404 (`ResourceNotFoundError`), no refund was created and a new attempt
+with the same key is safe. The refund operation stays in `pending_reconciliation` until
+then, and customers are never told the refund succeeded before it is verified.
+
+### Alternatives considered
+
+- Retry automatically with the same idempotency key — usually works, but makes our
+  money safety depend completely on the provider's idempotency behaviour, and hides
+  uncertainty from the workflow that must record and explain it.
+- Treat every failure as "unknown" — safe, but a simple connect failure would then
+  need a reconciliation round trip for no reason.
+- Treat every failure as "failed" — wrong and dangerous: the refund may have happened,
+  and a later fresh attempt could pay out twice.
+
+### Consequences
+
+- No double refunds from our retry logic, even if provider idempotency fails.
+- The refund executor (M8) must handle `OutcomeUnknownError` by moving the operation
+  to `pending_reconciliation` and scheduling reconciliation, rather than retrying.
+- Some refunds finish later than they could have, after a reconciliation step.
+- The distinction relies on httpx's exception types; anything we cannot classify as
+  "definitely not sent" is treated as unknown.

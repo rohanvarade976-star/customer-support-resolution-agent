@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # config.py -> core -> support_agent -> src -> backend -> repo root
@@ -33,6 +33,24 @@ class Settings(BaseSettings):
     # Separate database used only by integration tests (they wipe it). Optional:
     # without it, integration tests are skipped locally (and fail in CI).
     test_database_url: SecretStr | None = None
+
+    # External providers (the mocks locally). Used only by `integrations/`.
+    payments_base_url: str = "http://localhost:8001"
+    shipping_base_url: str = "http://localhost:8002"
+    ticketing_base_url: str = "http://localhost:8003"
+    provider_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+    provider_read_timeout_seconds: float = Field(default=5.0, gt=0, le=120)
+    # Total tries for retried calls (1 = no retry). Refund creation always makes one try.
+    provider_max_attempts: int = Field(default=3, ge=1, le=10)
+    # First retry waits up to this long; each later retry doubles the limit.
+    provider_backoff_base_seconds: float = Field(default=0.2, ge=0, le=10)
+
+    @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
+    @classmethod
+    def _require_http_url(cls, value: str) -> str:
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("provider base URLs must start with 'http://' or 'https://'")
+        return value
 
     @field_validator("database_url", "test_database_url")
     @classmethod

@@ -134,7 +134,9 @@ async def test_slow_fault_delays_then_succeeds(client: httpx.AsyncClient) -> Non
     response = await client.get("/shipments/ORD-1002")
 
     assert response.status_code == 200
-    assert time.monotonic() - started >= 0.3
+    # Not 0.3: on Windows the timer ticks about every 15.6 ms and asyncio may end a
+    # sleep up to one tick early, so a 300 ms sleep can measure as ~285 ms.
+    assert time.monotonic() - started >= 0.25
 
 
 async def test_drop_response_returns_504_once(client: httpx.AsyncClient) -> None:

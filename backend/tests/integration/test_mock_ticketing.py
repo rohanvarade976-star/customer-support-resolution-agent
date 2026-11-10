@@ -297,7 +297,9 @@ async def test_slow_fault_delays_then_succeeds(provider: MockTicketing) -> None:
     response = await provider.client.get(f"/tickets/{ticket_id}")
 
     assert response.status_code == 200
-    assert time.monotonic() - started >= 0.3
+    # Not 0.3: on Windows the timer ticks about every 15.6 ms and asyncio may end a
+    # sleep up to one tick early, so a 300 ms sleep can measure as ~285 ms.
+    assert time.monotonic() - started >= 0.25
 
 
 async def test_decline_fault_is_not_supported(provider: MockTicketing) -> None:

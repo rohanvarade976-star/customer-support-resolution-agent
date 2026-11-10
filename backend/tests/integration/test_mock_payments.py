@@ -221,7 +221,9 @@ async def test_slow_fault_delays_then_succeeds(provider: MockProvider) -> None:
     elapsed = time.monotonic() - started
 
     assert response.status_code == 201
-    assert elapsed >= 0.3
+    # Not 0.3: on Windows the timer ticks about every 15.6 ms and asyncio may end a
+    # sleep up to one tick early, so a 300 ms sleep can measure as ~285 ms.
+    assert elapsed >= 0.25
     assert await provider.row_count("key-slow") == 1
 
 
