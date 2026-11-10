@@ -29,7 +29,34 @@ uv run alembic upgrade head       # create the tables
 uv run python scripts/seed_db.py  # add the demo customers and orders (safe to re-run)
 ```
 
+Before running the API or the seed, set these in `.env` (see `.env.example`):
+
+- `JWT_SECRET`: signs login tokens, at least 32 characters. Generate one with
+  `uv run python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+- `DEMO_PASSWORD`: the password for every seeded demo account.
+
 To start the demo data over: `uv run python scripts/seed_db.py --reset` and then seed again.
+
+## Run the API (from `backend/`)
+
+```powershell
+uv run uvicorn support_agent.main:create_app --factory --port 8000
+```
+
+Open <http://localhost:8000/docs> for the interactive API docs, and check
+<http://localhost:8000/health> (it reports whether the database answers).
+
+Log in as a demo customer (`priya@example.com`, `arjun@example.com`, ...) or a reviewer
+(`anita@example.com`, `karan@example.com`). The password is your `DEMO_PASSWORD`:
+
+```powershell
+$body = @{ email = "priya@example.com"; password = "<your DEMO_PASSWORD>" } | ConvertTo-Json
+$login = Invoke-RestMethod -Method Post -Uri http://localhost:8000/auth/login `
+  -ContentType "application/json" -Body $body
+Invoke-RestMethod -Uri http://localhost:8000/me -Headers @{ Authorization = "Bearer $($login.access_token)" }
+```
+
+Every error has the same shape: `{"success": false, "error_code": "...", "message": "..."}`.
 
 ## Development commands (from `backend/`)
 

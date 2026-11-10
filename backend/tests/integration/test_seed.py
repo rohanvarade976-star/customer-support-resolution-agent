@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.core.config import get_settings
+from support_agent.core.security import hash_password, verify_password
 from support_agent.db.base import Base
 from support_agent.db.models import (
     ActionProposal,
@@ -19,6 +20,7 @@ from support_agent.db.models import (
     Order,
     RefundOperation,
     Return,
+    StaffUser,
 )
 from support_agent.db.seed import (
     SEED_TABLES,
@@ -28,9 +30,16 @@ from support_agent.db.seed import (
     reset,
     seed,
 )
-from support_agent.domain.enums import InspectionStatus, RefundOperationStatus, ReturnStatus
+from support_agent.domain.enums import (
+    InspectionStatus,
+    RefundOperationStatus,
+    ReturnStatus,
+    StaffRole,
+)
 
 NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+DEMO_PASSWORD = "demo-pass-for-tests"  # noqa: S105  (test value, not a real secret)
+PASSWORD_HASH = hash_password(DEMO_PASSWORD)  # hashed once; Argon2 is slow on purpose
 
 
 @pytest.fixture(scope="module")
@@ -56,10 +65,10 @@ async def returns_for(session: AsyncSession, order_number: str) -> list[Return]:
 
 
 async def test_seeding_twice_creates_nothing_new(session: AsyncSession, data: SeedData) -> None:
-    await seed(session, data, NOW)
+    await seed(session, data, NOW, PASSWORD_HASH)
     after_first = await table_counts(session)
 
-    second = await seed(session, data, NOW)
+    second = await seed(session, data, NOW, PASSWORD_HASH)
 
     assert await table_counts(session) == after_first
     assert sum(second.values()) == 0
@@ -70,7 +79,7 @@ async def test_seeding_twice_creates_nothing_new(session: AsyncSession, data: Se
 async def test_priya_return_received_and_passed_with_no_refund(
     session: AsyncSession, data: SeedData
 ) -> None:
-    await seed(session, data, NOW)
+    await seed(session, data, NOW, PASSWORD_HASH)
 
     [priya_return] = await returns_for(session, "ORD-1001")
     assert priya_return.status == ReturnStatus.RECEIVED
@@ -88,7 +97,7 @@ async def test_priya_return_received_and_passed_with_no_refund(
 async def test_kavya_fully_refunded_through_a_consistent_chain(
     session: AsyncSession, data: SeedData
 ) -> None:
-    await seed(session, data, NOW)
+    await seed(session, data, NOW, PASSWORD_HASH)
 
     order = await session.scalar(select(Order).where(Order.order_number == "ORD-1005"))
     assert order is not None
@@ -108,7 +117,7 @@ async def test_kavya_fully_refunded_through_a_consistent_chain(
 
 
 async def test_aditya_return_not_yet_received(session: AsyncSession, data: SeedData) -> None:
-    await seed(session, data, NOW)
+    await seed(session, data, NOW, PASSWORD_HASH)
 
     [aditya_return] = await returns_for(session, "ORD-1007")
     assert aditya_return.status == ReturnStatus.REQUESTED
@@ -118,7 +127,7 @@ async def test_aditya_return_not_yet_received(session: AsyncSession, data: SeedD
 
 
 async def test_reset_deletes_every_seeded_row(session: AsyncSession, data: SeedData) -> None:
-    await seed(session, data, NOW)
+    await seed(session, data, NOW, PASSWORD_HASH)
 
     await reset(session, data)
 
@@ -137,7 +146,7 @@ def production_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 async def test_reset_refuses_to_run_in_production(
     session: AsyncSession, data: SeedData, production_env: None
 ) -> None:
-    await seed(session, data, NOW)
+    await seed(session, data, NOW, PASSWORD_HASH)
     before = await table_counts(session)
 
     with pytest.raises(ResetRefusedError, match="production"):
@@ -145,3 +154,47 @@ async def test_reset_refuses_to_run_in_production(
 
     assert await table_counts(session) == before
     assert await count_rows(session, Customer) == len(data.customers)
+
+
+async def test_every_account_gets_a_demo_password_hash(
+    session: AsyncSession, data: SeedData
+) -> None:
+    await seed(session, data, NOW, PASSWORD_HASH)
+
+    customers = list(await session.scalars(select(Customer)))
+    staff = list(await session.scalars(select(StaffUser)))
+    accounts: list[Customer | StaffUser] = [*customers, *staff]
+    assert len(customers) == len(data.customers) == 8
+    assert sorted(user.name for user in staff) == ["Anita Desai", "Karan Malhotra"]
+    assert all(user.role == StaffRole.REVIEWER for user in staff)
+    for user in accounts:
+        assert user.password_hash is not None
+        assert user.password_hash != DEMO_PASSWORD  # stored hashed, never as plain text
+        assert verify_password(DEMO_PASSWORD, user.password_hash)
+
+
+async def test_seed_adds_a_missing_password_to_existing_customers(
+    session: AsyncSession, data: SeedData
+) -> None:
+    await seed(session, data, NOW, PASSWORD_HASH)
+    customer = await session.scalar(select(Customer).where(Customer.email == "priya@example.com"))
+    assert customer is not None
+    customer.password_hash = None  # as if seeded before logins existed
+    await session.flush()
+
+    await seed(session, data, NOW, PASSWORD_HASH)
+
+    await session.refresh(customer)
+    assert customer.password_hash == PASSWORD_HASH
+
+
+async def test_reseeding_does_not_overwrite_existing_passwords(
+    session: AsyncSession, data: SeedData
+) -> None:
+    await seed(session, data, NOW, PASSWORD_HASH)
+
+    await seed(session, data, NOW, hash_password("a-different-password"))
+
+    customer = await session.scalar(select(Customer).where(Customer.email == "priya@example.com"))
+    assert customer is not None
+    assert verify_password(DEMO_PASSWORD, customer.password_hash or "")

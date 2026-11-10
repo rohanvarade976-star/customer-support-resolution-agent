@@ -117,4 +117,4 @@ From the repo root: `docker compose up -d` starts Postgres.
 
 ## Current milestone
 
-M1 — Data foundation. See the master plan and PRD section "Milestones".
+M3 — Backend API and auth. See the master plan and PRD section "Milestones".

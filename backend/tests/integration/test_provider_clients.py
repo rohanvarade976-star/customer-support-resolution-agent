@@ -87,6 +87,7 @@ def client_settings(*, tiny_timeout: bool = False) -> Settings:
     return Settings(
         _env_file=None,
         database_url=SecretStr("postgresql+asyncpg://user:pw@localhost:5432/unused"),
+        jwt_secret=SecretStr("x" * 32),
         payments_base_url="http://payments.mock",
         shipping_base_url="http://shipping.mock",
         ticketing_base_url="http://ticketing.mock",

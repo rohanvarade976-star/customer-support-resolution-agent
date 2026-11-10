@@ -12,14 +12,18 @@ from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from support_agent.api.deps import get_session
 from support_agent.core.config import get_settings
+from support_agent.main import create_app
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -107,3 +111,23 @@ async def session(migrated_database: str) -> AsyncIterator[AsyncSession]:
             await db.close()
             await outer.rollback()
     await engine.dispose()
+
+
+@pytest.fixture
+def app(session: AsyncSession) -> FastAPI:
+    """The real app, using the rolled-back test session instead of the real database."""
+    application = create_app()
+
+    async def test_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    application.dependency_overrides[get_session] = test_session
+    return application
+
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """An HTTP client that calls the app in-process (no server, no network)."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        yield http

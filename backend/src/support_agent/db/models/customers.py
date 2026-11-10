@@ -12,3 +12,5 @@ class Customer(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
     external_auth_subject: Mapped[str] = mapped_column(String(255), unique=True)
     name: Mapped[str] = mapped_column(String(200))
     email: Mapped[str] = mapped_column(String(320), unique=True)
+    # Argon2 hash. NULL means this customer cannot log in yet.
+    password_hash: Mapped[str | None] = mapped_column(String(255))
