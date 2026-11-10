@@ -39,6 +39,24 @@ uv run ruff check . ; uv run ruff format .
 uv run mypy src tests scripts
 ```
 
+## Mock services (from `backend/`)
+
+Fake third-party providers used in development and tests. They need Postgres running.
+
+```powershell
+# Mock payment provider on http://localhost:8001 (API docs at /docs)
+uv run uvicorn mock_providers.payments.app:create_app --factory --port 8001
+```
+
+Failures can be switched on for the next N requests (not available when `APP_ENV=production`):
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8001/_admin/faults -ContentType "application/json" `
+  -Body '{"mode": "drop_response", "count": 1}'
+```
+
+Modes: `none`, `slow` (needs `delay_ms`), `error`, `drop_response`, `decline`.
+
 ## Demo
 
 _To be added._
