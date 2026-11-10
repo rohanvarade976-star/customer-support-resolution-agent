@@ -1,0 +1,121 @@
+{
+  "_comment": "Shipments for the seeded scenario orders. days_ago is counted back from 'now' on every request; time is HH:MM in UTC. Carriers are fictional.",
+  "shipments": [
+    {
+      "order_reference": "ORD-1001",
+      "carrier": "SwiftShip Logistics",
+      "tracking_number": "SWS100100101",
+      "status": "delivered",
+      "expected_delivery_days_ago": 12,
+      "events": [
+        { "days_ago": 15, "time": "10:05", "location": "Mumbai", "description": "Picked up from seller" },
+        { "days_ago": 14, "time": "03:40", "location": "Pune Hub", "description": "Arrived at hub" },
+        { "days_ago": 12, "time": "08:30", "location": "Pune", "description": "Out for delivery" },
+        { "days_ago": 12, "time": "13:15", "location": "Pune", "description": "Delivered" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1002",
+      "carrier": "Konkan Express",
+      "tracking_number": "KNX200200202",
+      "status": "in_transit",
+      "expected_delivery_days_ago": 3,
+      "events": [
+        { "days_ago": 8, "time": "10:15", "location": "Mumbai", "description": "Picked up from seller" },
+        { "days_ago": 7, "time": "02:40", "location": "Mumbai Sorting Centre", "description": "Departed sorting centre" },
+        { "days_ago": 6, "time": "09:20", "location": "Nagpur Hub", "description": "Held at hub" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1003",
+      "carrier": "SwiftShip Logistics",
+      "tracking_number": "SWS100300303",
+      "status": "delivered",
+      "expected_delivery_days_ago": 1,
+      "events": [
+        { "days_ago": 3, "time": "11:00", "location": "Bengaluru", "description": "Picked up from seller" },
+        { "days_ago": 2, "time": "04:10", "location": "Chennai Hub", "description": "Arrived at hub" },
+        { "days_ago": 1, "time": "08:45", "location": "Chennai", "description": "Out for delivery" },
+        { "days_ago": 1, "time": "12:30", "location": "Chennai", "description": "Delivered" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1004",
+      "carrier": "Konkan Express",
+      "tracking_number": "KNX200400404",
+      "status": "delivered",
+      "expected_delivery_days_ago": 60,
+      "events": [
+        { "days_ago": 63, "time": "09:30", "location": "Delhi", "description": "Picked up from seller" },
+        { "days_ago": 62, "time": "01:55", "location": "Lucknow Hub", "description": "Arrived at hub" },
+        { "days_ago": 60, "time": "08:20", "location": "Lucknow", "description": "Out for delivery" },
+        { "days_ago": 60, "time": "15:10", "location": "Lucknow", "description": "Delivered" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1005",
+      "carrier": "SwiftShip Logistics",
+      "tracking_number": "SWS100500505",
+      "status": "delivered",
+      "expected_delivery_days_ago": 20,
+      "events": [
+        { "days_ago": 23, "time": "10:40", "location": "Mumbai", "description": "Picked up from seller" },
+        { "days_ago": 22, "time": "05:05", "location": "Kochi Hub", "description": "Arrived at hub" },
+        { "days_ago": 20, "time": "08:10", "location": "Kochi", "description": "Out for delivery" },
+        { "days_ago": 20, "time": "11:50", "location": "Kochi", "description": "Delivered" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1006",
+      "carrier": "Konkan Express",
+      "tracking_number": "KNX200600606",
+      "status": "delivered",
+      "expected_delivery_days_ago": 10,
+      "events": [
+        { "days_ago": 13, "time": "09:00", "location": "Delhi", "description": "Picked up from seller" },
+        { "days_ago": 12, "time": "02:30", "location": "Jaipur Hub", "description": "Arrived at hub" },
+        { "days_ago": 10, "time": "08:35", "location": "Jaipur", "description": "Out for delivery" },
+        { "days_ago": 10, "time": "14:20", "location": "Jaipur", "description": "Delivered" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1007",
+      "carrier": "SwiftShip Logistics",
+      "tracking_number": "SWS100700707",
+      "status": "delivered",
+      "expected_delivery_days_ago": 6,
+      "events": [
+        { "days_ago": 9, "time": "10:25", "location": "Bengaluru", "description": "Picked up from seller" },
+        { "days_ago": 8, "time": "03:15", "location": "Hyderabad Hub", "description": "Arrived at hub" },
+        { "days_ago": 6, "time": "08:05", "location": "Hyderabad", "description": "Out for delivery" },
+        { "days_ago": 6, "time": "12:45", "location": "Hyderabad", "description": "Delivered" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1008",
+      "carrier": "Konkan Express",
+      "tracking_number": "KNX200800808",
+      "status": "delivered",
+      "expected_delivery_days_ago": 5,
+      "events": [
+        { "days_ago": 7, "time": "11:10", "location": "Mumbai", "description": "Picked up from seller" },
+        { "days_ago": 6, "time": "04:00", "location": "Ahmedabad Hub", "description": "Arrived at hub" },
+        { "days_ago": 5, "time": "08:15", "location": "Ahmedabad", "description": "Out for delivery" },
+        { "days_ago": 5, "time": "13:40", "location": "Ahmedabad", "description": "Delivered" }
+      ]
+    },
+    {
+      "order_reference": "ORD-1009",
+      "carrier": "Konkan Express",
+      "tracking_number": "KNX200900909",
+      "status": "delivered",
+      "expected_delivery_days_ago": 4,
+      "events": [
+        { "days_ago": 7, "time": "11:30", "location": "Mumbai", "description": "Picked up from seller" },
+        { "days_ago": 6, "time": "04:20", "location": "Ahmedabad Hub", "description": "Arrived at hub" },
+        { "days_ago": 4, "time": "08:25", "location": "Ahmedabad", "description": "Out for delivery" },
+        { "days_ago": 4, "time": "16:05", "location": "Ahmedabad", "description": "Delivered" }
+      ]
+    }
+  ]
+}

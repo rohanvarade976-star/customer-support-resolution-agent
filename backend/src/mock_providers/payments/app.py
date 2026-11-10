@@ -9,58 +9,31 @@ Run locally (from backend/):
     uv run uvicorn mock_providers.payments.app:create_app --factory --port 8001
 """
 
-import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
-from typing import Annotated
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, Request, Response
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, Response
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from mock_providers.common.admin import register_admin_routes
+from mock_providers.common.clock import Clock, utc_now
+from mock_providers.common.errors import ProviderError, register_error_handlers
+from mock_providers.common.faults import (
+    BASIC_MODES,
+    FaultInjector,
+    FaultMode,
+    install_fault_middleware,
+)
+from mock_providers.common.idempotency import (
+    IdempotencyKeyHeader,
+    check_idempotency_key,
+    key_reused_error,
+)
 from mock_providers.payments import storage
 from mock_providers.payments.config import PaymentsSettings
-from mock_providers.payments.faults import FaultInjector
 from mock_providers.payments.lifecycle import current_status
-from mock_providers.payments.schemas import (
-    ErrorBody,
-    FaultConfig,
-    FaultMode,
-    FaultState,
-    FinalOutcome,
-    RefundRequest,
-    RefundResponse,
-)
-
-Clock = Callable[[], datetime]
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-class ProviderError(Exception):
-    """Raised by a route to send a structured error response."""
-
-    def __init__(self, status_code: int, error_code: str, message: str, retryable: bool) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.body = ErrorBody(error_code=error_code, retryable=retryable, message=message)
-
-
-def error_response(
-    status_code: int, error_code: str, message: str, retryable: bool
-) -> JSONResponse:
-    body = ErrorBody(error_code=error_code, retryable=retryable, message=message)
-    return JSONResponse(status_code=status_code, content=body.model_dump())
-
-
-def _is_refunds_path(path: str) -> bool:
-    return path == "/refunds" or path.startswith("/refunds/")
+from mock_providers.payments.schemas import FinalOutcome, RefundRequest, RefundResponse
 
 
 def create_app(settings: PaymentsSettings | None = None, clock: Clock = utc_now) -> FastAPI:
@@ -69,7 +42,7 @@ def create_app(settings: PaymentsSettings | None = None, clock: Clock = utc_now)
     engine: AsyncEngine = create_async_engine(
         settings.database_url.get_secret_value(), pool_pre_ping=True
     )
-    faults = FaultInjector()
+    faults = FaultInjector(supported_modes=BASIC_MODES | {FaultMode.DECLINE})
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -78,6 +51,9 @@ def create_app(settings: PaymentsSettings | None = None, clock: Clock = utc_now)
         await engine.dispose()
 
     app = FastAPI(title="Mock payment provider", lifespan=lifespan)
+    install_fault_middleware(app, faults, "/refunds")
+    register_error_handlers(app)
+    register_admin_routes(app, faults, settings.app_env)
 
     def to_response(refund: storage.StoredRefund) -> RefundResponse:
         status = current_status(
@@ -98,70 +74,19 @@ def create_app(settings: PaymentsSettings | None = None, clock: Clock = utc_now)
             created_at=refund.created_at,
         )
 
-    # ------------------------------------------------------------ fault injection
-
-    @app.middleware("http")
-    async def inject_faults(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        if not _is_refunds_path(request.url.path):
-            return await call_next(request)  # admin routes are never faulted
-
-        mode, delay_ms = await faults.take(is_create=request.method == "POST")
-        if mode is FaultMode.SLOW:
-            await asyncio.sleep(delay_ms / 1000)
-        elif mode is FaultMode.ERROR:
-            return error_response(500, "PROVIDER_ERROR", "Internal provider error.", True)
-
-        request.state.decline = mode is FaultMode.DECLINE
-        response = await call_next(request)  # the route runs fully, including the DB write
-
-        if mode is FaultMode.DROP_RESPONSE:
-            # The work is done, but the caller never sees the real reply.
-            return error_response(504, "GATEWAY_TIMEOUT", "Provider did not respond in time.", True)
-        return response
-
-    # ------------------------------------------------------------ error handlers
-
-    @app.exception_handler(ProviderError)
-    async def handle_provider_error(_request: Request, exc: ProviderError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content=exc.body.model_dump())
-
-    @app.exception_handler(RequestValidationError)
-    async def handle_validation_error(
-        _request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
-        first = exc.errors()[0]
-        where = ".".join(str(part) for part in first["loc"])
-        return error_response(422, "VALIDATION_ERROR", f"{where}: {first['msg']}", False)
-
-    @app.exception_handler(StarletteHTTPException)
-    async def handle_http_error(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        code = "NOT_FOUND" if exc.status_code == 404 else "HTTP_ERROR"
-        return error_response(exc.status_code, code, str(exc.detail), False)
-
-    # ------------------------------------------------------------ refunds
-
     @app.post("/refunds", response_model=RefundResponse, status_code=201)
     async def create_refund(
         body: RefundRequest,
         request: Request,
         response: Response,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+        idempotency_key: IdempotencyKeyHeader = None,
     ) -> RefundResponse:
-        if not idempotency_key or len(idempotency_key) > 255:
-            raise ProviderError(
-                400,
-                "IDEMPOTENCY_KEY_MISSING",
-                "Idempotency-Key header (1-255 chars) is required.",
-                retryable=False,
-            )
-
-        decline = getattr(request.state, "decline", False)
+        key = check_idempotency_key(idempotency_key)
+        decline = getattr(request.state, "fault_mode", None) is FaultMode.DECLINE
         created = await storage.insert_refund(
             engine,
             provider_reference=f"re_{uuid4().hex}",
-            idempotency_key=idempotency_key,
+            idempotency_key=key,
             request=body,
             final_outcome=FinalOutcome.FAILED if decline else FinalOutcome.SUCCEEDED,
             created_at=clock(),
@@ -170,16 +95,11 @@ def create_app(settings: PaymentsSettings | None = None, clock: Clock = utc_now)
             return to_response(created)  # 201: brand-new refund
 
         # The key was used before. Same payload = replay; different payload = misuse.
-        existing = await storage.get_by_idempotency_key(engine, idempotency_key)
+        existing = await storage.get_by_idempotency_key(engine, key)
         if existing is None:  # cannot happen: rows are never deleted by the API
             raise ProviderError(500, "PROVIDER_ERROR", "Idempotency lookup failed.", True)
         if not existing.same_payload_as(body):
-            raise ProviderError(
-                409,
-                "IDEMPOTENCY_KEY_REUSED",
-                "This Idempotency-Key was already used with a different request body.",
-                retryable=False,
-            )
+            raise key_reused_error()
         response.status_code = 200  # replay: return the original refund
         return to_response(existing)
 
@@ -197,17 +117,5 @@ def create_app(settings: PaymentsSettings | None = None, clock: Clock = utc_now)
         if refund is None:
             raise ProviderError(404, "REFUND_NOT_FOUND", "No refund with this key.", False)
         return to_response(refund)
-
-    # ------------------------------------------------------------ admin (not in production)
-
-    if settings.app_env != "production":
-
-        @app.post("/_admin/faults", response_model=FaultState)
-        async def set_faults(config: FaultConfig) -> FaultState:
-            return await faults.configure(config)
-
-        @app.get("/_admin/faults", response_model=FaultState)
-        async def get_faults() -> FaultState:
-            return await faults.state()
 
     return app

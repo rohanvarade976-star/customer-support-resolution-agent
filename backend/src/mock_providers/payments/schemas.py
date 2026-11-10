@@ -2,9 +2,8 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 
 class ProviderRefundStatus(StrEnum):
@@ -43,42 +42,3 @@ class RefundResponse(BaseModel):
     reason: str
     status: ProviderRefundStatus
     created_at: datetime
-
-
-class ErrorBody(BaseModel):
-    """Every error the mock returns has this shape (matches the PRD failure format)."""
-
-    success: Literal[False] = False
-    error_code: str
-    retryable: bool
-    message: str
-
-
-class FaultMode(StrEnum):
-    NONE = "none"
-    SLOW = "slow"  # wait delay_ms, then handle normally
-    ERROR = "error"  # 500 without touching the database
-    DROP_RESPONSE = "drop_response"  # do the work, then reply 504 as if the reply was lost
-    DECLINE = "decline"  # newly created refunds end as "failed"
-
-
-class FaultConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    mode: FaultMode
-    # How many upcoming /refunds requests the fault applies to.
-    count: StrictInt = Field(default=1, ge=0)
-    # Only used by "slow".
-    delay_ms: StrictInt = Field(default=0, ge=0, le=60_000)
-
-    @model_validator(mode="after")
-    def _slow_needs_delay(self) -> "FaultConfig":
-        if self.mode is FaultMode.SLOW and self.delay_ms == 0:
-            raise ValueError("mode 'slow' needs delay_ms > 0")
-        return self
-
-
-class FaultState(BaseModel):
-    mode: FaultMode
-    remaining: int
-    delay_ms: int

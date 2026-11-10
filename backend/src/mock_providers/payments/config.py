@@ -1,27 +1,11 @@
-"""Settings for the mock payment provider.
-
-The mock is meant to behave like a separate third-party service, so it has its own
-settings and never imports from `support_agent`. It reads the same repo-root `.env`.
-"""
-
-from pathlib import Path
-from typing import Literal
+"""Settings for the mock payment provider."""
 
 from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# config.py -> payments -> mock_providers -> src -> backend -> repo root
-REPO_ROOT = Path(__file__).resolve().parents[4]
+from mock_providers.common.config import ProviderSettings
 
 
-class PaymentsSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=REPO_ROOT / ".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    app_env: Literal["local", "test", "production"] = "local"
+class PaymentsSettings(ProviderSettings):
     # Refunds are stored in the "mock_payments" schema of this database.
     database_url: SecretStr
 
