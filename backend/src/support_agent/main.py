@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from support_agent.api.routes import auth, health
+from support_agent.api.routes import auth, health, orders, tickets
 from support_agent.core.config import get_settings
 from support_agent.core.errors import register_error_handlers
 from support_agent.core.logging import configure_logging
@@ -30,4 +30,6 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(orders.router)
+    app.include_router(tickets.router)
     return app

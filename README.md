@@ -58,6 +58,32 @@ Invoke-RestMethod -Uri http://localhost:8000/me -Headers @{ Authorization = "Bea
 
 Every error has the same shape: `{"success": false, "error_code": "...", "message": "..."}`.
 
+### Orders and tickets
+
+Customers see only their own orders and tickets. Asking for someone else's order or ticket
+returns `404`, the same as one that does not exist. Reviewers get `403` on the customer-only
+routes (`/me/orders`, `POST /tickets`) and can list and read all tickets.
+
+```powershell
+$h = @{ Authorization = "Bearer $($login.access_token)" }   # Priya's token from above
+
+# Priya's orders (items and returns included), then one order
+Invoke-RestMethod -Uri http://localhost:8000/me/orders -Headers $h
+Invoke-RestMethod -Uri http://localhost:8000/me/orders/ORD-1001 -Headers $h
+
+# Create a ticket (order_number is optional; it must be one of your own orders)
+$body = @{ order_number = "ORD-1001"; message = "My headphones stopped working" } | ConvertTo-Json
+$ticket = Invoke-RestMethod -Method Post -Uri http://localhost:8000/tickets -Headers $h `
+  -ContentType "application/json" -Body $body
+
+# List your tickets (limit 1-100, default 20; offset default 0), then fetch one
+Invoke-RestMethod -Uri "http://localhost:8000/tickets?limit=10&offset=0" -Headers $h
+Invoke-RestMethod -Uri "http://localhost:8000/tickets/$($ticket.id)" -Headers $h
+```
+
+Log in as `anita@example.com` and call `GET /tickets` to see every customer's tickets,
+including `customer_id` and `customer_name`.
+
 ## Development commands (from `backend/`)
 
 ```powershell
