@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # First retry waits up to this long; each later retry doubles the limit.
     provider_backoff_base_seconds: float = Field(default=0.2, ge=0, le=10)
 
+    # Refund policy. The window runs from the order's delivered_at to the date the
+    # return was requested (or to today if no return exists yet). Day N is still inside.
+    refund_window_days: int = Field(default=30, ge=1, le=365)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:

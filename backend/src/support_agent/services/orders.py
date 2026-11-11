@@ -4,6 +4,8 @@ Asking for an order that is not yours looks exactly like asking for one that doe
 not exist: a 404, never a 403, so existence is not revealed (FR-2).
 """
 
+from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.core.errors import AppError
@@ -48,10 +50,17 @@ async def list_my_orders(session: AsyncSession, principal: Principal) -> list[Or
     return [_to_response(order) for order in found]
 
 
-async def get_my_order(
-    session: AsyncSession, principal: Principal, order_number: str
+async def get_order_for_customer(
+    session: AsyncSession, customer_id: UUID, order_number: str
 ) -> OrderResponse:
-    order = await orders.get_for_customer(session, principal.id, order_number)
+    """Shared by the API (customer id from the Principal) and the read tools (from the run)."""
+    order = await orders.get_for_customer(session, customer_id, order_number)
     if order is None:
         raise order_not_found()
     return _to_response(order)
+
+
+async def get_my_order(
+    session: AsyncSession, principal: Principal, order_number: str
+) -> OrderResponse:
+    return await get_order_for_customer(session, principal.id, order_number)
