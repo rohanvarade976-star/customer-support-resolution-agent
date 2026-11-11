@@ -43,3 +43,19 @@ async def find_id_for_customer(
         Order.customer_id == customer_id, Order.order_number == order_number
     )
     return await session.scalar(stmt)
+
+
+async def lock_by_id(session: AsyncSession, order_id: UUID) -> Order | None:
+    """SELECT ... FOR UPDATE on one order row (no children loaded).
+
+    Anyone else reserving a refund on this order waits until the caller commits, so
+    two refunds can never both pass the balance check. Keep the transaction short and
+    never make a network call while holding it.
+    """
+    stmt = (
+        select(Order)
+        .where(Order.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return await session.scalar(stmt)

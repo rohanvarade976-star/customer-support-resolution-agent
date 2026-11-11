@@ -47,10 +47,12 @@ class TicketStatus(StrEnum):
 
 
 class RunMode(StrEnum):
-    """Multi-agent is the real system; baseline is the single-agent comparison (FR-23)."""
+    """Multi-agent is the real system; baseline is the single-agent comparison (FR-23).
+    Manual runs are started by a reviewer through the API, with no LLM involved."""
 
     MULTI_AGENT = "multi_agent"
     BASELINE = "baseline"
+    MANUAL = "manual"
 
 
 class RunStatus(StrEnum):

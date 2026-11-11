@@ -11,6 +11,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.db.models import Customer, Order, Ticket
+from support_agent.domain.enums import TicketStatus
 
 
 @dataclass(frozen=True)
@@ -62,3 +63,8 @@ async def list_for_customer(
 async def list_all(session: AsyncSession, *, limit: int, offset: int) -> list[TicketRecord]:
     stmt = _newest_first(_select_records())
     return await _fetch(session, stmt.limit(limit).offset(offset))
+
+
+async def set_status(session: AsyncSession, ticket: Ticket, status: TicketStatus) -> None:
+    ticket.status = status
+    await session.flush()

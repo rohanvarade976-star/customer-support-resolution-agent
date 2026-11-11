@@ -11,8 +11,6 @@ This is a developer tool, not part of the request path, so it uses the ORM
 directly instead of going through repositories.
 """
 
-import hashlib
-import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -51,6 +49,7 @@ from support_agent.domain.enums import (
     TicketCategory,
     TicketStatus,
 )
+from support_agent.domain.proposals import payload_hash
 
 # seed.py -> db -> support_agent -> src -> backend
 SEED_FILE = Path(__file__).resolve().parents[3] / "data" / "seed" / "scenarios.json"
@@ -158,12 +157,6 @@ def load_scenarios(path: Path = SEED_FILE) -> SeedData:
 
 
 # ---------------------------------------------------------------- seeding
-
-
-def payload_hash(payload: dict[str, Any]) -> str:
-    """SHA-256 of the payload as canonical JSON (sorted keys, no spaces)."""
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _empty_counts() -> dict[str, int]:

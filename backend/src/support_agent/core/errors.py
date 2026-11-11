@@ -1,11 +1,14 @@
 """One error shape for the whole API: {success: false, error_code, message}.
 
+Some errors add a `details` object with machine-readable extras (for example the
+reason codes of a refused refund). It is left out of the body when there are none.
+
 Routes and services raise `AppError`; the handlers below turn it, validation
 errors, unknown routes and unexpected crashes into that same JSON body.
 """
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +23,7 @@ class ErrorBody(BaseModel):
     success: Literal[False] = False
     error_code: str
     message: str
+    details: dict[str, Any] | None = None
 
 
 class AppError(Exception):
@@ -31,25 +35,34 @@ class AppError(Exception):
         error_code: str,
         message: str,
         headers: dict[str, str] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
         self.message = message
         self.headers = headers
+        self.details = details
 
 
 def error_response(
-    status_code: int, error_code: str, message: str, headers: dict[str, str] | None = None
+    status_code: int,
+    error_code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+    details: dict[str, Any] | None = None,
 ) -> JSONResponse:
-    body = ErrorBody(error_code=error_code, message=message)
-    return JSONResponse(status_code=status_code, content=body.model_dump(), headers=headers)
+    body = ErrorBody(error_code=error_code, message=message, details=details)
+    content = body.model_dump(exclude_none=True)  # no "details" key unless there are some
+    return JSONResponse(status_code=status_code, content=content, headers=headers)
 
 
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
-        return error_response(exc.status_code, exc.error_code, exc.message, exc.headers)
+        return error_response(
+            exc.status_code, exc.error_code, exc.message, exc.headers, exc.details
+        )
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(

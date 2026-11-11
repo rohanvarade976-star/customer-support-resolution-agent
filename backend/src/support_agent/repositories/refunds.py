@@ -32,3 +32,44 @@ async def list_for_order(session: AsyncSession, order_id: UUID) -> list[RefundOp
         .order_by(RefundOperation.created_at, RefundOperation.id)
     )
     return list((await session.scalars(stmt)).all())
+
+
+async def get_for_proposal(session: AsyncSession, proposal_id: UUID) -> RefundOperation | None:
+    stmt = (
+        select(RefundOperation)
+        .where(RefundOperation.proposal_id == proposal_id)
+        .execution_options(populate_existing=True)
+    )
+    return await session.scalar(stmt)
+
+
+async def insert_reserved(
+    session: AsyncSession,
+    *,
+    order_id: UUID,
+    proposal_id: UUID,
+    amount_minor: int,
+    idempotency_key: str,
+) -> RefundOperation:
+    operation = RefundOperation(
+        order_id=order_id,
+        proposal_id=proposal_id,
+        amount_minor=amount_minor,
+        idempotency_key=idempotency_key,
+        status=RefundOperationStatus.RESERVED,
+    )
+    session.add(operation)
+    await session.flush()
+    return operation
+
+
+async def set_outcome(
+    session: AsyncSession,
+    operation: RefundOperation,
+    status: RefundOperationStatus,
+    provider_reference: str | None,
+) -> None:
+    operation.status = status
+    if provider_reference is not None:
+        operation.provider_reference = provider_reference
+    await session.flush()
