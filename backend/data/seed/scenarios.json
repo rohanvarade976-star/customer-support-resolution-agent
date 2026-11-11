@@ -1,4 +1,8 @@
 {
+  "staff": [
+    { "name": "Anita Desai", "email": "anita@example.com", "role": "reviewer" },
+    { "name": "Karan Malhotra", "email": "karan@example.com", "role": "reviewer" }
+  ],
   "customers": [
     {
       "name": "Priya Sharma",

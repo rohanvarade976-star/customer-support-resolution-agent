@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, String, UniqueConstraint, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from support_agent.db.base import Base
 from support_agent.db.models._columns import CreatedAt, UpdatedAt, UUIDPrimaryKey, str_enum
@@ -27,6 +27,15 @@ class Order(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
     paid_amount_minor: Mapped[int] = mapped_column(BigInteger)  # paise
     placed_at: Mapped[datetime] = mapped_column(server_default=func.now())
     delivered_at: Mapped[datetime | None]
+
+    # lazy="raise": touching these without loading them first is an error, not a hidden
+    # extra query. Repositories load them up front with selectinload (no N+1).
+    items: Mapped[list["OrderItem"]] = relationship(
+        order_by="(OrderItem.created_at, OrderItem.id)", lazy="raise"
+    )
+    returns: Mapped[list["Return"]] = relationship(
+        order_by="(Return.created_at, Return.id)", lazy="raise"
+    )
 
 
 class OrderItem(UUIDPrimaryKey, CreatedAt, Base):

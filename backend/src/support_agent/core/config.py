@@ -13,6 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # config.py -> core -> support_agent -> src -> backend -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
+MIN_JWT_SECRET_LENGTH = 32  # HS256 needs a 256-bit key to be safe
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -34,6 +36,12 @@ class Settings(BaseSettings):
     # without it, integration tests are skipped locally (and fail in CI).
     test_database_url: SecretStr | None = None
 
+    # Signs and verifies login tokens. Required, and long enough to resist guessing.
+    jwt_secret: SecretStr
+    access_token_minutes: int = Field(default=60, ge=1, le=1440)
+    # Password given to every seeded demo account. Only the seed script needs it.
+    demo_password: SecretStr | None = None
+
     # External providers (the mocks locally). Used only by `integrations/`.
     payments_base_url: str = "http://localhost:8001"
     shipping_base_url: str = "http://localhost:8002"
@@ -45,11 +53,24 @@ class Settings(BaseSettings):
     # First retry waits up to this long; each later retry doubles the limit.
     provider_backoff_base_seconds: float = Field(default=0.2, ge=0, le=10)
 
+    # Refund policy. The window runs from the order's delivered_at to the date the
+    # return was requested (or to today if no return exists yet). Day N is still inside.
+    refund_window_days: int = Field(default=30, ge=1, le=365)
+    # How long a reviewer has to decide a refund proposal before it needs a new one.
+    approval_ttl_minutes: int = Field(default=60, ge=1, le=1440)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
         if not value.startswith(("http://", "https://")):
             raise ValueError("provider base URLs must start with 'http://' or 'https://'")
+        return value
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def _require_long_secret(cls, value: SecretStr) -> SecretStr:
+        if len(value.get_secret_value()) < MIN_JWT_SECRET_LENGTH:
+            raise ValueError(f"JWT_SECRET must be at least {MIN_JWT_SECRET_LENGTH} characters")
         return value
 
     @field_validator("database_url", "test_database_url")

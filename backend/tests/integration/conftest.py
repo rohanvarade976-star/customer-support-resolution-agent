@@ -8,18 +8,23 @@ never see each other's rows.
 import asyncio
 import os
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from support_agent.api.deps import get_session
 from support_agent.core.config import get_settings
+from support_agent.core.security import hash_password
+from support_agent.main import create_app
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -107,3 +112,62 @@ async def session(migrated_database: str) -> AsyncIterator[AsyncSession]:
             await db.close()
             await outer.rollback()
     await engine.dispose()
+
+
+@pytest.fixture
+def app(session: AsyncSession) -> FastAPI:
+    """The real app, using the rolled-back test session instead of the real database."""
+    application = create_app()
+
+    async def test_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    application.dependency_overrides[get_session] = test_session
+    return application
+
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """An HTTP client that calls the app in-process (no server, no network)."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        yield http
+
+
+@pytest.fixture(scope="session")
+def demo_password() -> str:
+    """The password of every seeded account in these tests (a test value, not a secret)."""
+    return "demo-pass-for-tests"
+
+
+@pytest.fixture(scope="session")
+def demo_password_hash(demo_password: str) -> str:
+    # Hashed once per run; Argon2 is slow on purpose.
+    return hash_password(demo_password)
+
+
+@pytest.fixture
+def login(
+    client: httpx.AsyncClient, demo_password: str
+) -> Callable[..., Awaitable[httpx.Response]]:
+    """login(email, password=None): POST /auth/login and return the raw response."""
+
+    async def do_login(email: str, password: str | None = None) -> httpx.Response:
+        body = {"email": email, "password": demo_password if password is None else password}
+        return await client.post("/auth/login", json=body)
+
+    return do_login
+
+
+@pytest.fixture
+def auth_headers(
+    login: Callable[..., Awaitable[httpx.Response]],
+) -> Callable[[str], Awaitable[dict[str, str]]]:
+    """auth_headers(email): log in as a seeded account and return its Authorization header."""
+
+    async def headers_for(email: str) -> dict[str, str]:
+        response = await login(email)
+        assert response.status_code == 200
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    return headers_for

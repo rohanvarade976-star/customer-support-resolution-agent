@@ -11,8 +11,6 @@ This is a developer tool, not part of the request path, so it uses the ORM
 directly instead of going through repositories.
 """
 
-import hashlib
-import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -34,6 +32,7 @@ from support_agent.db.models import (
     OrderItem,
     RefundOperation,
     Return,
+    StaffUser,
     Ticket,
     WorkflowRun,
 )
@@ -46,9 +45,11 @@ from support_agent.domain.enums import (
     RefundOperationStatus,
     ReturnStatus,
     RunStatus,
+    StaffRole,
     TicketCategory,
     TicketStatus,
 )
+from support_agent.domain.proposals import payload_hash
 
 # seed.py -> db -> support_agent -> src -> backend
 SEED_FILE = Path(__file__).resolve().parents[3] / "data" / "seed" / "scenarios.json"
@@ -68,6 +69,7 @@ SEED_TABLES: list[type[Base]] = [
     OrderItem,
     Order,
     Customer,
+    StaffUser,
 ]
 
 APPROVAL_TTL = timedelta(hours=24)
@@ -139,7 +141,14 @@ class SeedCustomer(_SeedModel):
     orders: list[SeedOrder]
 
 
+class SeedStaff(_SeedModel):
+    name: str
+    email: str
+    role: StaffRole
+
+
 class SeedData(_SeedModel):
+    staff: list[SeedStaff] = []
     customers: list[SeedCustomer]
 
 
@@ -150,12 +159,6 @@ def load_scenarios(path: Path = SEED_FILE) -> SeedData:
 # ---------------------------------------------------------------- seeding
 
 
-def payload_hash(payload: dict[str, Any]) -> str:
-    """SHA-256 of the payload as canonical JSON (sorted keys, no spaces)."""
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
 def _empty_counts() -> dict[str, int]:
     return {model.__tablename__: 0 for model in SEED_TABLES}
 
@@ -163,9 +166,11 @@ def _empty_counts() -> dict[str, int]:
 class _Seeder:
     """Holds `now`, the session and the running counts while one seed runs."""
 
-    def __init__(self, session: AsyncSession, now: datetime) -> None:
+    def __init__(self, session: AsyncSession, now: datetime, password_hash: str) -> None:
         self.session = session
         self.now = now
+        # One hash shared by every demo account (they all use the same demo password).
+        self.password_hash = password_hash
         self.created = _empty_counts()
 
     def days_ago(self, days: int) -> datetime:
@@ -181,14 +186,25 @@ class _Seeder:
     async def customer(self, data: SeedCustomer) -> Customer:
         existing = await self.session.scalar(select(Customer).where(Customer.email == data.email))
         if existing is not None:
+            if existing.password_hash is None:  # seeded before logins existed
+                existing.password_hash = self.password_hash
+                await self.session.flush()
             return existing
         return await self.add(
             Customer(
                 name=data.name,
                 email=data.email,
                 external_auth_subject=data.external_auth_subject,
+                password_hash=self.password_hash,
             )
         )
+
+    async def staff(self, data: SeedStaff) -> None:
+        exists = await self.session.scalar(
+            select(StaffUser.id).where(StaffUser.email == data.email)
+        )
+        if exists is None:
+            await self.add(StaffUser(password_hash=self.password_hash, **data.model_dump()))
 
     async def order(self, customer: Customer, data: SeedOrder) -> None:
         exists = await self.session.scalar(
@@ -298,13 +314,18 @@ class _Seeder:
         )
 
 
-async def seed(session: AsyncSession, data: SeedData, now: datetime) -> dict[str, int]:
+async def seed(
+    session: AsyncSession, data: SeedData, now: datetime, password_hash: str
+) -> dict[str, int]:
     """Insert any scenario rows that are missing. Returns rows created per table.
 
-    Customers are matched on email and orders on order_number, so running this
-    twice creates nothing the second time.
+    Customers and staff are matched on email and orders on order_number, so running
+    this twice creates nothing the second time. `password_hash` is the Argon2 hash
+    of the demo password; it is also filled in for customers that have none yet.
     """
-    seeder = _Seeder(session, now)
+    seeder = _Seeder(session, now, password_hash)
+    for staff_data in data.staff:
+        await seeder.staff(staff_data)
     for customer_data in data.customers:
         customer = await seeder.customer(customer_data)
         for order_data in customer_data.orders:
@@ -349,6 +370,7 @@ async def reset(session: AsyncSession, data: SeedData) -> dict[str, int]:
         OrderItem: OrderItem.order_id.in_(order_ids),
         Order: Order.id.in_(order_ids),
         Customer: Customer.id.in_(customer_ids),
+        StaffUser: StaffUser.email.in_([staff.email for staff in data.staff]),
     }
     deleted = _empty_counts()
     for model in SEED_TABLES:

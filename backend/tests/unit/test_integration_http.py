@@ -78,6 +78,7 @@ def make_settings() -> Settings:
     return Settings(
         _env_file=None,
         database_url=SecretStr("postgresql+asyncpg://user:pw@localhost:5432/unused"),
+        jwt_secret=SecretStr("x" * 32),
         provider_connect_timeout_seconds=1.0,
         provider_read_timeout_seconds=1.0,
         provider_max_attempts=3,

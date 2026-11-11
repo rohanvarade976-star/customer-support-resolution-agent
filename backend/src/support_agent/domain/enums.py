@@ -47,10 +47,12 @@ class TicketStatus(StrEnum):
 
 
 class RunMode(StrEnum):
-    """Multi-agent is the real system; baseline is the single-agent comparison (FR-23)."""
+    """Multi-agent is the real system; baseline is the single-agent comparison (FR-23).
+    Manual runs are started by a reviewer through the API, with no LLM involved."""
 
     MULTI_AGENT = "multi_agent"
     BASELINE = "baseline"
+    MANUAL = "manual"
 
 
 class RunStatus(StrEnum):
@@ -106,3 +108,18 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class StaffRole(StrEnum):
+    """Roles stored on staff_users. Customers are not staff, so they are not listed."""
+
+    REVIEWER = "reviewer"
+    ADMIN = "admin"
+
+
+class Role(StrEnum):
+    """Every role a logged-in user can have (the `role` claim in the JWT)."""
+
+    CUSTOMER = "customer"
+    REVIEWER = "reviewer"
+    ADMIN = "admin"
