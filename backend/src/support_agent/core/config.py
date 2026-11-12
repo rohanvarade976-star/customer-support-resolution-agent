@@ -75,11 +75,47 @@ class Settings(BaseSettings):
     # Tuned for BAAI/bge-small-en-v1.5 with scripts/eval_retrieval.py.
     policy_min_similarity: float = Field(default=0.55, ge=-1.0, le=1.0)
 
+    # LLM (see llm/providers.py). "groq": Groq first, Gemini as fallback if its key is
+    # set. "fake": the scripted offline fake (tests and CI; never calls a real API).
+    llm_provider: Literal["groq", "fake"] = "groq"
+    # Optional here so the app and tests start without them; building a real LLM
+    # client without the needed key raises a clear LLMConfigError.
+    groq_api_key: SecretStr | None = None
+    gemini_api_key: SecretStr | None = None
+    # "small" = fast model for simple steps; "large" = stronger model for reasoning.
+    # All four support tool calling. The Groq pair was checked against the models our
+    # key can actually use (2026-11-12); the Llama models in Groq's docs were not listed.
+    groq_small_model: str = "openai/gpt-oss-20b"
+    groq_large_model: str = "openai/gpt-oss-120b"
+    # gpt-oss models "think" before answering, and thinking counts as output tokens.
+    # "low" keeps it short so a small max_tokens still leaves room for the answer.
+    # Leave blank for models without reasoning (the setting is then not sent).
+    groq_reasoning_effort: Literal["low", "medium", "high"] | None = "low"
+    gemini_small_model: str = "gemini-3.5-flash-lite"
+    gemini_large_model: str = "gemini-3.6-flash"
+    # 0 = most predictable answers. Agents can override per call where it helps.
+    llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    llm_max_tokens: int = Field(default=1024, ge=1, le=32768)
+    llm_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    # Tries per provider (including the first) before falling back to the next one.
+    llm_max_attempts: int = Field(default=3, ge=1, le=10)
+    # Backoff: random wait up to base * 2^(attempt-1), never more than the max.
+    llm_backoff_base_seconds: float = Field(default=1.0, ge=0, le=30)
+    llm_backoff_max_seconds: float = Field(default=20.0, ge=0, le=120)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
         if not value.startswith(("http://", "https://")):
             raise ValueError("provider base URLs must start with 'http://' or 'https://'")
+        return value
+
+    @field_validator("groq_api_key", "gemini_api_key", "groq_reasoning_effort", mode="before")
+    @classmethod
+    def _blank_means_unset(cls, value: object) -> object:
+        # `GEMINI_API_KEY=` (blank, as in .env.example) means "not configured".
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @field_validator("jwt_secret")

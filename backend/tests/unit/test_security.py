@@ -84,7 +84,7 @@ def test_tampered_payload_is_rejected() -> None:
 def test_unsigned_alg_none_token_is_rejected() -> None:
     unsigned = jwt.encode(
         {"sub": "seed|priya", "role": "admin", "iat": 1, "exp": 9999999999},
-        key=None,
+        key="",  # PyJWT's "none" algorithm takes an empty key (typed as str)
         algorithm="none",
     )
 

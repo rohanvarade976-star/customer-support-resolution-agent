@@ -347,3 +347,80 @@ larger question set than 15, before changing anything:
 
 Fifteen questions are too few to separate small changes: one question is about 7
 percentage points of hit@1. The eval set should grow before either option is judged.
+
+---
+
+## ADR-007: The LLM client: forced tool calls for structured output, one retry loop, Groq then Gemini
+
+- **Date:** 2026-11-12
+- **Status:** Accepted
+- **Milestone:** M5
+
+### Context
+
+Every agent needs to call an LLM. The free tiers rate-limit often, providers have
+outages, and models sometimes return output that does not fit the shape we asked for.
+The PRD requires: back off, fall back to the secondary provider, then pause ("Failure
+handling"); one repair attempt for invalid output; every model output checked against a
+Pydantic schema; providers and models swappable through configuration; and token usage
+recorded per call. Customer text and model output must never reach logs.
+
+### Decision
+
+1. **Our own interface.** Agents depend on `LLMClient` (`llm/client.py`) with
+   `chat(messages, tools)` and `structured(messages, Schema)`, and our own message and
+   result types (`llm/types.py`). LangChain's model layer (`ChatGroq`,
+   `ChatGoogleGenerativeAI`, `bind_tools`) is used only inside the adapters
+   (`llm/providers.py`).
+2. **Structured output is a forced tool call.** The schema is offered as one tool with a
+   snake_case name (`TriageResult` -> `triage_result`) and the model must call it. We
+   validate the arguments with Pydantic ourselves. If they are invalid, the model gets one
+   repair message listing field locations and rules (not the invalid values). If they are
+   still invalid, `StructuredOutputError`.
+3. **One retry loop.** LangChain's and the SDKs' own retries are switched off. Our client
+   retries rate limits and transient errors (timeouts, connection failures, 5xx) up to
+   `LLM_MAX_ATTEMPTS` per provider with full-jitter exponential backoff, honouring
+   Retry-After and capped at `LLM_BACKOFF_MAX_SECONDS`. Then it moves to the next provider:
+   Groq first, Gemini only if `GEMINI_API_KEY` is set. When all fail, `LLMUnavailableError`
+   (the workflow will pause the run, M7). Bad requests, bad keys and unknown models are
+   not retried and do not fall back: retrying cannot fix them.
+4. **Errors carry no content.** Adapters raise our errors `from None`. Groq's error body
+   includes `failed_generation` (the model's output, so possibly customer text); chaining
+   the SDK error would put it into any logged traceback. Our messages hold only the HTTP
+   status, Groq's short error code, or an exception class name.
+5. **Usage log.** One `llm_call` line per attempt: provider, model, tier, attempt,
+   outcome, input/output/reasoning tokens, latency, and the error class on failure.
+6. **Models (config, not code).** Groq small `openai/gpt-oss-20b`, large
+   `openai/gpt-oss-120b`, with `GROQ_REASONING_EFFORT=low`. Gemini small
+   `gemini-3.5-flash-lite`, large `gemini-3.6-flash`.
+
+### Alternatives considered
+
+- `with_structured_output` from LangChain: its parsing and retries happen out of sight,
+  and its default method differs by provider. We want our own validation, exactly one
+  visible repair, and the same mechanism on both providers.
+- JSON mode / JSON-schema response format: not supported by every Groq model, while tool
+  calling is supported by every model we would pick for agents.
+- The Llama models (`llama-3.1-8b-instant`, `llama-3.3-70b-versatile`), the original plan:
+  Groq's docs still list them as production, but our API key's model list does not
+  include them and calls return 404 `model_not_found`.
+- A retry library (tenacity): a dozen lines of our own loop are easy to read and log, and
+  match the provider clients from M2.
+
+### Consequences
+
+- Agents and tests never import LangChain; switching providers or models is config only.
+- Tests use the scripted `FakeProvider` underneath the real client, so retry, fallback and
+  repair logic is tested without any network call.
+- **gpt-oss models reason before answering, and reasoning counts as output tokens.** At
+  the default effort a 60-token limit was used up by reasoning and the answer came back
+  empty. Keep `GROQ_REASONING_EFFORT=low` unless an eval shows a step needs more, and give
+  every call enough `max_tokens` for reasoning plus the answer. Reasoning tokens are
+  logged separately to make this visible.
+- gpt-oss models do not make parallel tool calls; the investigator (M5) calls tools one
+  at a time, which also keeps its step limit simple.
+- Temperature 0 is not fully deterministic on gpt-oss (5 runs gave 2 different answers in
+  the playground). Tests must never depend on the real model; evals must allow for this.
+- The Gemini fallback is untested against the real API until a `GEMINI_API_KEY` is added.
+- Dropping the SDK error cause makes some provider failures harder to debug. The HTTP
+  status and Groq's error code are kept for that reason.
