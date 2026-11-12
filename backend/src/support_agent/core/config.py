@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     llm_backoff_base_seconds: float = Field(default=1.0, ge=0, le=30)
     llm_backoff_max_seconds: float = Field(default=20.0, ge=0, le=120)
 
+    # The classifier's confidence (0-1) needed to go straight to investigation. Below it,
+    # the run asks the customer to clarify. Tune with scripts/eval_classifier.py.
+    classifier_confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:

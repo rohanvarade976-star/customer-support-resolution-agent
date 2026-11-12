@@ -3,6 +3,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.db.models import WorkflowRun
@@ -28,6 +29,35 @@ async def create_manual(
     session.add(run)
     await session.flush()
     return run
+
+
+async def create_agent_run(
+    session: AsyncSession, *, ticket_id: UUID, mode: RunMode, now: datetime
+) -> WorkflowRun:
+    """A run driven by the LangGraph workflow. thread_id is its checkpointer key (M7)."""
+    run_id = uuid4()
+    run = WorkflowRun(
+        id=run_id,
+        ticket_id=ticket_id,
+        thread_id=f"run-{run_id}",
+        mode=mode,
+        status=RunStatus.CREATED,
+        started_at=now,
+    )
+    session.add(run)
+    await session.flush()
+    return run
+
+
+async def has_unfinished_run(session: AsyncSession, ticket_id: UUID) -> bool:
+    """True if the ticket has a run that is not completed, escalated or failed."""
+    stmt = select(
+        exists().where(
+            WorkflowRun.ticket_id == ticket_id,
+            WorkflowRun.status.not_in(FINISHED_STATUSES),
+        )
+    )
+    return bool(await session.scalar(stmt))
 
 
 async def get(session: AsyncSession, run_id: UUID) -> WorkflowRun | None:

@@ -8,6 +8,7 @@ Nothing is committed here; the caller commits together with its own changes.
 """
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,7 +55,13 @@ async def set_ticket_status(
 
 
 async def set_run_status(
-    session: AsyncSession, run: WorkflowRun, status: RunStatus, *, now: datetime, actor: str
+    session: AsyncSession,
+    run: WorkflowRun,
+    status: RunStatus,
+    *,
+    now: datetime,
+    actor: str,
+    details: dict[str, Any] | None = None,  # extra redacted fields for the event payload
 ) -> None:
     if run.status == status:
         return
@@ -66,5 +73,5 @@ async def set_run_status(
             run_id=run.id,
             actor=actor,
             event_type=event,
-            payload={"run_id": str(run.id), "status": status.value},
+            payload={"run_id": str(run.id), "status": status.value, **(details or {})},
         )
