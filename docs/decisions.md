@@ -264,3 +264,86 @@ This note records how the decision above was built. The decision itself is uncha
 - Consequence: eligibility now needs the policy documents in the database. A fresh
   environment must run `scripts/ingest_policies.py` after migrating, or every order is
   `NO_APPLICABLE_POLICY` (safe: nothing is refunded, cases escalate).
+
+---
+
+## ADR-006: Keyword search keeps all-words matching
+
+- **Date:** 2026-11-12
+- **Status:** Accepted
+- **Milestone:** M4
+
+### Context
+
+Policy retrieval is hybrid (M4 Task 2): a vector search and a Postgres full-text keyword
+search, merged with Reciprocal Rank Fusion (k=60). The keyword query is built with
+`websearch_to_tsquery`, which requires **every** word of the query to appear in a
+section. On the retrieval eval (`evals/datasets/retrieval_questions.json`, 15 questions,
+real embedder BAAI/bge-small-en-v1.5), full customer questions almost never matched every
+word, so the keyword search returned nothing and the ranking came from the vector search
+alone. That looked like a missed opportunity, so we tried matching **any** word.
+
+### Experiment
+
+The customer's text was reduced to its words (letters and digits only, so quotes and `-`
+could not act as operators) and joined with `or` before `websearch_to_tsquery`, e.g.
+"How long to return?" became `How or long or to or return`. Nothing else changed.
+
+| | All words (baseline) | Any word (experiment) |
+|---|---|---|
+| hit@1 | 12/15 (80%) | 12/15 (80%) |
+| hit@3 | 15/15 (100%) | 15/15 (100%) |
+| Keyword search contributed | never | on most questions |
+
+- **Fixed** (now first): `rahul-exception` (`escalation_exceptions_v1:section_2`) and
+  `escalation-when` (`escalation_exceptions_v1:section_3`).
+- **Broke** (no longer first, still in the top 3): `vikram-failed-inspection`
+  (`damaged_products_v1:section_5`, beaten by `return_processing_v1:section_4`) and
+  `aditya-inspection-pending` (`return_processing_v1:section_4`, beaten by
+  `refund_policy_v2:section_4`).
+- `meera-how-to-return` missed in both runs.
+
+Off-topic rejection was unchanged. On the full `search_policy` service, pizza, washing
+machines in Germany and the weather returned no relevant evidence either way.
+"Can I pay with cryptocurrency?" returned three weak passages (similarity 0.55–0.58)
+either way. The threshold is applied to vector similarity, which this change does not
+touch.
+
+### Why it did not help
+
+The policies share one domain vocabulary: return, refund, order, inspection, delivered.
+With any-word matching, almost every section matches some word of almost every question,
+so the keyword ranking mostly echoes the vector ranking. Where it differs, a frequent word
+such as "inspection" pulls a section that mentions it often above the section that
+actually answers the question. The result reshuffles close calls in both directions
+instead of improving them.
+
+### Decision
+
+Keep all-words matching (`websearch_to_tsquery` on the raw query). In practice the keyword
+search then contributes only when a question uses a section's exact terms. This is cheap,
+safe against syntax errors, and costs nothing on the eval. The rule we set before the
+experiment was to adopt it only if hit@1 improved without making off-topic rejection
+worse. It did not improve hit@1, so the change was reverted.
+
+### Alternatives considered
+
+- Any-word (OR) matching — tried above; same hit@1, different misses.
+- Dropping keyword search entirely — would give the same results on this eval, but keeps
+  no way to catch exact terms (reason codes, "UPI", product words) that the small
+  embedding model may blur. It costs little to keep.
+
+### Consequences and follow-ups
+
+Retrieval quality currently rests on the vector search. Two options to evaluate, on a
+larger question set than 15, before changing anything:
+
+1. **Weight the vector ranking higher in fusion** (weighted RRF), so keyword matches
+   break ties instead of overriding a clearly better meaning match.
+2. **Raise `POLICY_MIN_SIMILARITY` to about 0.6**, so weak matches such as the
+   cryptocurrency question report no relevant evidence. Check that this does not drop
+   correct answers (the lowest correct first-place similarity on the current set must
+   stay above it).
+
+Fifteen questions are too few to separate small changes: one question is about 7
+percentage points of hit@1. The eval set should grow before either option is judged.

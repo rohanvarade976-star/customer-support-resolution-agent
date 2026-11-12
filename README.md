@@ -26,8 +26,15 @@ cd backend
 uv sync                           # install Python 3.12 + dependencies
 uv run pre-commit install         # run lint/type checks before each commit
 uv run alembic upgrade head       # create the tables
+uv run python scripts/ingest_policies.py  # load the policies (safe to re-run)
 uv run python scripts/seed_db.py  # add the demo customers and orders (safe to re-run)
 ```
+
+Don't skip the policy ingestion. Refund eligibility takes the refund window from the
+refund policy version in force on the date each order was placed (ADR-005 in
+`docs/decisions.md`). Without the policy rows, no policy applies to any order, so every
+order is refused with `NO_APPLICABLE_POLICY`. That is safe, because no money moves, but
+no refund can ever be proposed.
 
 Before running the API or the seed, set these in `.env` (see `.env.example`):
 
@@ -172,6 +179,10 @@ The support policies live in `data/policies/` as Markdown files with YAML front 
 (`policy_key`, `version`, `title`, `effective_from`, `effective_to`, and
 `refund_window_days` for the refund policy). Each `## N. Title` section becomes one
 searchable chunk with a stable citation id such as `refund_policy_v2:section_3`.
+
+Run this right after every `alembic upgrade head` (it is part of Local setup above).
+Eligibility reads each order's refund window from these rows. Without them, every order
+gets `NO_APPLICABLE_POLICY`.
 
 ```powershell
 uv run alembic upgrade head
