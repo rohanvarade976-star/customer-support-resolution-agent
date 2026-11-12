@@ -4,7 +4,7 @@ Each test runs as a seeded customer through the registry, exactly as an agent wo
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mock_providers.shipping.app import create_app as create_shipping_app
 from mock_providers.shipping.config import ShippingSettings
 from support_agent.core.config import Settings
-from support_agent.db.models import Customer
+from support_agent.db.models import Customer, Order, PolicyDocument, Return
 from support_agent.db.seed import load_scenarios, seed
 from support_agent.domain.eligibility import EligibilityDecision, ReasonCode
 from support_agent.domain.enums import (
@@ -27,6 +27,7 @@ from support_agent.domain.enums import (
     ReturnStatus,
 )
 from support_agent.integrations.shipping import Shipment, ShippingClient
+from support_agent.rag.embeddings import FakeEmbedder
 from support_agent.schemas.order_status import (
     PaymentStatusResponse,
     RefundableBalanceResponse,
@@ -67,7 +68,7 @@ class CountingTransport(httpx.AsyncBaseTransport):
 
 
 @pytest.fixture(autouse=True)
-async def seeded(session: AsyncSession, demo_password_hash: str) -> None:
+async def seeded(session: AsyncSession, demo_password_hash: str, ingested_policies: None) -> None:
     await seed(session, load_scenarios(), NOW, demo_password_hash)
 
 
@@ -91,7 +92,9 @@ async def make_ctx(
         settings = make_settings()
         client = ShippingClient(settings, transport=transport or shipping_transport)
         clients.append(client)
-        return ToolContext(session, customer_id, settings, client, clock=lambda: NOW)
+        return ToolContext(
+            session, customer_id, settings, client, FakeEmbedder(), clock=lambda: NOW
+        )
 
     yield build
     for client in clients:
@@ -148,23 +151,91 @@ async def test_check_refund_eligibility_for_every_seeded_order(
     assert decision.reasons == reasons
 
 
-async def test_refund_window_setting_changes_the_outcome(make_ctx: MakeCtx) -> None:
-    # Rahul's order was delivered 60 days ago; a 90-day window lets only the window reason go.
-    ctx = await make_ctx("rahul")
-    wide = ToolContext(
-        ctx.session,
-        ctx.customer_id,
-        make_settings(refund_window_days=90),
-        ctx.shipping_client,
-        clock=lambda: NOW,
+async def test_refund_window_comes_from_the_policy_row(run: Run, session: AsyncSession) -> None:
+    # Rahul's order (placed 64 days ago, so under v2) was delivered 60 days ago. Widening
+    # v2's window in the database to 90 days removes only the window reason: the number
+    # comes from the policy in force, not from code or config (ADR-005).
+    v2 = await session.scalar(
+        select(PolicyDocument).where(
+            PolicyDocument.policy_key == "refund_policy", PolicyDocument.version == "v2"
+        )
     )
+    assert v2 is not None
+    v2.refund_window_days = 90
+    await session.flush()
 
     decision = expect(
-        await registry.execute("check_refund_eligibility", wide, {"order_number": "ORD-1004"}),
-        EligibilityDecision,
+        await run("rahul", "check_refund_eligibility", "ORD-1004"), EligibilityDecision
     )
 
     assert decision.reasons == [R.NO_RETURN]
+
+
+async def add_returned_order(
+    session: AsyncSession, customer: str, order_number: str, placed_at: datetime, return_day: int
+) -> None:
+    """A delivered order whose return was requested `return_day` days after delivery, then
+    received and passed inspection: eligible unless the window or policy says otherwise."""
+    customer_id = await session.scalar(
+        select(Customer.id).where(Customer.email == f"{customer}@example.com")
+    )
+    assert customer_id is not None
+    delivered_at = placed_at + timedelta(days=5)
+    order = Order(
+        order_number=order_number,
+        customer_id=customer_id,
+        status=OrderStatus.DELIVERED,
+        paid_amount_minor=150000,
+        placed_at=placed_at,
+        delivered_at=delivered_at,
+    )
+    session.add(order)
+    await session.flush()
+    requested_at = delivered_at + timedelta(days=return_day)
+    session.add(
+        Return(
+            order_id=order.id,
+            status=ReturnStatus.RECEIVED,
+            received_at=requested_at + timedelta(days=3),
+            inspection_status=InspectionStatus.PASSED,
+            created_at=requested_at,
+        )
+    )
+    await session.flush()
+
+
+async def test_june_2026_order_gets_the_15_day_window_of_policy_v1(
+    run: Run, session: AsyncSession
+) -> None:
+    # Placed 2026-06-20, so refund policy v1 (15 days) applies. A return on day 20 is
+    # inside v2's 30 days but outside v1's 15; a return on day 14 is inside both.
+    placed = datetime(2026, 6, 20, 10, 0, tzinfo=UTC)
+    await add_returned_order(session, "priya", "ORD-2001", placed, return_day=20)
+    await add_returned_order(session, "priya", "ORD-2002", placed, return_day=14)
+
+    late = expect(await run("priya", "check_refund_eligibility", "ORD-2001"), EligibilityDecision)
+    in_time = expect(
+        await run("priya", "check_refund_eligibility", "ORD-2002"), EligibilityDecision
+    )
+
+    assert (late.eligible, late.reasons) == (False, [R.OUTSIDE_RETURN_WINDOW])
+    assert (in_time.eligible, in_time.refundable_amount_minor) == (True, 150000)
+
+
+async def test_order_placed_before_any_refund_policy_has_no_applicable_policy(
+    run: Run, session: AsyncSession
+) -> None:
+    # Refund policy v1 starts on 2025-01-01. Apart from that, this order is eligible.
+    placed = datetime(2024, 12, 1, 10, 0, tzinfo=UTC)
+    await add_returned_order(session, "priya", "ORD-2003", placed, return_day=2)
+
+    decision = expect(
+        await run("priya", "check_refund_eligibility", "ORD-2003"), EligibilityDecision
+    )
+
+    assert decision.eligible is False
+    assert decision.refundable_amount_minor == 0
+    assert decision.reasons == [R.NO_APPLICABLE_POLICY]
 
 
 # ---------------------------------------------------------------- the other read tools
@@ -235,6 +306,10 @@ READ_TOOLS = [
     "get_refundable_balance",
     "check_refund_eligibility",
 ]
+
+
+def test_registry_has_every_read_tool_and_search_policy() -> None:
+    assert registry.names == [*READ_TOOLS, "search_policy"]
 
 
 @pytest.mark.parametrize("tool", READ_TOOLS)
@@ -337,12 +412,18 @@ async def test_unexpected_failure_in_a_real_tool_is_generic(
 def test_registry_exports_schemas_for_every_tool() -> None:
     schemas = {schema["name"]: schema for schema in registry.export_schemas()}
 
-    assert set(schemas) == set(READ_TOOLS)
+    assert set(schemas) == {*READ_TOOLS, "search_policy"}
     for schema in schemas.values():
         params = schema["parameters"]
         assert schema["description"]
         assert params["additionalProperties"] is False
-        assert list(params["properties"]) == ["order_number"]  # no customer id, ever
-        assert params["required"] == ["order_number"]
-        assert "customer_id" not in str(params)
+        assert "customer_id" not in str(params)  # no customer id, ever
         assert schema["output_schema"]["type"] == "object"
+    for name in READ_TOOLS:
+        params = schemas[name]["parameters"]
+        assert list(params["properties"]) == ["order_number"]
+        assert params["required"] == ["order_number"]
+    search = schemas["search_policy"]["parameters"]
+    assert list(search["properties"]) == ["query", "order_number"]
+    assert search["required"] == ["query"]  # order_number is optional
+    assert search["properties"]["query"]["maxLength"] == 500

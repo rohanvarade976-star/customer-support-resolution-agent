@@ -13,6 +13,7 @@ from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
 from support_agent.integrations.errors import ProviderRejectedError, ProviderUnavailableError
 from support_agent.integrations.shipping import ShippingClient
+from support_agent.rag.embeddings import FakeEmbedder
 from support_agent.tools.base import (
     Tool,
     ToolContext,
@@ -51,6 +52,7 @@ def make_ctx() -> ToolContext:
         customer_id=uuid4(),
         settings=settings,
         shipping_client=MagicMock(spec=ShippingClient),
+        embedder=FakeEmbedder(),
         clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
     )
 

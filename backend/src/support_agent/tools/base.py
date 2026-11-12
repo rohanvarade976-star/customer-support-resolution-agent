@@ -21,11 +21,15 @@ from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
 from support_agent.integrations.errors import IntegrationError, ProviderUnavailableError
 from support_agent.integrations.shipping import ShippingClient
+from support_agent.rag.embeddings import Embedder
 
 log = logging.getLogger(__name__)
 
 # No input model may carry identity: it comes from the context, never from the model.
 FORBIDDEN_INPUT_FIELDS = frozenset({"customer_id", "customer"})
+
+# The only order reference a tool accepts: the human-readable order number, never a UUID.
+ORDER_NUMBER_PATTERN = r"^ORD-[0-9]+$"
 
 
 def _utc_now() -> datetime:
@@ -40,6 +44,7 @@ class ToolContext:
     customer_id: UUID  # from the authenticated JWT
     settings: Settings
     shipping_client: ShippingClient
+    embedder: Embedder  # the process-wide cached embedder (rag.embeddings.get_embedder)
     clock: Callable[[], datetime] = _utc_now  # tests inject a fixed time
 
 

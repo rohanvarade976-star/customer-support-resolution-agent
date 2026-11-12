@@ -27,6 +27,7 @@ from support_agent.db.models import (
     ActionProposal,
     Approval,
     AuditEvent,
+    Order,
     RefundOperation,
     StaffUser,
     Ticket,
@@ -105,7 +106,9 @@ def clock() -> MutableClock:
 
 
 @pytest.fixture(autouse=True)
-async def seeded(session: AsyncSession, demo_password_hash: str, clock: MutableClock) -> None:
+async def seeded(
+    session: AsyncSession, demo_password_hash: str, clock: MutableClock, ingested_policies: None
+) -> None:
     await seed(session, load_scenarios(), clock.now, demo_password_hash)
 
 
@@ -319,6 +322,32 @@ async def test_ineligible_orders_get_no_proposal(
     assert [event.redacted_payload["ticket_id"] for event in refused] == [ticket_id]
 
 
+async def test_order_without_an_applicable_policy_gets_no_proposal(
+    client: httpx.AsyncClient, session: AsyncSession, auth_headers: AuthHeaders
+) -> None:
+    # Priya's ORD-1001 is eligible today. Move its placed_at before refund policy v1
+    # (2025-01-01): no refund policy governs it, so no proposal and no refund may exist.
+    order = await session.scalar(select(Order).where(Order.order_number == "ORD-1001"))
+    assert order is not None
+    order.placed_at = datetime(2024, 12, 1, 10, 0, tzinfo=UTC)
+    await session.flush()
+    ticket_id = await open_ticket(client, auth_headers, "priya@example.com", "ORD-1001")
+    # The seed already holds Kavya's past refund (with its proposal): count, don't assume 0.
+    proposals_before = len((await session.scalars(select(ActionProposal.id))).all())
+    refunds_before = await all_refunds(session)
+
+    response = await propose(client, await auth_headers(REVIEWER), ticket_id)
+
+    body = assert_error(response, 409, "NOT_ELIGIBLE")
+    assert body["details"]["reasons"] == ["NO_APPLICABLE_POLICY"]
+    assert len((await session.scalars(select(ActionProposal.id))).all()) == proposals_before
+    assert await all_refunds(session) == refunds_before
+    refused = await session.scalars(
+        select(AuditEvent).where(AuditEvent.event_type == "proposal.refused")
+    )
+    assert [event.redacted_payload["reasons"] for event in refused] == [["NO_APPLICABLE_POLICY"]]
+
+
 async def test_ticket_without_an_order_cannot_be_proposed(
     client: httpx.AsyncClient, auth_headers: AuthHeaders
 ) -> None:
@@ -424,7 +453,6 @@ async def test_approving_twice_still_yields_one_refund(
             payment_client,
             UUID(proposal["proposal_id"]),
             now=clock.now,
-            settings=get_settings(),
         )
     rows = await refunds_for(session, proposal["proposal_id"])
     assert [row.id for row in rows] == [again.id]

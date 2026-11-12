@@ -25,8 +25,12 @@ from support_agent.api.deps import get_session
 from support_agent.core.config import get_settings
 from support_agent.core.security import hash_password
 from support_agent.main import create_app
+from support_agent.rag.documents import load_policy_directory
+from support_agent.rag.embeddings import FakeEmbedder
+from support_agent.rag.ingest import ingest_policies
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
+POLICY_DIR = BACKEND_DIR / "data" / "policies"
 
 
 def _in_thread[T](fn: Callable[..., T], *args: object) -> T:
@@ -112,6 +116,16 @@ async def session(migrated_database: str) -> AsyncIterator[AsyncSession]:
             await db.close()
             await outer.rollback()
     await engine.dispose()
+
+
+@pytest.fixture
+async def ingested_policies(session: AsyncSession) -> None:
+    """The real policy files, ingested with the fake embedder (rolled back after the test).
+
+    Eligibility reads the refund window from the refund policy in force on the order's
+    date (ADR-005), so any test that checks eligibility needs these rows.
+    """
+    await ingest_policies(session, load_policy_directory(POLICY_DIR), FakeEmbedder())
 
 
 @pytest.fixture

@@ -7,6 +7,11 @@ The return window is measured in whole elapsed days (a partial day is dropped):
 - to the date the customer requested the return (so slow warehouse inspection never
   counts against them); if there is no return yet, to `now`.
 Day 30 is still inside a 30-day window; day 31 is outside.
+
+The window length is not a constant. It comes from the refund policy version in force on
+the date the order was placed (ADR-005), loaded by the service into
+`OrderFacts.refund_window_days`. If no refund policy applies, it is None: the decision is
+NO_APPLICABLE_POLICY and the window is never guessed.
 """
 
 from datetime import datetime
@@ -21,6 +26,7 @@ from support_agent.domain.money import refundable_balance
 class ReasonCode(StrEnum):
     """Why a refund is not allowed. Declaration order is the order reasons are reported in."""
 
+    NO_APPLICABLE_POLICY = "NO_APPLICABLE_POLICY"
     NOT_DELIVERED = "NOT_DELIVERED"
     NO_RETURN = "NO_RETURN"
     RETURN_NOT_RECEIVED = "RETURN_NOT_RECEIVED"
@@ -45,6 +51,8 @@ class OrderFacts(BaseModel):
     paid_amount_minor: int
     succeeded_refunds_minor: int
     in_progress_refunds_minor: int
+    # From the refund policy in force on the order's placed_at date; None = no policy applies.
+    refund_window_days: int | None
 
     @property
     def balance_minor(self) -> int:
@@ -75,9 +83,13 @@ def _return_reasons(facts: OrderFacts) -> list[ReasonCode]:
     return reasons
 
 
-def check_eligibility(facts: OrderFacts, now: datetime, window_days: int) -> EligibilityDecision:
+def check_eligibility(facts: OrderFacts, now: datetime) -> EligibilityDecision:
     """Return every reason a refund is blocked, or an eligible decision with the amount."""
     reasons: list[ReasonCode] = []
+    window_days = facts.refund_window_days
+    if window_days is None:
+        # No refund policy governs this order: escalate, never invent a window (FR-6).
+        reasons.append(ReasonCode.NO_APPLICABLE_POLICY)
 
     if facts.order_status != OrderStatus.DELIVERED or facts.delivered_at is None:
         # Nothing return-related is meaningful before delivery.
@@ -85,7 +97,8 @@ def check_eligibility(facts: OrderFacts, now: datetime, window_days: int) -> Eli
     else:
         reasons.extend(_return_reasons(facts))
         window_end = facts.return_requested_at if facts.return_requested_at is not None else now
-        if (window_end - facts.delivered_at).days > window_days:
+        # Without a policy there is no window to measure against (already reported above).
+        if window_days is not None and (window_end - facts.delivered_at).days > window_days:
             reasons.append(ReasonCode.OUTSIDE_RETURN_WINDOW)
 
     balance = facts.balance_minor

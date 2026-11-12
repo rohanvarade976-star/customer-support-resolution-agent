@@ -237,3 +237,30 @@ document. Eligibility is not changed in M4 Task 1.
 - Until Task 2 ships, all seeded orders are recent (placed after 2026-07-01), so they
   fall under v2 and the current 30-day setting matches. A unit test keeps
   `refund_policy_v2.md`'s `refund_window_days` equal to `Settings.refund_window_days`.
+
+### Implementation (2026-11-12, M4 Task 2)
+
+This note records how the decision above was built. The decision itself is unchanged.
+
+- `services/eligibility.load_order` looks up the `refund_policy` version in force on the
+  order's `placed_at` date and puts its `refund_window_days` into `OrderFacts`. Proposals,
+  refund execution and the `check_refund_eligibility` tool all go through `load_order`, so
+  they cannot apply different windows.
+- The order's date is taken in **UTC** (`domain/policies.policy_date`), so the same order
+  always maps to the same policy version whatever the server's time zone is.
+- `check_eligibility(facts, now)` no longer takes a window argument. When
+  `refund_window_days` is `None` (no refund policy in force on that date), the decision
+  is not eligible with the new reason code **`NO_APPLICABLE_POLICY`**, reported first.
+  The window check is skipped (nothing is invented); the other checks (delivery, return,
+  balance) are still reported, so a reviewer sees the full picture.
+- **`Settings.refund_window_days` was removed.** Keeping it would leave a second, stale
+  copy of the window that code could start using again by accident: exactly the mismatch
+  this ADR exists to prevent. The refund window now has one source: each refund policy
+  file's front matter, ingested into `policy_documents.refund_window_days`.
+- **The consistency test changed purpose.** It used to check v2's front matter against
+  the setting. It now checks, for every refund policy file, that the prose states the same
+  number of days as that file's own front matter (v1: 15, v2: 30), because the front
+  matter is now what eligibility uses.
+- Consequence: eligibility now needs the policy documents in the database. A fresh
+  environment must run `scripts/ingest_policies.py` after migrating, or every order is
+  `NO_APPLICABLE_POLICY` (safe: nothing is refunded, cases escalate).

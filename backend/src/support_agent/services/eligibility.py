@@ -2,6 +2,10 @@
 
 Every lookup is scoped to the customer id, so another customer's order is
 indistinguishable from a missing one (ORDER_NOT_FOUND, FR-2).
+
+The refund window comes from the refund policy version in force on the order's placed_at
+date (ADR-005). Proposals, refund execution and the eligibility tool all use `load_order`,
+so they always apply the same window as the policy the agents cite.
 """
 
 from dataclasses import dataclass
@@ -14,7 +18,8 @@ from support_agent.db.models import Order, Return
 from support_agent.domain.eligibility import EligibilityDecision, OrderFacts, check_eligibility
 from support_agent.domain.enums import ReturnStatus
 from support_agent.domain.money import refund_totals
-from support_agent.repositories import orders, refunds
+from support_agent.domain.policies import REFUND_POLICY_KEY, policy_date
+from support_agent.repositories import orders, policies, refunds
 from support_agent.schemas.order_status import RefundableBalanceResponse
 from support_agent.services.orders import order_not_found
 
@@ -41,6 +46,9 @@ async def load_order(session: AsyncSession, customer_id: UUID, order_number: str
         raise order_not_found()
     succeeded, in_progress = refund_totals(await refunds.sum_by_status(session, order.id))
     ret = _latest_active_return(order)
+    policy = await policies.get_policy_in_force(
+        session, REFUND_POLICY_KEY, policy_date(order.placed_at)
+    )
     facts = OrderFacts(
         order_status=order.status,
         delivered_at=order.delivered_at,
@@ -52,6 +60,7 @@ async def load_order(session: AsyncSession, customer_id: UUID, order_number: str
         paid_amount_minor=order.paid_amount_minor,
         succeeded_refunds_minor=succeeded,
         in_progress_refunds_minor=in_progress,
+        refund_window_days=None if policy is None else policy.refund_window_days,
     )
     return LoadedOrder(order.id, order.order_number, order.currency, facts)
 
@@ -61,10 +70,9 @@ async def check_refund_eligibility(
     customer_id: UUID,
     order_number: str,
     now: datetime,
-    window_days: int,
 ) -> EligibilityDecision:
     loaded = await load_order(session, customer_id, order_number)
-    return check_eligibility(loaded.facts, now, window_days)
+    return check_eligibility(loaded.facts, now)
 
 
 async def get_refundable_balance(

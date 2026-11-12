@@ -53,15 +53,27 @@ class Settings(BaseSettings):
     # First retry waits up to this long; each later retry doubles the limit.
     provider_backoff_base_seconds: float = Field(default=0.2, ge=0, le=10)
 
-    # Refund policy. The window runs from the order's delivered_at to the date the
-    # return was requested (or to today if no return exists yet). Day N is still inside.
-    refund_window_days: int = Field(default=30, ge=1, le=365)
+    # The refund window is NOT a setting: it comes from the refund policy version in
+    # force on the order's placed_at date (ADR-005), via policy_documents.refund_window_days.
+
     # How long a reviewer has to decide a refund proposal before it needs a new one.
     approval_ttl_minutes: int = Field(default=60, ge=1, le=1440)
 
     # Turns policy text into vectors. "fastembed" runs the real local model;
     # "fake" is a deterministic stand-in with no download (tests and CI).
     embedding_provider: Literal["fastembed", "fake"] = "fastembed"
+
+    # Policy search (hybrid retrieval, see rag/retrieval.py).
+    # How many passages the search_policy tool returns at most.
+    policy_search_top_k: int = Field(default=5, ge=1, le=20)
+    # How many candidates each search (vector and keyword) contributes before fusion.
+    policy_search_candidate_k: int = Field(default=20, ge=1, le=100)
+    # Reciprocal Rank Fusion constant: score = sum of 1 / (k + rank). 60 is the usual value.
+    policy_rrf_k: int = Field(default=60, ge=1, le=1000)
+    # Cosine similarity (1 = same meaning) a passage needs to be returned at all.
+    # Below it for every passage, the result says no_relevant_evidence instead.
+    # Tuned for BAAI/bge-small-en-v1.5 with scripts/eval_retrieval.py.
+    policy_min_similarity: float = Field(default=0.55, ge=-1.0, le=1.0)
 
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod

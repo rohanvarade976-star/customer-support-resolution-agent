@@ -5,12 +5,16 @@
   the same vector for the same text every time, but the vectors carry no meaning.
 
 Which one is used comes from EMBEDDING_PROVIDER (see core/config.py).
+
+Loading the real model takes seconds, so `get_embedder` creates one embedder per
+provider for the whole process and returns that same object every time after.
 """
 
 import asyncio
 import hashlib
 import math
 from collections.abc import Sequence
+from functools import lru_cache
 from typing import Protocol
 
 from support_agent.core.config import Settings
@@ -25,7 +29,11 @@ class Embedder(Protocol):
     dimensions: int
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-        """One vector per text, in the same order."""
+        """One vector per document text, in the same order."""
+        ...
+
+    async def embed_query(self, text: str) -> list[float]:
+        """One vector for a search query. Some models embed queries differently."""
         ...
 
 
@@ -35,6 +43,10 @@ class FakeEmbedder:
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return [fake_vector(text, self.dimensions) for text in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        # Same as a document, so a test can make a query match a chunk exactly.
+        return fake_vector(text, self.dimensions)
 
 
 def fake_vector(text: str, dimensions: int) -> list[float]:
@@ -69,8 +81,22 @@ class FastEmbedEmbedder:
         # passage_embed (not query_embed): these texts are documents to be searched.
         return [[float(x) for x in vector] for vector in self._model.passage_embed(texts)]
 
+    async def embed_query(self, text: str) -> list[float]:
+        return await asyncio.to_thread(self._embed_query, text)
+
+    def _embed_query(self, text: str) -> list[float]:
+        # query_embed adds the instruction bge models expect in front of a search query.
+        vector = next(iter(self._model.query_embed(text)))
+        return [float(x) for x in vector]
+
 
 def get_embedder(settings: Settings) -> Embedder:
-    if settings.embedding_provider == "fake":
+    """The process-wide embedder for the configured provider (created on first use)."""
+    return _cached_embedder(settings.embedding_provider)
+
+
+@lru_cache(maxsize=2)  # at most one per provider: "fake" and "fastembed"
+def _cached_embedder(provider: str) -> Embedder:
+    if provider == "fake":
         return FakeEmbedder()
     return FastEmbedEmbedder()

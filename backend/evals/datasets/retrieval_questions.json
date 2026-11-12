@@ -1,0 +1,109 @@
+{
+  "description": "Policy retrieval questions. Each has exactly one best section (expected_chunk_key). With order_number, the search uses that order's placed_at date; otherwise as_of (YYYY-MM-DD) or, if absent, today. Run with scripts/eval_retrieval.py.",
+  "questions": [
+    {
+      "id": "priya-refund-timing",
+      "customer_email": "priya@example.com",
+      "order_number": "ORD-1001",
+      "query": "How long until the refund money reaches my bank account?",
+      "expected_chunk_key": "refund_policy_v2:section_7"
+    },
+    {
+      "id": "priya-who-approves",
+      "customer_email": "priya@example.com",
+      "order_number": "ORD-1001",
+      "query": "Who has to approve my refund before it is paid?",
+      "expected_chunk_key": "refund_policy_v2:section_6"
+    },
+    {
+      "id": "arjun-refund-before-delivery",
+      "customer_email": "arjun@example.com",
+      "order_number": "ORD-1002",
+      "query": "My laptop still hasn't arrived. Can I get a refund or a voucher for the delay?",
+      "expected_chunk_key": "shipping_delays_v1:section_4"
+    },
+    {
+      "id": "arjun-long-delay",
+      "customer_email": "arjun@example.com",
+      "order_number": "ORD-1002",
+      "query": "The parcel is more than a week late and might be lost. What happens now?",
+      "expected_chunk_key": "shipping_delays_v1:section_5"
+    },
+    {
+      "id": "meera-return-deadline",
+      "customer_email": "meera@example.com",
+      "order_number": "ORD-1003",
+      "query": "How many days do I have to send my phone back?",
+      "expected_chunk_key": "refund_policy_v2:section_3"
+    },
+    {
+      "id": "meera-how-to-return",
+      "customer_email": "meera@example.com",
+      "order_number": "ORD-1003",
+      "query": "How do I start a return, and which date counts?",
+      "expected_chunk_key": "return_processing_v1:section_3"
+    },
+    {
+      "id": "rahul-exception",
+      "customer_email": "rahul@example.com",
+      "order_number": "ORD-1004",
+      "query": "I missed the deadline. Who is allowed to make an exception for me?",
+      "expected_chunk_key": "escalation_exceptions_v1:section_2"
+    },
+    {
+      "id": "kavya-already-refunded",
+      "customer_email": "kavya@example.com",
+      "order_number": "ORD-1005",
+      "query": "How much can still be refunded if I was already refunded once?",
+      "expected_chunk_key": "refund_policy_v2:section_5"
+    },
+    {
+      "id": "vikram-failed-inspection",
+      "customer_email": "vikram@example.com",
+      "order_number": "ORD-1006",
+      "query": "My returned speaker failed inspection. Do I get a refund?",
+      "expected_chunk_key": "damaged_products_v1:section_5"
+    },
+    {
+      "id": "aditya-inspection-pending",
+      "customer_email": "aditya@example.com",
+      "order_number": "ORD-1007",
+      "query": "What does it mean that inspection of my return is still pending?",
+      "expected_chunk_key": "return_processing_v1:section_4"
+    },
+    {
+      "id": "sneha-report-damage",
+      "customer_email": "sneha@example.com",
+      "order_number": "ORD-1008",
+      "query": "The item arrived broken. How do I report the damage, do I need photos?",
+      "expected_chunk_key": "damaged_products_v1:section_2"
+    },
+    {
+      "id": "sneha-damaged-refund-path",
+      "customer_email": "sneha@example.com",
+      "order_number": "ORD-1009",
+      "query": "Is there a faster refund for a damaged product, or a partial refund without returning it?",
+      "expected_chunk_key": "damaged_products_v1:section_4"
+    },
+    {
+      "id": "v1-return-window",
+      "customer_email": "priya@example.com",
+      "as_of": "2026-06-15",
+      "query": "How many days do I have to request a return?",
+      "expected_chunk_key": "refund_policy_v1:section_3"
+    },
+    {
+      "id": "v1-refund-timing",
+      "customer_email": "priya@example.com",
+      "as_of": "2026-03-01",
+      "query": "How long does a refund take to arrive?",
+      "expected_chunk_key": "refund_policy_v1:section_7"
+    },
+    {
+      "id": "escalation-when",
+      "customer_email": "meera@example.com",
+      "query": "When is my case passed to a human specialist?",
+      "expected_chunk_key": "escalation_exceptions_v1:section_3"
+    }
+  ]
+}

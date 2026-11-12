@@ -1,4 +1,5 @@
-"""The six read-only tools. Each takes an order number and returns a typed result.
+"""The read-only tools. Six take an order number; search_policy (policy_tools.py) takes a
+query. Each returns a typed result.
 
 Handlers are thin: they call a service with `ctx.customer_id`. Ownership is enforced
 inside the services, so another customer's order returns ORDER_NOT_FOUND.
@@ -17,7 +18,14 @@ from support_agent.schemas.order_status import (
 from support_agent.schemas.orders import OrderResponse
 from support_agent.services import eligibility, order_status
 from support_agent.services import orders as order_service
-from support_agent.tools.base import Tool, ToolContext, ToolFailureError, ToolRegistry
+from support_agent.tools.base import (
+    ORDER_NUMBER_PATTERN,
+    Tool,
+    ToolContext,
+    ToolFailureError,
+    ToolRegistry,
+)
+from support_agent.tools.policy_tools import SEARCH_POLICY_TOOL
 
 
 class OrderInput(BaseModel):
@@ -26,7 +34,7 @@ class OrderInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_number: str = Field(
-        pattern=r"^ORD-[0-9]+$",
+        pattern=ORDER_NUMBER_PATTERN,
         max_length=20,
         description="The order number, for example ORD-1001.",
     )
@@ -61,11 +69,7 @@ async def _get_refundable_balance(ctx: ToolContext, args: OrderInput) -> Refunda
 
 async def _check_refund_eligibility(ctx: ToolContext, args: OrderInput) -> EligibilityDecision:
     return await eligibility.check_refund_eligibility(
-        ctx.session,
-        ctx.customer_id,
-        args.order_number,
-        ctx.clock(),
-        ctx.settings.refund_window_days,
+        ctx.session, ctx.customer_id, args.order_number, ctx.clock()
     )
 
 
@@ -128,4 +132,5 @@ def build_read_registry() -> ToolRegistry:
             handler=_check_refund_eligibility,
         )
     )
+    registry.register(SEARCH_POLICY_TOOL)
     return registry

@@ -11,7 +11,6 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
 from support_agent.db.models import ActionProposal, Approval, Ticket, WorkflowRun
 from support_agent.domain.enums import ApprovalDecision, ProposalStatus, RunStatus, TicketStatus
@@ -61,7 +60,6 @@ async def decide(
     body: DecisionRequest,
     *,
     now: datetime,
-    settings: Settings,
 ) -> DecisionResponse:
     # Locked until the decision is committed, so two reviewers cannot both decide.
     approval = await proposals.lock_approval(session, approval_id)
@@ -101,7 +99,7 @@ async def decide(
     await session.commit()  # the decision is stored (and the lock released) before money moves
 
     operation = await refund_execution.execute_approved_refund(
-        session, payments, proposal.id, now=now, settings=settings
+        session, payments, proposal.id, now=now
     )
     return DecisionResponse(
         approval_id=approval.id,

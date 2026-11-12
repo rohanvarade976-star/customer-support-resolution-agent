@@ -17,7 +17,6 @@ from support_agent.domain.eligibility import (
 from support_agent.domain.enums import InspectionStatus, OrderStatus, ReturnStatus
 
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
-WINDOW = 30
 R = ReasonCode
 
 
@@ -36,6 +35,7 @@ def facts(
     paid: int = 100000,
     succeeded: int = 0,
     in_progress: int = 0,
+    window: int | None = 30,  # refund policy v2; None = no refund policy applies
 ) -> OrderFacts:
     return OrderFacts(
         order_status=status,
@@ -47,6 +47,7 @@ def facts(
         paid_amount_minor=paid,
         succeeded_refunds_minor=succeeded,
         in_progress_refunds_minor=in_progress,
+        refund_window_days=window,
     )
 
 
@@ -222,12 +223,49 @@ BALANCE_CASES = [
     ),
 ]
 
-ALL_CASES = SEEDED_SCENARIOS + EDGE_CASES + BALANCE_CASES
+POLICY_CASES = [
+    Case(
+        "no_applicable_policy_blocks_an_otherwise_eligible_order",
+        received_and_passed(window=None),
+        False,
+        reasons=[R.NO_APPLICABLE_POLICY],
+    ),
+    Case(
+        # Without a policy the window is never measured, so no window reason appears,
+        # but every other reason is still reported for the reviewer.
+        "no_applicable_policy_with_other_reasons",
+        facts(delivered=60, window=None, succeeded=100000),
+        False,
+        reasons=[R.NO_APPLICABLE_POLICY, R.NO_RETURN, R.ALREADY_REFUNDED],
+    ),
+    Case(
+        "no_applicable_policy_before_delivery",
+        facts(status=OrderStatus.SHIPPED, delivered=None, window=None),
+        False,
+        reasons=[R.NO_APPLICABLE_POLICY, R.NOT_DELIVERED],
+    ),
+    Case(
+        # Refund policy v1: 15 days. Return requested on day 20 is too late under v1 ...
+        "v1_window_15_days_rejects_day_20",
+        received_and_passed(delivered=29, requested=9, window=15),
+        False,
+        reasons=[R.OUTSIDE_RETURN_WINDOW],
+    ),
+    Case(
+        # ... but the same facts are fine under v2's 30 days.
+        "v2_window_30_days_accepts_day_20",
+        received_and_passed(delivered=29, requested=9, window=30),
+        True,
+        amount=100000,
+    ),
+]
+
+ALL_CASES = SEEDED_SCENARIOS + EDGE_CASES + BALANCE_CASES + POLICY_CASES
 
 
 @pytest.mark.parametrize("case", ALL_CASES, ids=[case.id for case in ALL_CASES])
 def test_eligibility_decision(case: Case) -> None:
-    decision = check_eligibility(case.facts, NOW, WINDOW)
+    decision = check_eligibility(case.facts, NOW)
 
     assert decision == EligibilityDecision(
         eligible=case.eligible, refundable_amount_minor=case.amount, reasons=case.reasons
@@ -235,17 +273,16 @@ def test_eligibility_decision(case: Case) -> None:
 
 
 def test_blocked_order_never_exposes_a_refundable_amount() -> None:
-    decision = check_eligibility(facts(delivered=60), NOW, WINDOW)
+    decision = check_eligibility(facts(delivered=60), NOW)
 
     assert decision.eligible is False
     assert decision.refundable_amount_minor == 0
 
 
-def test_window_length_is_a_parameter() -> None:
+def test_window_length_comes_from_the_facts() -> None:
     # Delivered 31 days ago, return requested 10 days ago: the return came on day 21.
-    returned_on_day_21 = received_and_passed(delivered=31, requested=10)
+    def returned_on_day_21(window: int) -> OrderFacts:
+        return received_and_passed(delivered=31, requested=10, window=window)
 
-    assert check_eligibility(returned_on_day_21, NOW, window_days=20).reasons == [
-        R.OUTSIDE_RETURN_WINDOW
-    ]
-    assert check_eligibility(returned_on_day_21, NOW, window_days=21).eligible is True
+    assert check_eligibility(returned_on_day_21(20), NOW).reasons == [R.OUTSIDE_RETURN_WINDOW]
+    assert check_eligibility(returned_on_day_21(21), NOW).eligible is True

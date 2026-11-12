@@ -5,7 +5,16 @@ from datetime import date
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import CheckConstraint, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Computed,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from support_agent.db.base import Base
@@ -13,6 +22,12 @@ from support_agent.db.models._columns import CreatedAt, UUIDPrimaryKey
 
 # Output size of the fastembed model we use (BAAI/bge-small-en-v1.5).
 EMBEDDING_DIMENSIONS = 384
+
+# Must match the generated column in the full-text migration exactly.
+SEARCH_VECTOR_SQL = (
+    "setweight(to_tsvector('english'::regconfig, coalesce(section_title, '')), 'A') || "
+    "setweight(to_tsvector('english'::regconfig, coalesce(content, '')), 'B')"
+)
 
 
 class PolicyDocument(UUIDPrimaryKey, CreatedAt, Base):
@@ -48,6 +63,8 @@ class PolicyChunk(UUIDPrimaryKey, CreatedAt, Base):
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # Inverted index over the words in search_vector, for keyword search.
+        Index("ix_policy_chunks_search_vector_gin", "search_vector", postgresql_using="gin"),
     )
 
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("policy_documents.id"), index=True)
@@ -61,4 +78,9 @@ class PolicyChunk(UUIDPrimaryKey, CreatedAt, Base):
     # `metadata` is reserved on SQLAlchemy models, so the Python name differs from the column.
     chunk_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata", default=dict, server_default="{}"
+    )
+    # Words of the title (weight A) and content (weight B), computed by Postgres itself.
+    # Never written by Python; it updates automatically when the text changes.
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR, Computed(SEARCH_VECTOR_SQL, persisted=True), deferred=True
     )
