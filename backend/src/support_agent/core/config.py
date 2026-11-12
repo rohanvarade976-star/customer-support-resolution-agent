@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # How long a reviewer has to decide a refund proposal before it needs a new one.
     approval_ttl_minutes: int = Field(default=60, ge=1, le=1440)
 
+    # Turns policy text into vectors. "fastembed" runs the real local model;
+    # "fake" is a deterministic stand-in with no download (tests and CI).
+    embedding_provider: Literal["fastembed", "fake"] = "fastembed"
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:

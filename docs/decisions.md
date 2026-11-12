@@ -191,3 +191,49 @@ then, and customers are never told the refund succeeded before it is verified.
 - Some refunds finish later than they could have, after a reconciliation step.
 - The distinction relies on httpx's exception types; anything we cannot classify as
   "definitely not sent" is treated as unknown.
+
+---
+
+## ADR-005: The refund window comes from the policy version in force when the order was placed
+
+- **Date:** 2026-11-12
+- **Status:** Accepted
+- **Milestone:** M4
+
+### Context
+
+Refund policies are versioned. Refund Policy v1 (orders placed up to and including
+2026-06-30) gives a 15-day return window; Refund Policy v2 (orders placed from
+2026-07-01) gives 30 days. Each version's window is stored in its front matter as
+`refund_window_days` and ingested into `policy_documents.refund_window_days`.
+
+Today `check_eligibility` uses one number for every order: `Settings.refund_window_days`
+(30). Once retrieval picks the policy version by order date (FR-5), an order placed in
+June 2026 would be shown v1's 15-day rule while the code applied 30 days. The cited
+policy and the decision would disagree, which breaks "customer-facing messages state
+only verified outcomes" and makes reviewer evidence misleading.
+
+### Decision
+
+The refund window used by eligibility must come from the refund policy version in force
+on the order's `placed_at` date (`effective_from <= placed_at date <= effective_to`, or
+`effective_to` is NULL). This is implemented in M4 Task 2, together with version-aware
+retrieval, so that the policy cited and the window applied always come from the same
+document. Eligibility is not changed in M4 Task 1.
+
+### Alternatives considered
+
+- Keep one window in config for all orders — simple, but contradicts the cited policy
+  for any order placed under v1.
+- Use the version in force on the delivery date or the return request date — the PRD
+  (FR-5) ties the policy to the order date, and a customer's terms should be fixed when
+  they buy.
+
+### Consequences
+
+- Eligibility will need the window as an input looked up per order, not a global setting.
+- An order whose `placed_at` date matches no refund policy version has no applicable
+  policy, so the case escalates rather than inventing a window (PRD "Failure handling").
+- Until Task 2 ships, all seeded orders are recent (placed after 2026-07-01), so they
+  fall under v2 and the current 30-day setting matches. A unit test keeps
+  `refund_policy_v2.md`'s `refund_window_days` equal to `Settings.refund_window_days`.

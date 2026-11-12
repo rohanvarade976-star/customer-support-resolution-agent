@@ -38,6 +38,8 @@ jobs:
       # Throwaway value for this CI run only; settings will not load without it.
       JWT_SECRET: ci-only-jwt-secret-not-used-anywhere-else-0123456789
       DEMO_PASSWORD: ci-demo-password
+      # Never download the embedding model in CI.
+      EMBEDDING_PROVIDER: fake
     steps:
       - uses: actions/checkout@v5
 
