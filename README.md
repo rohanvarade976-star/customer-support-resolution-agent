@@ -26,8 +26,15 @@ cd backend
 uv sync                           # install Python 3.12 + dependencies
 uv run pre-commit install         # run lint/type checks before each commit
 uv run alembic upgrade head       # create the tables
+uv run python scripts/ingest_policies.py  # load the policies (safe to re-run)
 uv run python scripts/seed_db.py  # add the demo customers and orders (safe to re-run)
 ```
+
+Don't skip the policy ingestion. Refund eligibility takes the refund window from the
+refund policy version in force on the date each order was placed (ADR-005 in
+`docs/decisions.md`). Without the policy rows, no policy applies to any order, so every
+order is refused with `NO_APPLICABLE_POLICY`. That is safe, because no money moves, but
+no refund can ever be proposed.
 
 Before running the API or the seed, set these in `.env` (see `.env.example`):
 
@@ -165,6 +172,38 @@ Every step is in the audit trail:
 docker compose exec postgres psql -U support -d support_agent -c `
   "SELECT event_type, actor, created_at FROM audit_events ORDER BY created_at DESC LIMIT 15;"
 ```
+
+## Ingest policies (from `backend/`)
+
+The support policies live in `data/policies/` as Markdown files with YAML front matter
+(`policy_key`, `version`, `title`, `effective_from`, `effective_to`, and
+`refund_window_days` for the refund policy). Each `## N. Title` section becomes one
+searchable chunk with a stable citation id such as `refund_policy_v2:section_3`.
+
+Run this right after every `alembic upgrade head` (it is part of Local setup above).
+Eligibility reads each order's refund window from these rows. Without them, every order
+gets `NO_APPLICABLE_POLICY`.
+
+```powershell
+uv run alembic upgrade head
+uv run python scripts/ingest_policies.py
+```
+
+The first run downloads the embedding model (BAAI/bge-small-en-v1.5, about 70 MB) into
+fastembed's cache. On Windows you may see warnings about symlinks or `HF_TOKEN`; they are
+harmless. Running the script again is safe: unchanged sections are skipped, edited
+sections are re-embedded and updated in place, and removed sections are deleted.
+Everything happens in one transaction, so a failure leaves the database unchanged.
+
+```
+Embedding model: BAAI/bge-small-en-v1.5
+               created  updated  unchanged  deleted
+  documents          0        0          6        -
+  chunks             0        0         36        0
+```
+
+Set `EMBEDDING_PROVIDER=fake` to use deterministic stand-in vectors with no download
+(tests and CI always do). The fake vectors carry no meaning, so don't use them for search.
 
 ## Development commands (from `backend/`)
 

@@ -22,7 +22,6 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
 from support_agent.db.models import ActionProposal, RefundOperation, Ticket, WorkflowRun
 from support_agent.domain.eligibility import check_eligibility
@@ -113,13 +112,12 @@ async def execute_approved_refund(
     proposal_id: UUID,
     *,
     now: datetime,
-    settings: Settings,
 ) -> RefundOperation:
     existing = await refunds.get_for_proposal(session, proposal_id)
     if existing is not None:
         return existing  # already executed once: never call the provider again
 
-    case = await _revalidate(session, proposal_id, now, settings)
+    case = await _revalidate(session, proposal_id, now)
     operation, created = await _reserve(session, case, now)
     if not created:
         return operation
@@ -132,9 +130,7 @@ async def execute_approved_refund(
 # ---------------------------------------------------------------- 1. revalidate
 
 
-async def _revalidate(
-    session: AsyncSession, proposal_id: UUID, now: datetime, settings: Settings
-) -> _Case:
+async def _revalidate(session: AsyncSession, proposal_id: UUID, now: datetime) -> _Case:
     proposal, run, ticket = await load_case(session, proposal_id)
     approval = await proposals.get_approval_for_proposal(session, proposal_id)
     if (
@@ -159,7 +155,7 @@ async def _revalidate(
         await _invalidate(session, proposal, run, ticket, "OWNERSHIP_MISMATCH", now)
 
     loaded = await eligibility.load_order(session, ticket.customer_id, payload.order_number)
-    decision = check_eligibility(loaded.facts, now, settings.refund_window_days)
+    decision = check_eligibility(loaded.facts, now)
     if not decision.eligible:
         reasons = [reason.value for reason in decision.reasons]
         await _invalidate(session, proposal, run, ticket, "NO_LONGER_ELIGIBLE", now, reasons)

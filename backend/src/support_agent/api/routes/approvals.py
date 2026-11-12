@@ -54,10 +54,9 @@ async def decide_approval(
     body: DecisionRequest,
     reviewer: ReviewerDep,
     session: SessionDep,
-    settings: SettingsDep,
     clock: ClockDep,
     payments: PaymentClientDep,
 ) -> DecisionResponse:
     return await approvals_service.decide(
-        session, payments, reviewer, approval_id, body, now=clock(), settings=settings
+        session, payments, reviewer, approval_id, body, now=clock()
     )

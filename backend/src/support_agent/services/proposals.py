@@ -41,7 +41,7 @@ async def create_refund_proposal(
     ticket = record.ticket
 
     loaded = await eligibility.load_order(session, ticket.customer_id, record.order_number)
-    decision = check_eligibility(loaded.facts, now, settings.refund_window_days)
+    decision = check_eligibility(loaded.facts, now)
     if not decision.eligible:
         reasons = [reason.value for reason in decision.reasons]
         await audit.record(
