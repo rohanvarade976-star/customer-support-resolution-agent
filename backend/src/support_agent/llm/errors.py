@@ -43,6 +43,10 @@ class LLMInvalidOutputError(LLMError):
     """The model answered, but its tool call arguments were not valid JSON."""
 
 
+class ToolLoopOutputError(LLMError):
+    """The model kept sending malformed tool calls, even after one repair message."""
+
+
 class LLMUnavailableError(LLMError):
     """Every configured provider failed with rate limits or transient errors."""
 

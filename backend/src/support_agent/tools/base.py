@@ -8,7 +8,7 @@ is set from the authenticated run, so no input model may have a customer field.
 """
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -115,6 +115,20 @@ class ToolRegistry:
     @property
     def names(self) -> list[str]:
         return list(self._tools)
+
+    def restricted(self, allowed: Collection[str]) -> "ToolRegistry":
+        """A new registry holding only the allowed tools (an agent's allowlist).
+
+        Raises ValueError for a name that is not registered, so a typo in an allowlist
+        fails at start-up instead of silently giving an agent fewer (or other) tools.
+        """
+        unknown = set(allowed) - set(self._tools)
+        if unknown:
+            raise ValueError(f"cannot allow unregistered tools: {sorted(unknown)}")
+        subset = ToolRegistry()
+        for name in allowed:
+            subset.register(self._tools[name])
+        return subset
 
     async def execute(
         self, name: str, ctx: ToolContext, arguments: Mapping[str, Any]

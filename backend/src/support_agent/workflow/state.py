@@ -5,8 +5,7 @@ only the keys it changed; LangGraph merges them in. For most keys "merge" means
 "replace". `errors` has a reducer (`operator.add`), so a node returns only its *new*
 errors and they are appended to the list.
 
-Later milestones add the remaining PRD fields (investigation plan, verified facts,
-policy references, proposal id, ...).
+Later milestones add the remaining PRD fields (policy references, proposal id, ...).
 """
 
 import operator
@@ -15,7 +14,9 @@ from typing import Annotated, NotRequired, TypedDict
 from uuid import UUID
 
 from support_agent.agents.classifier import Classification
+from support_agent.agents.investigator import Evidence, InvestigationPlan
 from support_agent.domain.enums import RunStatus
+from support_agent.llm.tool_loop import ToolCallRecord
 
 
 class OrderHint(StrEnum):
@@ -33,6 +34,8 @@ class WorkflowError(StrEnum):
 
     LLM_UNAVAILABLE = "LLM_UNAVAILABLE"  # every provider failed (LLMUnavailableError)
     CLASSIFIER_OUTPUT_INVALID = "CLASSIFIER_OUTPUT_INVALID"  # StructuredOutputError
+    INVESTIGATOR_OUTPUT_INVALID = "INVESTIGATOR_OUTPUT_INVALID"  # plan, tool call or summary
+    INVESTIGATION_STEP_LIMIT = "INVESTIGATION_STEP_LIMIT"  # the model wanted too many tool calls
 
 
 class WorkflowState(TypedDict):
@@ -49,4 +52,10 @@ class WorkflowState(TypedDict):
     # The order the rest of the run works on: the ticket's, or a verified hint.
     order_number: NotRequired[str | None]
     order_hint: NotRequired[OrderHint]
+    # Set by the investigate node. `tool_trace` is present (even if empty) exactly when the
+    # investigator ran, which is how services/runs.py knows to write investigation events.
+    investigation_plan: NotRequired[InvestigationPlan | None]
+    evidence: NotRequired[Evidence | None]  # None if the investigation failed
+    tool_trace: NotRequired[list[ToolCallRecord]]
+    missing_information: NotRequired[list[str]]  # what we must ask the customer for
     errors: Annotated[list[WorkflowError], operator.add]

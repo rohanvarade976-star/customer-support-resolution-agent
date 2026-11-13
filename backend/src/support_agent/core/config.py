@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     # the run asks the customer to clarify. Tune with scripts/eval_classifier.py.
     classifier_confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
 
+    # The most tool calls one investigation may make (PRD "Agent specifications"). If the
+    # model wants more, the run escalates instead of looping.
+    investigator_max_tool_calls: int = Field(default=8, ge=1, le=20)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:

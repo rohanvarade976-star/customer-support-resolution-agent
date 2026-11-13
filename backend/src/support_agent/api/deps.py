@@ -1,9 +1,10 @@
 """FastAPI dependencies: the database session, "who is calling", the clock, the
-payment provider client and the LLM client.
+payment and shipping provider clients, the embedder and the LLM client.
 
 Every protected route depends on one of these, so identity always comes from the
 verified token and never from the request body. Tests override the clock, the
-payment client and the LLM client (fixed time, in-memory mock provider, fake LLM).
+payment and shipping clients, the embedder and the LLM client (fixed time, in-memory
+mock providers, fake embedder, fake LLM).
 """
 
 from collections.abc import AsyncIterator, Callable
@@ -20,8 +21,10 @@ from support_agent.core.errors import AppError
 from support_agent.db.session import get_sessionmaker
 from support_agent.domain.enums import Role
 from support_agent.integrations.payments import PaymentClient
+from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import LLMClient
 from support_agent.llm.providers import build_llm_client
+from support_agent.rag import embeddings
 from support_agent.schemas.auth import Principal
 from support_agent.services import auth as auth_service
 
@@ -57,6 +60,22 @@ async def get_payment_client(settings: SettingsDep) -> AsyncIterator[PaymentClie
 
 
 PaymentClientDep = Annotated[PaymentClient, Depends(get_payment_client)]
+
+
+async def get_shipping_client(settings: SettingsDep) -> AsyncIterator[ShippingClient]:
+    async with ShippingClient(settings) as client:
+        yield client
+
+
+ShippingClientDep = Annotated[ShippingClient, Depends(get_shipping_client)]
+
+
+def get_embedder(settings: SettingsDep) -> embeddings.Embedder:
+    """The process-wide embedder (loaded on first use). Tests override it with a fake."""
+    return embeddings.get_embedder(settings)
+
+
+EmbedderDep = Annotated[embeddings.Embedder, Depends(get_embedder)]
 
 
 @lru_cache

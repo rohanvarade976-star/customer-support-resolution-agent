@@ -421,6 +421,7 @@ recorded per call. Customer text and model output must never reach logs.
   at a time, which also keeps its step limit simple.
 - Temperature 0 is not fully deterministic on gpt-oss (5 runs gave 2 different answers in
   the playground). Tests must never depend on the real model; evals must allow for this.
+- **The investigator (M5) has six read tools, not the four the PRD first listed:** `get_order`, `get_return_status`, `get_payment_status`, `get_shipment`, `get_refundable_balance` and `check_refund_eligibility`. The last two let it report the refundable amount and the rule-based eligibility decision as cited facts instead of guessing them. It has no `search_policy` (the policy agent's tool) and no write tools. The allowlist is enforced twice: the model is only offered those schemas, and the tool loop refuses any other name with `TOOL_NOT_ALLOWED` before anything runs. The PRD agent table was updated to match.
 - The Gemini fallback is untested against the real API until a `GEMINI_API_KEY` is added.
 - Dropping the SDK error cause makes some provider failures harder to debug. The HTTP
   status and Groq's error code are kept for that reason.

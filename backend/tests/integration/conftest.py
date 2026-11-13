@@ -10,6 +10,7 @@ import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -21,9 +22,14 @@ from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from support_agent.api.deps import get_session
+from mock_providers.shipping.app import create_app as create_shipping_app
+from mock_providers.shipping.config import ShippingSettings
+from support_agent.api.deps import get_embedder, get_llm_client, get_session, get_shipping_client
 from support_agent.core.config import get_settings
 from support_agent.core.security import hash_password
+from support_agent.integrations.shipping import ShippingClient
+from support_agent.llm.client import RetrySettings, RoutedLLMClient
+from support_agent.llm.fake import FakeProvider, ScriptStep
 from support_agent.main import create_app
 from support_agent.rag.documents import load_policy_directory
 from support_agent.rag.embeddings import FakeEmbedder
@@ -31,6 +37,8 @@ from support_agent.rag.ingest import ingest_policies
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 POLICY_DIR = BACKEND_DIR / "data" / "policies"
+# The instant the tests seed the database and run the mock shipping provider at.
+SEED_NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 
 
 def _in_thread[T](fn: Callable[..., T], *args: object) -> T:
@@ -130,14 +138,43 @@ async def ingested_policies(session: AsyncSession) -> None:
 
 @pytest.fixture
 def app(session: AsyncSession) -> FastAPI:
-    """The real app, using the rolled-back test session instead of the real database."""
+    """The real app, using the rolled-back test session instead of the real database.
+
+    The shipping provider is the in-memory mock (no network) and the embedder is the fake.
+    """
     application = create_app()
 
     async def test_session() -> AsyncIterator[AsyncSession]:
         yield session
 
+    async def test_shipping_client() -> AsyncIterator[ShippingClient]:
+        mock = create_shipping_app(ShippingSettings(app_env="test"), clock=lambda: SEED_NOW)
+        transport = httpx.ASGITransport(app=mock)
+        async with ShippingClient(get_settings(), transport=transport) as shipping:
+            yield shipping
+
     application.dependency_overrides[get_session] = test_session
+    application.dependency_overrides[get_shipping_client] = test_shipping_client
+    application.dependency_overrides[get_embedder] = lambda: FakeEmbedder()
     return application
+
+
+@pytest.fixture
+def use_llm(app: FastAPI) -> Callable[[list[ScriptStep]], FakeProvider]:
+    """use_llm(script): make the app's LLM client a FakeProvider playing `script`."""
+
+    def install(script: list[ScriptStep]) -> FakeProvider:
+        fake = FakeProvider(script)
+        client = RoutedLLMClient(
+            [fake],
+            RetrySettings(max_attempts=1, backoff_base_seconds=0, backoff_max_seconds=0),
+            default_temperature=0.0,
+            default_max_tokens=256,
+        )
+        app.dependency_overrides[get_llm_client] = lambda: client
+        return fake
+
+    return install
 
 
 @pytest.fixture

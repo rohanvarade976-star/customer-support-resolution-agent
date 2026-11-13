@@ -11,15 +11,13 @@ from uuid import UUID
 
 import httpx
 import pytest
-from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from support_agent.api.deps import get_llm_client
+from support_agent.agents.fake import simple_investigation
 from support_agent.db.models import AuditEvent, Ticket, WorkflowRun
 from support_agent.db.seed import load_scenarios, seed
 from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, TicketStatus
-from support_agent.llm.client import RetrySettings, RoutedLLMClient
 from support_agent.llm.fake import FakeProvider, ScriptStep, tool_reply, transient
 
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
@@ -30,24 +28,6 @@ UseLLM = Callable[[list[ScriptStep]], FakeProvider]
 @pytest.fixture(autouse=True)
 async def seeded(session: AsyncSession, demo_password_hash: str) -> None:
     await seed(session, load_scenarios(), NOW, demo_password_hash)
-
-
-@pytest.fixture
-def use_llm(app: FastAPI) -> UseLLM:
-    """use_llm(script): make the app's LLM client a FakeProvider playing `script`."""
-
-    def install(script: list[ScriptStep]) -> FakeProvider:
-        fake = FakeProvider(script)
-        client = RoutedLLMClient(
-            [fake],
-            RetrySettings(max_attempts=1, backoff_base_seconds=0, backoff_max_seconds=0),
-            default_temperature=0.0,
-            default_max_tokens=256,
-        )
-        app.dependency_overrides[get_llm_client] = lambda: client
-        return fake
-
-    return install
 
 
 def answer(category: str, confidence: float, order_number: str | None = None) -> ScriptStep:
@@ -86,7 +66,7 @@ async def run_count(session: AsyncSession, ticket_id: str) -> int:
 async def test_confident_run_is_classified_and_saved(
     client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
 ) -> None:
-    use_llm([answer("refund", 0.95)])
+    use_llm([answer("refund", 0.95), *simple_investigation("ORD-1001")])
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "Where is my refund?", order="ORD-1001")
 
@@ -108,7 +88,14 @@ async def test_confident_run_is_classified_and_saved(
     assert (ticket.category, ticket.status) == (TicketCategory.REFUND, TicketStatus.IN_PROGRESS)
 
     recorded = await events(session, body["run_id"])
-    assert set(recorded) == {"run.created", "run.classified", "ticket.updated"}
+    assert set(recorded) == {
+        "run.created",
+        "run.classified",
+        "ticket.updated",
+        "investigation.started",
+        "tool.called",
+        "investigation.completed",
+    }
     assert recorded["run.classified"] == {
         "category": "refund",
         "confidence": 0.95,
@@ -216,7 +203,7 @@ async def test_start_run_without_a_token_is_401(client: httpx.AsyncClient) -> No
 async def test_second_run_while_one_is_unfinished_is_409(
     client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
 ) -> None:
-    use_llm([answer("refund", 0.95)])
+    use_llm([answer("refund", 0.95), *simple_investigation("ORD-1001")])
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "Where is my refund?", order="ORD-1001")
     await client.post(f"/tickets/{ticket_id}/runs", headers=priya)
@@ -234,7 +221,7 @@ async def test_second_run_while_one_is_unfinished_is_409(
 async def test_owner_and_reviewer_can_read_a_run_others_get_404(
     client: httpx.AsyncClient, auth_headers: HeadersFor, use_llm: UseLLM
 ) -> None:
-    use_llm([answer("damaged_item", 0.9)])
+    use_llm([answer("damaged_item", 0.9), *simple_investigation("ORD-1001")])
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "It arrived broken", order="ORD-1001")
     run_id = (await client.post(f"/tickets/{ticket_id}/runs", headers=priya)).json()["run_id"]

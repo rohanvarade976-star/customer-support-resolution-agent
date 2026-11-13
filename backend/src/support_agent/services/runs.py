@@ -13,7 +13,10 @@ matched to the JWT. It never comes from the complaint text or the model.
 
 Audit payloads hold ids, labels, numbers and codes only. The classifier's `reason` and a
 rejected order number are left out: the first can quote the customer, the second may be
-someone else's order.
+someone else's order. The investigator's plan, facts and tool results are left out too.
+Its events are `investigation.started`, one `tool.called` per call (tool, call id, outcome
+code, latency, and the order number only when the call succeeded) and, if it finished,
+`investigation.completed` with counts.
 """
 
 import logging
@@ -23,16 +26,22 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
 from support_agent.db.models import Ticket, WorkflowRun
 from support_agent.domain.enums import Role, RunMode, RunStatus, TicketCategory, TicketStatus
+from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import LLMClient
+from support_agent.llm.tool_loop import OUTCOME_OK
+from support_agent.rag.embeddings import Embedder
 from support_agent.repositories import audit, tickets, workflow_runs
 from support_agent.schemas.auth import Principal
 from support_agent.schemas.runs import RunResponse
 from support_agent.services.case_updates import set_run_status, set_ticket_status
 from support_agent.services.orders import customer_owns_order
 from support_agent.services.tickets import ticket_not_found
+from support_agent.tools.base import ToolContext
+from support_agent.tools.read_tools import build_read_registry
 from support_agent.workflow.graph import WorkflowDeps, initial_state, run_workflow
 from support_agent.workflow.state import OrderHint, WorkflowState
 
@@ -67,7 +76,9 @@ async def start_run(
     ticket_id: UUID,
     *,
     llm: LLMClient,
-    confidence_threshold: float,
+    settings: Settings,
+    shipping_client: ShippingClient,
+    embedder: Embedder,
     clock: Callable[[], datetime],
 ) -> RunResponse:
     record = await tickets.get_by_id(session, ticket_id)
@@ -92,7 +103,18 @@ async def start_run(
     async def owns_order(customer_id: UUID, order_number: str) -> bool:
         return await customer_owns_order(session, customer_id, order_number)
 
-    deps = WorkflowDeps(llm=llm, owns_order=owns_order, confidence_threshold=confidence_threshold)
+    # The tools' customer is the ticket's owner, already matched to the JWT above.
+    tool_context = ToolContext(
+        session, ticket.customer_id, settings, shipping_client, embedder, clock=clock
+    )
+    deps = WorkflowDeps(
+        llm=llm,
+        owns_order=owns_order,
+        confidence_threshold=settings.classifier_confidence_threshold,
+        registry=build_read_registry(),
+        tool_context=tool_context,
+        max_tool_calls=settings.investigator_max_tool_calls,
+    )
     state = initial_state(
         run_id=run.id,
         ticket_id=ticket.id,
@@ -117,10 +139,13 @@ async def _save_outcome(
 ) -> None:
     classification = final.get("classification")
     status = final["status"]
+    # The investigator only runs after a confident label, even if it then fails.
+    investigated = "tool_trace" in final
     if classification is not None:
         # Only a confident label becomes the ticket's category. A low-confidence guess is
         # kept in the audit event, but the ticket stays uncategorised until clarified.
-        if status == RunStatus.INVESTIGATING and classification.category != "unclear":
+        confident = status == RunStatus.INVESTIGATING or investigated
+        if confident and classification.category != "unclear":
             await tickets.set_category(session, ticket, TicketCategory(classification.category))
         await audit.record(
             session,
@@ -134,20 +159,71 @@ async def _save_outcome(
             },
         )
 
+    if investigated:
+        await _record_investigation(session, run, final)
+
     ticket_status = _TICKET_STATUS_FOR_RUN[status]  # KeyError = a graph bug -> run failed
     details = {"error_codes": [e.value for e in final["errors"]]} if final["errors"] else None
     await set_run_status(session, run, status, now=now, actor="system", details=details)
 
     if status == RunStatus.AWAITING_CUSTOMER and classification is not None:
-        unclear = classification.category == "unclear"
         await audit.record(
             session,
             run_id=run.id,
             actor="system",
             event_type="clarification.requested",
-            payload={"reason": "unclear_category" if unclear else "low_confidence"},
+            payload={"reason": _clarification_reason(final, classification.category)},
         )
     await set_ticket_status(session, ticket, ticket_status, run_id=run.id, actor="system")
+
+
+def _clarification_reason(final: WorkflowState, category: str) -> str:
+    if category == "unclear":
+        return "unclear_category"
+    if final.get("missing_information"):  # confident label, but no verified order number
+        return "missing_order_number"
+    return "low_confidence"
+
+
+async def _record_investigation(
+    session: AsyncSession, run: WorkflowRun, final: WorkflowState
+) -> None:
+    """Audit the investigator: names, outcome codes, latency and counts. No content."""
+    trace = final.get("tool_trace", [])
+    await audit.record(
+        session,
+        run_id=run.id,
+        actor="investigator",
+        event_type="investigation.started",
+        payload={"run_id": str(run.id)},
+    )
+    for call in trace:
+        payload: dict[str, object] = {
+            "tool": call.tool,
+            "call_id": call.call_id,
+            "outcome": call.outcome,
+            "latency_ms": call.latency_ms,
+        }
+        if call.order_number is not None:  # set only for successful calls
+            payload["order_number"] = call.order_number
+        await audit.record(
+            session, run_id=run.id, actor="investigator", event_type="tool.called", payload=payload
+        )
+    evidence = final.get("evidence")
+    if evidence is not None:  # the investigation finished (it did not stop early)
+        await audit.record(
+            session,
+            run_id=run.id,
+            actor="investigator",
+            event_type="investigation.completed",
+            payload={
+                "tool_calls": len(trace),
+                "failed_calls": sum(1 for call in trace if call.outcome != OUTCOME_OK),
+                "facts": len(evidence.facts),
+                "dropped_facts": len(evidence.dropped_facts),
+                "missing_information": len(evidence.missing_information),
+            },
+        )
 
 
 async def _mark_failed(session: AsyncSession, run: WorkflowRun, now: datetime) -> None:

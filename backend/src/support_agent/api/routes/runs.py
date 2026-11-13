@@ -7,10 +7,12 @@ from fastapi import APIRouter
 from support_agent.api.deps import (
     ClockDep,
     CustomerDep,
+    EmbedderDep,
     LLMClientDep,
     PrincipalDep,
     SessionDep,
     SettingsDep,
+    ShippingClientDep,
 )
 from support_agent.schemas.runs import RunResponse
 from support_agent.services import runs as runs_service
@@ -26,6 +28,8 @@ async def start_run(
     session: SessionDep,
     llm: LLMClientDep,
     settings: SettingsDep,
+    shipping_client: ShippingClientDep,
+    embedder: EmbedderDep,
     clock: ClockDep,
 ) -> RunResponse:
     return await runs_service.start_run(
@@ -33,7 +37,9 @@ async def start_run(
         principal,
         ticket_id,
         llm=llm,
-        confidence_threshold=settings.classifier_confidence_threshold,
+        settings=settings,
+        shipping_client=shipping_client,
+        embedder=embedder,
         clock=clock,
     )
 
