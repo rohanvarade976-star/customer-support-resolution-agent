@@ -46,6 +46,16 @@ class TicketStatus(StrEnum):
     ESCALATED = "escalated"
 
 
+class ResolutionAction(StrEnum):
+    """What the resolution agent may propose (PRD "Agent specifications").
+    Proposing a refund is not executing one: only a workflow code node moves money."""
+
+    REFUND = "refund"
+    EXPLAIN_STATUS = "explain_status"
+    REQUEST_INFO = "request_info"
+    ESCALATE = "escalate"
+
+
 class RunMode(StrEnum):
     """Multi-agent is the real system; baseline is the single-agent comparison (FR-23).
     Manual runs are started by a reviewer through the API, with no LLM involved."""

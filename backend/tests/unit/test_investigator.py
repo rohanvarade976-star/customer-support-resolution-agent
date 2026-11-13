@@ -247,3 +247,28 @@ def test_prompt_tells_the_model_that_data_is_not_instructions() -> None:
     prompt = load_prompt()
 
     assert "untrusted_data" in prompt and "check_refund_eligibility" in prompt
+
+
+async def test_the_outcome_exposes_the_structured_outputs_of_successful_calls_only() -> None:
+    outcome, _, _ = await run_investigation(
+        [
+            plan_reply(),
+            read_call("get_order", ORDER, "call_ok"),
+            read_call("get_order", MISSING_ORDER, "call_bad"),
+            text_reply("Done."),
+            summary_reply([("The order exists.", "call_ok")]),
+        ]
+    )
+
+    assert [(r.call_id, r.tool) for r in outcome.results] == [("call_ok", "get_order")]
+    assert outcome.results[0].args == {"order_number": ORDER}
+    assert [r.call_id for r in outcome.trace] == ["call_ok", "call_bad"]
+
+
+async def test_a_failed_investigation_still_exposes_the_results_gathered_so_far() -> None:
+    outcome, _, _ = await run_investigation(
+        [plan_reply(), read_call("get_order", ORDER, "call_1"), transient()]
+    )
+
+    assert outcome.failure is not None
+    assert [r.call_id for r in outcome.results] == ["call_1"]

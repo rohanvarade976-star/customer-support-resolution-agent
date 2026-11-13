@@ -17,7 +17,7 @@ LLM failures do not raise: they come back as `InvestigationOutcome.failure`, tog
 with whatever trace exists so far, and the workflow escalates (nodes/investigate.py).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import cache
 from pathlib import Path
@@ -27,7 +27,13 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from support_agent.llm.client import LLMClient
 from support_agent.llm.errors import LLMUnavailableError, StructuredOutputError, ToolLoopOutputError
-from support_agent.llm.tool_loop import OUTCOME_OK, ToolCallRecord, ToolLoop, wrap_untrusted
+from support_agent.llm.tool_loop import (
+    OUTCOME_OK,
+    ToolCallRecord,
+    ToolLoop,
+    ToolResult,
+    wrap_untrusted,
+)
 from support_agent.llm.types import ChatMessage, system_message, user_message
 from support_agent.tools.base import ToolContext, ToolRegistry
 
@@ -105,6 +111,10 @@ class InvestigationOutcome:
     trace: list[ToolCallRecord]  # what ran so far, even on failure
     evidence: Evidence | None  # None on failure
     failure: InvestigationFailure | None
+    # Structured outputs of the successful calls, so code can compare real data (e.g. dates
+    # in two systems) instead of fact sentences. Holds customer data: in memory only, never
+    # store or log it. The content-free `trace` is the part to store.
+    results: list[ToolResult] = field(default_factory=list)
 
 
 @cache
@@ -167,18 +177,18 @@ async def investigate(
         )
         if looped.step_limit_reached:
             return InvestigationOutcome(
-                plan, list(loop.trace), None, InvestigationFailure.STEP_LIMIT
+                plan, list(loop.trace), None, InvestigationFailure.STEP_LIMIT, list(loop.results)
             )
         summary = await llm.structured(
             [*looped.messages, user_message(_SUMMARY_INSTRUCTION)], EvidenceSummary, tier="large"
         )
     except LLMUnavailableError:
         return InvestigationOutcome(
-            plan, list(loop.trace), None, InvestigationFailure.LLM_UNAVAILABLE
+            plan, list(loop.trace), None, InvestigationFailure.LLM_UNAVAILABLE, list(loop.results)
         )
     except (StructuredOutputError, ToolLoopOutputError):
         return InvestigationOutcome(
-            plan, list(loop.trace), None, InvestigationFailure.OUTPUT_INVALID
+            plan, list(loop.trace), None, InvestigationFailure.OUTPUT_INVALID, list(loop.results)
         )
     trace = list(loop.trace)
-    return InvestigationOutcome(plan, trace, ground_facts(summary, trace), None)
+    return InvestigationOutcome(plan, trace, ground_facts(summary, trace), None, list(loop.results))

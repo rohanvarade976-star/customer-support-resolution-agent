@@ -77,3 +77,35 @@ def simple_investigation(order_number: str = "ORD-1001") -> list[ScriptStep]:
         text_reply("Done."),
         summary_reply([("The order exists.", "call_1")]),
     ]
+
+
+def draft_reply(
+    action: str = "refund",
+    *,
+    message: str = "Your return was received, so a refund is proposed and needs approval.",
+    call_ids: Sequence[str] = ("call_1",),
+    citations: Sequence[str] = (),
+    rationale: str = "The evidence supports it.",
+    **extra: object,
+) -> ProviderReply:
+    """The resolution agent's structured draft. `extra` adds fields the schema does not
+    have, such as a model-supplied `amount_minor`, which must be ignored."""
+    return tool_reply(
+        "resolution_draft",
+        {
+            "action": action,
+            "rationale": rationale,
+            "cited_call_ids": list(call_ids),
+            "policy_citations": list(citations),
+            "customer_message": message,
+            **extra,
+        },
+        call_id="draft",
+    )
+
+
+def critique_reply(verdict: str = "approve", issues: Sequence[str] = ()) -> ProviderReply:
+    """The critic's structured verdict."""
+    return tool_reply(
+        "critic_verdict", {"verdict": verdict, "issues": list(issues)}, call_id="critic"
+    )

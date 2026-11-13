@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     # The most searches it may make (PRD "Agent specifications": max 4).
     policy_agent_max_searches: int = Field(default=4, ge=1, le=8)
 
+    # Resolution (agents/resolve.py). The most times a draft may be revised after the
+    # validator or critic objects (PRD FR-10: one revision; at most 2 allowed here).
+    resolution_max_revisions: int = Field(default=1, ge=0, le=2)
+    # The critic's tier. It reviews text and cannot change amounts or override the validator.
+    critic_tier: Literal["small", "large"] = "large"
+    # Order and carrier delivery times that differ by more than this are a conflict, and the
+    # case escalates (domain/validation.py).
+    delivery_date_tolerance_hours: int = Field(default=24, ge=0, le=168)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
