@@ -20,6 +20,14 @@ Needs, running locally:
 - GROQ_API_KEY and DEMO_PASSWORD in .env
 The first run downloads the local embedding model (fastembed).
 
+A refund run stops paused, waiting for a reviewer (its checkpoint is kept in Postgres); this
+script never decides, so no money moves.
+
+Each run is queued exactly as the API queues it (a run plus a `start_run` job), and then this
+script does the worker's part itself, in-process, so the latency it prints is the run's own.
+No worker needs to be running; if one is, it finds the job's run already handled and simply
+marks the job done.
+
     uv run python scripts/run_workflow.py
     uv run python scripts/run_workflow.py --only meera --mode multi_agent
 
@@ -29,7 +37,6 @@ printed (the reply is the validated message the customer would see).
 """
 
 import argparse
-import asyncio
 import logging
 import sys
 import time
@@ -42,6 +49,7 @@ from sqlalchemy import select
 from support_agent.api.deps import get_branch_sessions
 from support_agent.core.config import Settings, get_settings
 from support_agent.core.demo_anchor import resolve_demo_now
+from support_agent.core.event_loop import run
 from support_agent.core.logging import configure_logging
 from support_agent.core.security import hash_password
 from support_agent.db.demo_reset import reset_demo
@@ -49,8 +57,8 @@ from support_agent.db.models import AuditEvent, Customer, Ticket, WorkflowRun
 from support_agent.db.seed import load_scenarios
 from support_agent.db.session import get_engine, get_sessionmaker
 from support_agent.domain.enums import Role, RunMode
+from support_agent.integrations.payments import PaymentClient
 from support_agent.integrations.shipping import ShippingClient
-from support_agent.llm.client import LLMClient
 from support_agent.llm.errors import LLMError
 from support_agent.llm.providers import build_llm_client
 from support_agent.rag.embeddings import get_embedder
@@ -58,6 +66,8 @@ from support_agent.schemas.auth import Principal
 from support_agent.schemas.tickets import CreateTicketRequest
 from support_agent.services import runs as runs_service
 from support_agent.services import tickets as ticket_service
+from support_agent.tools.read_tools import build_read_registry
+from support_agent.workflow.checkpointer import open_checkpointer
 
 MODES = (RunMode.MULTI_AGENT, RunMode.BASELINE)
 
@@ -168,12 +178,10 @@ async def run_one(
     scenario: Scenario,
     mode: RunMode,
     *,
-    llm: LLMClient,
-    settings: Settings,
-    shipping: ShippingClient,
+    env: runs_service.WorkflowEnv,
     password_hash: str,
 ) -> Result:
-    await reset_database(password_hash, settings)
+    await reset_database(password_hash, env.settings)
     principal = await principal_for(scenario.email)
     async with get_sessionmaker()() as session:
         ticket = await ticket_service.create_ticket(
@@ -181,19 +189,10 @@ async def run_one(
             principal,
             CreateTicketRequest(message=scenario.complaint, order_number=scenario.order_number),
         )
+        enqueue_env = runs_service.EnqueueEnv(env.settings, env.clock, env.checkpointer)
+        response = await runs_service.start_run(session, principal, ticket.id, enqueue_env, mode)
         started = time.perf_counter()
-        response = await runs_service.start_run(
-            session,
-            principal,
-            ticket.id,
-            llm=llm,
-            settings=settings,
-            shipping_client=shipping,
-            embedder=get_embedder(settings),
-            clock=lambda: datetime.now(UTC),
-            branch_sessions=get_branch_sessions(),
-            mode=mode,
-        )
+        await runs_service.run_start_job(session, env, response.run_id)  # the worker's part
         latency = time.perf_counter() - started
     return await read_result(mode, response.run_id, latency)
 
@@ -234,21 +233,28 @@ async def main() -> None:
     if settings.demo_password is None:
         sys.exit("DEMO_PASSWORD is not set in .env (the reset reseeds the demo accounts).")
     password_hash = hash_password(settings.demo_password.get_secret_value())
-    llm = build_llm_client(settings)
     modes = [m for m in MODES if args.mode in (None, m.value)]
+    database_url = settings.database_url.get_secret_value()
 
     try:
-        async with ShippingClient(settings) as shipping:
+        async with (
+            ShippingClient(settings) as shipping,
+            PaymentClient(settings) as payments,  # never called: nothing is approved here
+            open_checkpointer(database_url, build_read_registry()) as checkpointer,
+        ):
+            env = runs_service.WorkflowEnv(
+                settings=settings,
+                llm=build_llm_client(settings),
+                shipping_client=shipping,
+                payments=payments,
+                embedder=get_embedder(settings),
+                clock=lambda: datetime.now(UTC),
+                branch_sessions=get_branch_sessions(),
+                checkpointer=checkpointer,
+            )
             for scenario in [s for s in SCENARIOS if args.only in (None, s.name)]:
                 results = [
-                    await run_one(
-                        scenario,
-                        mode,
-                        llm=llm,
-                        settings=settings,
-                        shipping=shipping,
-                        password_hash=password_hash,
-                    )
+                    await run_one(scenario, mode, env=env, password_hash=password_hash)
                     for mode in modes
                 ]
                 show(scenario, results)
@@ -260,4 +266,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run(main())  # a selector event loop, which psycopg needs on Windows

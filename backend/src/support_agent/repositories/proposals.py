@@ -20,7 +20,12 @@ from support_agent.db.models import (
     Ticket,
     WorkflowRun,
 )
-from support_agent.domain.enums import ActionType, ApprovalDecision, ProposalStatus
+from support_agent.domain.enums import (
+    ActionType,
+    ApprovalDecision,
+    ProposalStatus,
+    RunMode,
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,58 @@ async def order_has_open_proposal(session: AsyncSession, order_id: UUID, now: da
         .where(Ticket.order_id == order_id)
     )
     return bool(await session.scalar(stmt))
+
+
+async def open_proposal_for_run(
+    session: AsyncSession, run_id: UUID, order_id: UUID, now: datetime
+) -> ActionProposal | None:
+    """This run's own proposal for this order that still awaits a decision, if any.
+
+    Lets the workflow's proposal step run twice (a worker died after the proposal was
+    committed but before the graph saved its step) and get the same proposal back.
+    """
+    stmt = (
+        select(ActionProposal)
+        .join(Approval, Approval.proposal_id == ActionProposal.id)
+        .join(WorkflowRun, WorkflowRun.id == ActionProposal.run_id)
+        .join(Ticket, Ticket.id == WorkflowRun.ticket_id)
+        .where(
+            ActionProposal.run_id == run_id,
+            ActionProposal.status == ProposalStatus.PENDING_APPROVAL,
+            Approval.decision == ApprovalDecision.PENDING,
+            Approval.expires_at > now,
+            Ticket.order_id == order_id,
+        )
+        .limit(1)
+    )
+    return await session.scalar(stmt)
+
+
+async def lock_next_expired_workflow_approval(
+    session: AsyncSession, now: datetime
+) -> Approval | None:
+    """One undecided approval past its expiry on a workflow run, locked; or None.
+
+    SKIP LOCKED: an approval a reviewer is deciding right now (the decision endpoint holds
+    its lock) is skipped, not waited for. Manual (M3) runs are left out: they keep their
+    own path and are expired when a reviewer tries to decide them.
+    """
+    stmt = (
+        select(Approval)
+        .join(ActionProposal, ActionProposal.id == Approval.proposal_id)
+        .join(WorkflowRun, WorkflowRun.id == ActionProposal.run_id)
+        .where(
+            Approval.decision == ApprovalDecision.PENDING,
+            Approval.expires_at <= now,
+            ActionProposal.status == ProposalStatus.PENDING_APPROVAL,
+            WorkflowRun.mode != RunMode.MANUAL,
+        )
+        .order_by(Approval.expires_at, Approval.id)
+        .limit(1)
+        .with_for_update(of=Approval, skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
+    return await session.scalar(stmt)
 
 
 async def list_pending(session: AsyncSession, now: datetime) -> list[PendingApprovalRecord]:

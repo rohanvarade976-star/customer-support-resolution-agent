@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # config.py -> core -> support_agent -> src -> backend -> repo root
@@ -134,6 +134,35 @@ class Settings(BaseSettings):
     # Order and carrier delivery times that differ by more than this are a conflict, and the
     # case escalates (domain/validation.py).
     delivery_date_tolerance_hours: int = Field(default=24, ge=0, le=168)
+    # How many questions a run may ask the customer (clarification, order number, more
+    # information) before it escalates to a person instead of asking again (M7).
+    max_clarification_rounds: int = Field(default=2, ge=0, le=5)
+
+    # The background worker (worker/, ADR-012).
+    # How long an idle worker waits before looking for new jobs again.
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
+    # A claimed job belongs to its worker for this long. The worker renews it every
+    # `job_heartbeat_seconds` while it works; if the worker dies, another may claim the job
+    # once the lease has run out. The heartbeat must be well inside the lease.
+    job_lease_seconds: int = Field(default=120, ge=5, le=3600)
+    job_heartbeat_seconds: int = Field(default=30, ge=1, le=1200)
+    # Total tries per job (including the first) before it is dead and its run escalates.
+    job_max_attempts: int = Field(default=5, ge=1, le=20)
+    # Retry backoff: base * 2^(attempt-1), capped at the max, then jittered.
+    job_backoff_base_seconds: float = Field(default=2.0, ge=0, le=60)
+    job_backoff_max_seconds: float = Field(default=300.0, ge=0, le=3600)
+    # How often each worker schedules the approval-expiry sweep.
+    approval_expiry_check_seconds: int = Field(default=60, ge=1, le=3600)
+    # On shutdown, how long the current job may take to finish before it is released.
+    worker_shutdown_grace_seconds: float = Field(default=30.0, ge=0, le=600)
+
+    # Long-term customer memory (ADR-013). Each item expires this many days after it is
+    # written; a change applies to items written afterwards.
+    memory_retention_days: int = Field(default=180, ge=1, le=3650)
+    # How many recent items a run loads as background context.
+    memory_max_items: int = Field(default=5, ge=0, le=50)
+    # How often each worker schedules the purge of expired memory.
+    memory_purge_check_seconds: int = Field(default=3600, ge=1, le=86400)
 
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
@@ -151,6 +180,13 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @model_validator(mode="after")
+    def _heartbeat_inside_lease(self) -> "Settings":
+        # Renew at least twice per lease, so one slow heartbeat does not lose the job.
+        if self.job_heartbeat_seconds * 2 > self.job_lease_seconds:
+            raise ValueError("JOB_HEARTBEAT_SECONDS must be at most half of JOB_LEASE_SECONDS")
+        return self
 
     @field_validator("jwt_secret")
     @classmethod

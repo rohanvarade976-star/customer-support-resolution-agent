@@ -1,9 +1,10 @@
 """The end of the workflow: one node per outcome. Each sets where the run stops.
 
     refund        -> propose_refund: store the proposal and a pending approval. NO money moves.
-                     Only a reviewer's approval and the refund executor (M8) do that.
+                     The run then pauses for the reviewer (nodes/approval.py).
     explain       -> the validated reply is saved on the ticket; the run is completed.
-    request_info  -> the validated question is saved; the run waits for the customer.
+    request_info  -> the validated question is saved; the run pauses for the customer
+                     (nodes/pauses.py) and gathers again after the reply.
     escalate      -> a fixed message; a person takes over.
 
 (The parameter must be named `state`: LangGraph's node type requires that name.)
@@ -18,7 +19,7 @@ from support_agent.agents.resolve import ESCALATION_MESSAGE
 from support_agent.core.errors import AppError
 from support_agent.domain.enums import RunStatus
 from support_agent.workflow.deps import WorkflowDeps
-from support_agent.workflow.state import WorkflowError, WorkflowState
+from support_agent.workflow.state import AskedFor, WorkflowError, WorkflowState
 
 # PRD "Customer-facing language".
 REFUND_AWAITING_MESSAGE = "Your refund request is awaiting approval."
@@ -60,4 +61,8 @@ async def request_info(state: WorkflowState) -> dict[str, object]:
     outcome = state.get("outcome")
     if outcome is None:  # the router makes this unreachable
         return await escalate(state)
-    return {"status": RunStatus.AWAITING_CUSTOMER, "customer_reply": outcome.message}
+    return {
+        "status": RunStatus.AWAITING_CUSTOMER,
+        "asked_for": AskedFor.MORE_INFORMATION,
+        "customer_reply": outcome.message,
+    }

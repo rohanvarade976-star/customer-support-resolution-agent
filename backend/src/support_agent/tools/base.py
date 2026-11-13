@@ -116,6 +116,11 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
+    @property
+    def output_models(self) -> list[type[BaseModel]]:
+        """Every tool's output type: tool results are stored in workflow checkpoints."""
+        return [tool.output_model for tool in self._tools.values()]
+
     def restricted(self, allowed: Collection[str]) -> "ToolRegistry":
         """A new registry holding only the allowed tools (an agent's allowlist).
 

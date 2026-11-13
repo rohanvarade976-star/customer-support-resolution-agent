@@ -384,7 +384,7 @@ footer{margin:28px 0 0;padding:18px 4px;font-size:13.5px;color:var(--ink-3);text
       <tr><td>FR-18</td><td><strong>Reconciliation.</strong> Uncertain outcomes are marked for reconciliation and resolved by querying the provider before any retry.</td><td><span class="pill must">Must</span></td></tr>
       <tr><td>FR-19</td><td><strong>Verified communication.</strong> Ticket updates and customer replies reflect only provider-confirmed states.</td><td><span class="pill must">Must</span></td></tr>
       <tr><td>FR-20</td><td><strong>Audit trail.</strong> Every step, actor and decision is recorded as a redacted audit event.</td><td><span class="pill must">Must</span></td></tr>
-      <tr><td>FR-21</td><td><strong>Long-term memory.</strong> Summaries of past tickets load at intake as context, scoped per customer, never used as facts.</td><td><span class="pill should">Should</span></td></tr>
+      <tr><td>FR-21</td><td><strong>Long-term memory.</strong> Structured outcomes of past runs load at intake as untrusted context, scoped per customer, never used as facts.</td><td><span class="pill should">Should</span></td></tr>
       <tr><td>FR-22</td><td><strong>Live status.</strong> Clients receive run progress through Server-Sent Events.</td><td><span class="pill should">Should</span></td></tr>
       <tr><td>FR-23</td><td><strong>Baseline mode.</strong> A config flag switches to single-agent mode and fixed routing for comparison.</td><td><span class="pill should">Should</span></td></tr>
       <tr><td>FR-24</td><td><strong>MCP server.</strong> Read tools are exposed over MCP and consumed by agents through an MCP client.</td><td><span class="pill should">Should</span></td></tr>
@@ -469,7 +469,7 @@ error_details, final_response</code></pre>
       <tr><td><code>action_proposals</code></td><td>id, run_id, action_type, payload, payload_hash, status</td></tr>
       <tr><td><code>approvals</code></td><td>id, proposal_id, payload_hash, reviewer_id, decision, expires_at, decided_at</td></tr>
       <tr><td><code>refund_operations</code></td><td>id, order_id, proposal_id, amount_minor, idempotency_key (unique), provider_reference, status</td></tr>
-      <tr><td><code>customer_memory</code></td><td>id, customer_id, ticket_id, summary, created_at</td></tr>
+      <tr><td><code>customer_memory</code></td><td>id, customer_id, ticket_id, order_id, kind, outcome_code, category, source_run_id (unique), created_at, expires_at. Structured fields only, written by code from verified outcomes; no free-text column (ADR-013)</td></tr>
       <tr><td><code>audit_events</code></td><td>id, run_id, actor, event_type, redacted_payload, created_at</td></tr>
     </tbody>
   </table></div>

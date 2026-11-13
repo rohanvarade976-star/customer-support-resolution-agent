@@ -10,7 +10,6 @@ refund_operations table and in mock_payments.refunds, never response text.
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -18,13 +17,10 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi import FastAPI
-from pydantic import SecretStr
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from mock_providers.payments.app import create_app as create_payments_app
-from mock_providers.payments.config import PaymentsSettings
+from mock_providers.payments.testing import InMemoryPayments
 from support_agent.agents.fake import (
     AgentFake,
     critique_reply,
@@ -62,28 +58,8 @@ NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 PRIYA_AMOUNT = 249900
 REVIEWER = "anita@example.com"
 HeadersFor = Callable[[str], Awaitable[dict[str, str]]]
+Drain = Callable[[], Awaitable[int]]
 UseAgents = Callable[[dict[str, list[ScriptStep]]], AgentFake]
-
-
-@dataclass
-class Payments:
-    """The in-memory mock payment provider and a way to count the refunds it holds."""
-
-    app: FastAPI
-    engine: AsyncEngine
-
-    def client(self) -> PaymentClient:
-        settings = Settings(
-            _env_file=None,
-            database_url=SecretStr("postgresql+asyncpg://user:pw@localhost:5432/unused"),
-            jwt_secret=SecretStr("x" * 32),
-            payments_base_url="http://payments.mock",
-        )
-        return PaymentClient(settings, httpx.ASGITransport(app=self.app))
-
-    async def refund_count(self) -> int:
-        async with self.engine.connect() as conn:
-            return int(await conn.scalar(text("SELECT count(*) FROM mock_payments.refunds")) or 0)
 
 
 class FixedClock:
@@ -92,18 +68,6 @@ class FixedClock:
 
     def __call__(self) -> datetime:
         return self.now
-
-
-@pytest.fixture
-async def payments(test_database_url: str) -> AsyncIterator[Payments]:
-    settings = PaymentsSettings(app_env="test", database_url=SecretStr(test_database_url))
-    app = create_payments_app(settings)
-    engine = create_async_engine(test_database_url, poolclass=NullPool)
-    async with app.router.lifespan_context(app):  # ASGITransport does not run lifespan
-        async with engine.begin() as conn:
-            await conn.execute(text("TRUNCATE mock_payments.refunds"))
-        yield Payments(app, engine)
-    await engine.dispose()
 
 
 async def decide(
@@ -128,7 +92,7 @@ def clock() -> FixedClock:
 
 
 @pytest.fixture(autouse=True)
-def wire_app(app: FastAPI, payments: Payments, clock: FixedClock) -> Settings:
+def wire_app(app: FastAPI, payments: InMemoryPayments, clock: FixedClock) -> Settings:
     """The app's clock, the mock payment provider, and a policy search the fake embedder passes."""
     app.dependency_overrides[get_clock] = lambda: clock
 
@@ -170,8 +134,9 @@ async def priya_scripts(session: AsyncSession, settings: Settings) -> dict[str, 
 
 async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
-    payments: Payments,
+    payments: InMemoryPayments,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
     wire_app: Settings,
@@ -191,6 +156,7 @@ async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
     started = await client.post(f"/tickets/{ticket_id}/runs", headers=priya)
     assert started.status_code == 202
     run_id = started.json()["run_id"]
+    await drain_jobs()  # the background worker runs the agents
 
     run = await session.get(WorkflowRun, UUID(run_id), populate_existing=True)
     assert run is not None and run.status == RunStatus.AWAITING_APPROVAL
@@ -210,7 +176,8 @@ async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
     queue = (await client.get("/approvals", headers=reviewer)).json()["items"]
     assert [item["approval_id"] for item in queue] == [str(approval.id)]
     decided = await decide(client, reviewer, str(approval.id), "approve", "Looks right")
-    assert decided.status_code == 200
+    assert decided.status_code == 202  # stored; the worker resumes the run
+    await drain_jobs()
 
     # 3. Exactly one refund, in our table and at the provider, for the eligible amount.
     rows = await refunds_for(session, str(proposal.id))
@@ -232,8 +199,9 @@ async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
 
 async def test_a_rejected_proposal_from_a_run_moves_no_money(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
-    payments: Payments,
+    payments: InMemoryPayments,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
     wire_app: Settings,
@@ -247,6 +215,7 @@ async def test_a_rejected_proposal_from_a_run_moves_no_money(
         headers=priya,
     )
     started = await client.post(f"/tickets/{created.json()['id']}/runs", headers=priya)
+    await drain_jobs()
     run = await session.get(WorkflowRun, UUID(started.json()["run_id"]), populate_existing=True)
     assert run is not None
     (proposal,) = (
@@ -257,7 +226,8 @@ async def test_a_rejected_proposal_from_a_run_moves_no_money(
     ).all()
 
     rejected = await decide(client, reviewer, str(approval.id), "reject", "Not this time")
+    await drain_jobs()
 
-    assert rejected.status_code == 200
+    assert rejected.status_code == 202
     assert await refunds_for(session, str(proposal.id)) == []
     assert await payments.refund_count() == 0

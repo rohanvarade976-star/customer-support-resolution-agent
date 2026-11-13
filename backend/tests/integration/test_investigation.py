@@ -23,6 +23,7 @@ from support_agent.llm.fake import ScriptStep, tool_reply, transient
 
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 HeadersFor = Callable[[str], Awaitable[dict[str, str]]]
+Drain = Callable[[], Awaitable[int]]
 UseAgents = Callable[[dict[str, list[ScriptStep]]], AgentFake]
 
 
@@ -39,6 +40,7 @@ def classified(category: str = "order_status") -> ScriptStep:
 
 async def start_run(
     client: httpx.AsyncClient,
+    drain: Drain,
     headers: dict[str, str],
     message: str,
     order: str | None,
@@ -52,6 +54,7 @@ async def start_run(
     ticket_id = str(created.json()["id"])
     response = await client.post(f"/tickets/{ticket_id}/runs", headers=headers)
     assert response.status_code == 202
+    await drain()  # the background worker's turn
     return ticket_id, str(response.json()["run_id"])
 
 
@@ -65,6 +68,7 @@ def payloads(rows: list[AuditEvent], event_type: str) -> list[dict[str, Any]]:
 
 async def test_step_limit_escalates_the_run_and_audits_every_call(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -80,7 +84,7 @@ async def test_step_limit_escalates_the_run_and_audits_every_call(
     )
     priya = await auth_headers("priya@example.com")
 
-    ticket_id, run_id = await start_run(client, priya, "Where is my order?", "ORD-1001")
+    ticket_id, run_id = await start_run(client, drain_jobs, priya, "Where is my order?", "ORD-1001")
 
     run = await session.get(WorkflowRun, UUID(run_id))
     ticket = await session.get(Ticket, UUID(ticket_id))
@@ -94,6 +98,7 @@ async def test_step_limit_escalates_the_run_and_audits_every_call(
 
 async def test_llm_failure_midway_escalates_and_keeps_the_calls_made(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -111,7 +116,7 @@ async def test_llm_failure_midway_escalates_and_keeps_the_calls_made(
     )
     priya = await auth_headers("priya@example.com")
 
-    _, run_id = await start_run(client, priya, "Where is my order?", "ORD-1001")
+    _, run_id = await start_run(client, drain_jobs, priya, "Where is my order?", "ORD-1001")
 
     run = await session.get(WorkflowRun, UUID(run_id))
     assert run is not None and run.status == RunStatus.ESCALATED
@@ -123,6 +128,7 @@ async def test_llm_failure_midway_escalates_and_keeps_the_calls_made(
 
 async def test_confident_label_without_an_order_asks_the_customer_and_skips_the_agents(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -130,7 +136,7 @@ async def test_confident_label_without_an_order_asks_the_customer_and_skips_the_
     fake = use_agents({"classifier": [classified("refund")]})  # nothing else is scripted
     priya = await auth_headers("priya@example.com")
 
-    _, run_id = await start_run(client, priya, "Where is my refund?", None)
+    _, run_id = await start_run(client, drain_jobs, priya, "Where is my refund?", None)
 
     run = await session.get(WorkflowRun, UUID(run_id))
     assert run is not None and run.status == RunStatus.AWAITING_CUSTOMER

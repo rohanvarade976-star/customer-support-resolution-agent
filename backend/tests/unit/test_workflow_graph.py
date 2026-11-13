@@ -16,13 +16,24 @@ from support_agent.agents.fake import AgentFake, plan_reply, read_call, summary_
 from support_agent.domain.enums import RunStatus
 from support_agent.llm.errors import LLMError
 from support_agent.llm.fake import ScriptStep, text_reply, tool_reply, transient
-from support_agent.workflow.fake import FakeWorld, fake_deps, refund_scripts, scripted_client
-from support_agent.workflow.graph import initial_state, run_workflow
+from support_agent.workflow.fake import (
+    FakeWorld,
+    fake_deps,
+    refund_scripts,
+    run_workflow,
+    scripted_client,
+)
+from support_agent.workflow.graph import initial_state
 from support_agent.workflow.nodes.classify import normalize_order_number
 from support_agent.workflow.nodes.finish import escalate
 from support_agent.workflow.nodes.intake import intake
-from support_agent.workflow.nodes.placeholders import ask_for_order, needs_clarification
-from support_agent.workflow.state import OrderHint, WorkflowError, WorkflowState
+from support_agent.workflow.nodes.placeholders import (
+    CLARIFY_MESSAGE,
+    ORDER_NUMBER_MESSAGE,
+    ask_for_order,
+    needs_clarification,
+)
+from support_agent.workflow.state import AskedFor, OrderHint, WorkflowError, WorkflowState
 
 TOOL = "classification"
 CUSTOMER = uuid4()
@@ -200,12 +211,25 @@ def test_normalize_order_number(raw: str | None, expected: str | None) -> None:
 
 async def test_nodes_return_only_the_fields_they_change() -> None:
     state = make_state("ORD-1001")
+    world = FakeWorld()
+    deps = fake_deps(scripted_client(AgentFake({})), world)
 
-    assert await intake(state) == {"status": RunStatus.INVESTIGATING, "order_number": "ORD-1001"}
-    assert await needs_clarification(state) == {"status": RunStatus.AWAITING_CUSTOMER}
+    assert await intake(state, deps=deps) == {
+        "status": RunStatus.INVESTIGATING,
+        "order_number": "ORD-1001",
+        "customer_memory": "",
+    }
+    assert world.memory_loaded_for == [CUSTOMER]  # the state's customer, set by code
+    assert await needs_clarification(state) == {
+        "status": RunStatus.AWAITING_CUSTOMER,
+        "asked_for": AskedFor.CLARIFICATION,
+        "customer_reply": CLARIFY_MESSAGE,
+    }
     assert await ask_for_order(state) == {
         "status": RunStatus.AWAITING_CUSTOMER,
+        "asked_for": AskedFor.ORDER_NUMBER,
         "missing_information": ["order_number"],
+        "customer_reply": ORDER_NUMBER_MESSAGE,
     }
     escalated = await escalate(state)
     assert set(escalated) == {"status", "customer_reply"}

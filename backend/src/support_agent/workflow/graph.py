@@ -1,4 +1,4 @@
-"""The workflow graph (M6).
+"""The workflow graph (M6, with M7's pauses).
 
 Multi-agent mode:
 
@@ -12,35 +12,71 @@ Multi-agent mode:
                                                                         -> escalate
         resolve_case -> route_after_resolve -> propose_refund | explain | request_info | escalate
 
+Pauses (M7, nodes/pauses.py), saved by the checkpointer so a later call can resume them:
+
+        propose_refund -> wait_for_approval (pause) -> check_approval
+            -> execute_refund | reopen_ticket | escalate              (nodes/approval.py)
+        needs_clarification / ask_for_order / request_info -> route_to_customer
+            -> wait_for_customer (pause) -> classify (unclear, no order) | gathering (more info)
+            -> escalate, once the clarification limit is reached
+
 Baseline mode replaces supervise/investigate/policy with one `baseline_agent` node and has
 no extra round. Everything after `gather` is shared, so both modes meet the same code.
 
 Plain-code routers decide every route: the model proposes, code decides. The supervisor
-only chooses which specialists gather information. Money only moves after a human approval,
-and not in this graph: `propose_refund` stores a proposal and a pending approval.
+only chooses which specialists gather information. Money only moves in `execute_refund`,
+after a reviewer's approval that code reads back from the database.
 
 Dependencies (the LLM client, services and sessions) come in through `WorkflowDeps` and are
 bound to the nodes here, so no node builds its own and tests can pass fakes.
 
-No checkpointer yet: the graph runs start to finish in one call (pause/resume is M7).
+Each call runs one segment: from the start (or a resume) to the next pause or the end.
+`start_workflow`, `resume_workflow` and `advance_workflow` (the worker's entry point, which
+also picks up after a crash) return what the segment did, so the caller can record exactly
+that part (services/run_recording.py).
 """
 
 from collections.abc import Awaitable, Callable, Hashable
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from uuid import UUID
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 
-from support_agent.domain.enums import ResolutionAction, RunMode, RunStatus
+from support_agent.domain.enums import ApprovalDecision, ResolutionAction, RunMode, RunStatus
 from support_agent.workflow.deps import WorkflowDeps
-from support_agent.workflow.nodes import finish, gather, resolve, specialists, supervise
+from support_agent.workflow.nodes import (
+    approval,
+    finish,
+    gather,
+    pauses,
+    resolve,
+    specialists,
+    supervise,
+)
 from support_agent.workflow.nodes.classify import classify
 from support_agent.workflow.nodes.intake import intake
 from support_agent.workflow.nodes.placeholders import ask_for_order, needs_clarification
-from support_agent.workflow.state import WorkflowState
+from support_agent.workflow.state import AskedFor, WorkflowState, restore_enums
 
-__all__ = ["WorkflowDeps", "build_graph", "initial_state", "run_workflow"]
+__all__ = [
+    "Checkpointer",
+    "NotPausedError",
+    "Segment",
+    "WorkflowDeps",
+    "advance_workflow",
+    "build_graph",
+    "initial_state",
+    "latest_checkpoint_id",
+    "resume_workflow",
+    "start_workflow",
+]
+
+Checkpointer = BaseCheckpointSaver[Any]
 
 
 class NodeFn(Protocol):
@@ -104,8 +140,40 @@ def route_after_resolve(state: WorkflowState) -> str:
     return _NODE_FOR_ACTION[outcome.action]
 
 
-def build_graph(deps: WorkflowDeps) -> CompiledStateGraph[WorkflowState]:
+def route_after_propose(state: WorkflowState) -> str:
+    """A stored proposal waits for the reviewer; a refused one has already escalated."""
+    return "wait_for_approval" if "proposal_id" in state else "end"
+
+
+def route_after_approval(state: WorkflowState) -> str:
+    """By the decision stored in the database. Anything but approve or reject escalates."""
+    decision = state.get("approval_decision")
+    if decision == ApprovalDecision.APPROVED:
+        return "execute_refund"
+    if decision == ApprovalDecision.REJECTED:
+        return "reopen_ticket"
+    return "escalate"  # expired, still pending, or no approval at all
+
+
+def route_to_customer(state: WorkflowState, max_rounds: int) -> str:
+    """Ask, unless the customer has already answered as many questions as allowed."""
+    if state.get("clarification_rounds", 0) >= max_rounds:
+        return "escalate"
+    return "wait_for_customer"
+
+
+def route_after_customer(state: WorkflowState, gathering_entry: str) -> str:
+    """Continue from the step that needed the answer."""
+    if state.get("asked_for") == AskedFor.MORE_INFORMATION:
+        return gathering_entry  # the case was understood: gather again with the new detail
+    return "classify"  # the category or the order was unclear: classify the whole thread
+
+
+def build_graph(
+    deps: WorkflowDeps, checkpointer: Checkpointer
+) -> CompiledStateGraph[WorkflowState]:
     baseline = deps.mode == RunMode.BASELINE
+    gathering_entry = "baseline_agent" if baseline else "supervise"
 
     async def classify_node(state: WorkflowState) -> dict[str, object]:
         return await classify(state, llm=deps.llm, owns_order=deps.owns_order)
@@ -121,8 +189,14 @@ def build_graph(deps: WorkflowDeps) -> CompiledStateGraph[WorkflowState]:
     def route(state: WorkflowState) -> str:
         return route_after_classify(state, deps.confidence_threshold, deps.mode)
 
+    def ask_or_escalate(state: WorkflowState) -> str:
+        return route_to_customer(state, deps.max_clarification_rounds)
+
+    def continue_after_reply(state: WorkflowState) -> str:
+        return route_after_customer(state, gathering_entry)
+
     graph = StateGraph(WorkflowState)
-    graph.add_node("intake", intake)
+    graph.add_node("intake", bind(intake))
     graph.add_node("classify", classify_node)
     graph.add_node("needs_clarification", needs_clarification)
     graph.add_node("ask_for_order", ask_for_order)
@@ -132,11 +206,15 @@ def build_graph(deps: WorkflowDeps) -> CompiledStateGraph[WorkflowState]:
     graph.add_node("explain", finish.explain)
     graph.add_node("request_info", finish.request_info)
     graph.add_node("escalate", finish.escalate)
+    graph.add_node("wait_for_approval", pauses.wait_for_approval)
+    graph.add_node("check_approval", bind(approval.check_approval))
+    graph.add_node("execute_refund", bind(approval.execute_refund))
+    graph.add_node("reopen_ticket", approval.reopen_ticket)
+    graph.add_node("wait_for_customer", pauses.wait_for_customer)
 
     graph.add_edge(START, "intake")
     graph.add_edge("intake", "classify")
 
-    gathering_entry = "baseline_agent" if baseline else "supervise"
     graph.add_conditional_edges(
         "classify",
         route,
@@ -166,16 +244,31 @@ def build_graph(deps: WorkflowDeps) -> CompiledStateGraph[WorkflowState]:
         "resolve_case", route_after_resolve, _targets(*_NODE_FOR_ACTION.values(), "escalate")
     )
 
-    for end_node in (
-        "needs_clarification",
-        "ask_for_order",
+    # Approval: pause, then fixed code on the decision stored in the database.
+    graph.add_conditional_edges(
         "propose_refund",
-        "explain",
-        "request_info",
-        "escalate",
-    ):
+        route_after_propose,
+        {"wait_for_approval": "wait_for_approval", "end": END},
+    )
+    graph.add_edge("wait_for_approval", "check_approval")
+    graph.add_conditional_edges(
+        "check_approval",
+        route_after_approval,
+        _targets("execute_refund", "reopen_ticket", "escalate"),
+    )
+
+    # Questions for the customer: pause, then continue from the step that needed the answer.
+    for ask_node in ("needs_clarification", "ask_for_order", "request_info"):
+        graph.add_conditional_edges(
+            ask_node, ask_or_escalate, _targets("wait_for_customer", "escalate")
+        )
+    graph.add_conditional_edges(
+        "wait_for_customer", continue_after_reply, _targets("classify", gathering_entry)
+    )
+
+    for end_node in ("explain", "escalate", "execute_refund", "reopen_ticket"):
         graph.add_edge(end_node, END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def initial_state(
@@ -193,11 +286,136 @@ def initial_state(
         complaint_text=complaint_text,
         ticket_order_number=ticket_order_number,
         status=RunStatus.CREATED,
+        customer_replies=[],
         errors=[],
     )
 
 
-async def run_workflow(deps: WorkflowDeps, state: WorkflowState) -> WorkflowState:
-    """Run the graph to the end and return the final state."""
-    final: Any = await build_graph(deps).ainvoke(state)
-    return cast(WorkflowState, final)
+class NotPausedError(Exception):
+    """The thread has no pending pause to resume (finished, never started, or unknown)."""
+
+
+@dataclass(frozen=True)
+class Segment:
+    """One call's worth of a run: from the start or a resume to a pause or the end."""
+
+    state: WorkflowState  # the whole state afterwards
+    # Only what nodes wrote during this segment (reducer keys: only the new items). Keys are
+    # missing for steps that did not run, which is how recording avoids repeating events.
+    written: WorkflowState
+    paused: bool  # True: waiting at an interrupt, resumable later
+
+
+def thread_config(thread_id: str) -> RunnableConfig:
+    return {"configurable": {"thread_id": thread_id}}
+
+
+async def start_workflow(
+    deps: WorkflowDeps, checkpointer: Checkpointer, thread_id: str, state: WorkflowState
+) -> Segment:
+    return await _run_segment(build_graph(deps, checkpointer), state, thread_id)
+
+
+async def resume_workflow(
+    deps: WorkflowDeps, checkpointer: Checkpointer, thread_id: str, value: dict[str, str]
+) -> Segment:
+    """Continue a paused run. A fresh graph is fine: everything comes from the checkpoint."""
+    graph = build_graph(deps, checkpointer)
+    snapshot = await graph.aget_state(thread_config(thread_id))
+    if not snapshot.interrupts:
+        raise NotPausedError(thread_id)
+    return await _run_segment(graph, Command(resume=value), thread_id)
+
+
+async def latest_checkpoint_id(checkpointer: Checkpointer, thread_id: str) -> str | None:
+    """The id of the thread's newest checkpoint, or None if it has none.
+
+    While a run is paused nothing writes to its thread, so this id names the pause. A resume
+    job carries it, so a retried job can tell "my pause, not yet resumed" from "a later
+    pause, reached after my resume already ran" (`advance_workflow`).
+    """
+    saved = await checkpointer.aget_tuple(thread_config(thread_id))
+    if saved is None:
+        return None
+    checkpoint_id: str = saved.config["configurable"]["checkpoint_id"]
+    return checkpoint_id
+
+
+async def advance_workflow(
+    deps: WorkflowDeps,
+    checkpointer: Checkpointer,
+    thread_id: str,
+    *,
+    initial: WorkflowState | None,
+    resume: tuple[str | None, dict[str, str]] | None,
+) -> Segment:
+    """Run the next segment from wherever the thread's checkpoints say it is (ADR-012).
+
+    Built for at-least-once delivery: a job may run again after its worker died half-way,
+    so it must never start over or answer a pause twice.
+
+    - No checkpoint: start from `initial` (a start job only).
+    - Paused at the checkpoint the job was created for (`resume[0]`): resume with `resume[1]`.
+    - Paused anywhere else: an earlier attempt already reached this pause but died before
+      it was saved in our tables. Report the pause; nothing runs.
+    - Stopped between steps (the worker died mid-segment): continue with no input. Steps
+      already checkpointed are not run again.
+    - Finished, but not saved in our tables: report the end; nothing runs.
+
+    The two "nothing runs" cases cannot know what the dead attempt wrote, so their segment
+    carries only where the run ended up (`_recovered`): its events are lost (ADR-012).
+    """
+    graph = build_graph(deps, checkpointer)
+    config = thread_config(thread_id)
+    snapshot = await graph.aget_state(config)
+    if not snapshot.values:
+        if initial is None:
+            raise NotPausedError(thread_id)  # a resume for a thread that never started
+        return await _run_segment(graph, initial, thread_id)
+    if snapshot.interrupts:
+        current = snapshot.config["configurable"]["checkpoint_id"]
+        if resume is not None and resume[0] == current:
+            return await _run_segment(graph, Command(resume=resume[1]), thread_id)
+        return _recovered(snapshot.values, paused=True)
+    if snapshot.next:
+        return await _run_segment(graph, None, thread_id)
+    return _recovered(snapshot.values, paused=False)
+
+
+# What the customer and the ticket must show once a segment ends. The state always holds the
+# latest value of each, so a recovered segment can take them from there.
+_OUTCOME_KEYS = ("customer_reply", "ticket_status")
+
+
+def _recovered(values: dict[str, Any], *, paused: bool) -> Segment:
+    """A segment an earlier attempt ran to its end but never saved in our tables."""
+    state = restore_enums(values)
+    outcome = {key: state[key] for key in _OUTCOME_KEYS if key in state}  # type: ignore[literal-required]
+    return Segment(state=state, written=cast(WorkflowState, outcome), paused=paused)
+
+
+_REDUCER_KEYS = ("errors", "customer_replies")
+
+
+async def _run_segment(
+    graph: CompiledStateGraph[WorkflowState], graph_input: Any, thread_id: str
+) -> Segment:
+    config = thread_config(thread_id)
+    written: dict[str, Any] = {}
+    # durability="sync": each step's checkpoint is saved before the next step starts, so a
+    # pause is on disk before we commit our own rows and answer the request.
+    async for chunk in graph.astream(graph_input, config, stream_mode="updates", durability="sync"):
+        for node, update in chunk.items():
+            if node == "__interrupt__" or not update:
+                continue
+            for key, value in update.items():
+                if key in _REDUCER_KEYS:
+                    written.setdefault(key, []).extend(value)
+                else:
+                    written[key] = value
+    snapshot = await graph.aget_state(config)
+    return Segment(
+        state=restore_enums(snapshot.values),
+        written=cast(WorkflowState, written),
+        paused=bool(snapshot.interrupts),
+    )

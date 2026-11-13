@@ -9,7 +9,7 @@ from support_agent.agents.supervisor import supervise as run_supervisor
 from support_agent.domain.enums import TicketCategory
 from support_agent.llm.errors import LLMUnavailableError, StructuredOutputError
 from support_agent.workflow.deps import WorkflowDeps
-from support_agent.workflow.state import WorkflowError, WorkflowState
+from support_agent.workflow.state import WorkflowError, WorkflowState, customer_text
 
 
 async def supervise(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str, object]:
@@ -20,10 +20,11 @@ async def supervise(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str, ob
     try:
         plan = await run_supervisor(
             deps.llm,
-            complaint_text=state["complaint_text"],
+            complaint_text=customer_text(state),
             category=TicketCategory(classification.category),
             order_number=order_number,
             tier=deps.tool_context.settings.supervisor_tier,
+            customer_memory=state.get("customer_memory", ""),
         )
     except LLMUnavailableError:
         return {"errors": [WorkflowError.LLM_UNAVAILABLE]}

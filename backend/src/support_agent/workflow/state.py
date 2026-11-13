@@ -9,14 +9,20 @@ The two specialists run in parallel (graph.py). They never write the same key: t
 investigator writes `investigation`, the policy agent writes `policy`, and both may append
 to `errors`, the one key with a reducer. That is what makes the parallel merge safe.
 
-Nothing here is stored as is. services/runs.py turns the final state into audit events
-(ids, counts and codes only) and rows. Several values hold customer data or model text
-(evidence, findings, the outcome's message): they stay in memory.
+From M7 the state is saved by the checkpointer after every step (workflow/checkpointer.py),
+so a paused run can be resumed later. Checkpoints hold customer text and model output: they
+are working memory for the run, never a system of record, and never copied into audit
+events. services/run_recording.py turns what each part of a run did into audit events (ids,
+counts and codes only) and rows.
+
+A run can loop back after the customer replies. Values that belong to one gathering pass
+(`investigation`, `investigation_retry`, `policy`, `baseline_messages`) are reset to None
+before gathering again, so a later pass never reuses an earlier pass's evidence.
 """
 
 import operator
 from enum import StrEnum
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, NotRequired, TypedDict, cast
 from uuid import UUID
 
 from support_agent.agents.baseline import BaselineGathering
@@ -26,7 +32,12 @@ from support_agent.agents.policy import PolicyOutcome
 from support_agent.agents.resolve import ResolutionOutcome
 from support_agent.agents.supervisor import SupervisorPlan
 from support_agent.domain.eligibility import EligibilityDecision
-from support_agent.domain.enums import RunStatus
+from support_agent.domain.enums import (
+    ApprovalDecision,
+    RefundOperationStatus,
+    RunStatus,
+    TicketStatus,
+)
 from support_agent.domain.shipping import ShippingDelayFacts
 
 
@@ -38,6 +49,14 @@ class OrderHint(StrEnum):
     VERIFIED = "verified"  # ticket names no order; this customer owns the hinted one
     IGNORED_NOT_OWNED = "ignored_not_owned"  # unknown, or another customer's order
     IGNORED_CONFLICTS_TICKET = "ignored_conflicts_ticket"  # ticket names a different order
+
+
+class AskedFor(StrEnum):
+    """What the run asked the customer, which decides where it continues after the reply."""
+
+    CLARIFICATION = "clarification"  # unclear or low-confidence label -> classify again
+    ORDER_NUMBER = "order_number"  # no verified order -> classify again
+    MORE_INFORMATION = "more_information"  # the resolution asked a question -> gather again
 
 
 class WorkflowError(StrEnum):
@@ -60,6 +79,7 @@ class WorkflowError(StrEnum):
     CRITIC_OUTPUT_INVALID = "CRITIC_OUTPUT_INVALID"
     CASE_FACTS_UNAVAILABLE = "CASE_FACTS_UNAVAILABLE"  # eligibility could not be computed
     PROPOSAL_REFUSED = "PROPOSAL_REFUSED"  # code refused to store the refund proposal
+    REFUND_NOT_EXECUTED = "REFUND_NOT_EXECUTED"  # revalidation refused the approved refund
 
 
 class WorkflowState(TypedDict):
@@ -72,6 +92,10 @@ class WorkflowState(TypedDict):
 
     # --- Filled in by nodes ---
     status: RunStatus
+    # The customer's recent long-term memory, rendered by code from structured fields at
+    # intake (services/memory.py, ADR-013). Background for the supervisor and the resolution
+    # agent, always sent wrapped as untrusted data. Never read by eligibility or validation.
+    customer_memory: NotRequired[str]
     classification: NotRequired[Classification | None]  # None if the LLM call failed
     # The order the rest of the run works on: the ticket's, or a verified hint.
     order_number: NotRequired[str | None]
@@ -81,12 +105,13 @@ class WorkflowState(TypedDict):
     # Gathering. Present exactly when that step ran, which is how services/runs.py knows
     # which events to write.
     supervisor: NotRequired[SupervisorPlan]
-    investigation: NotRequired[InvestigationOutcome]  # after the required-evidence step
-    investigation_retry: NotRequired[InvestigationOutcome]  # the one extra round, if any
+    # None = reset before a new gathering pass (see the module docstring).
+    investigation: NotRequired[InvestigationOutcome | None]  # after the required-evidence step
+    investigation_retry: NotRequired[InvestigationOutcome | None]  # the one extra round, if any
     retry_gaps: NotRequired[list[str]]  # the required lookups the extra round is looking for
     retry_investigation: NotRequired[bool]  # set by the gather node, read by the router
-    policy: NotRequired[PolicyOutcome]
-    baseline_messages: NotRequired[BaselineGathering]  # baseline mode only
+    policy: NotRequired[PolicyOutcome | None]
+    baseline_messages: NotRequired[BaselineGathering | None]  # baseline mode only
 
     # Computed by code, never by a model.
     eligibility: NotRequired[EligibilityDecision]
@@ -97,4 +122,52 @@ class WorkflowState(TypedDict):
     proposal_id: NotRequired[UUID]
     customer_reply: NotRequired[str]  # saved on the ticket: only verified outcomes
     proposal_refusal: NotRequired[str]  # the error code, if code refused the proposal
+
+    # Waiting for the customer (M7). Replies are untrusted text, like the complaint.
+    asked_for: NotRequired[AskedFor]
+    customer_replies: Annotated[list[str], operator.add]
+    clarification_rounds: NotRequired[int]  # questions answered so far
+
+    # After the reviewer's decision (M7). Read from the database by code, never resumed in.
+    approval_decision: NotRequired[ApprovalDecision | None]
+    refund_status: NotRequired[RefundOperationStatus]  # what the payment provider said
+    refund_refusal: NotRequired[str]  # the error code, if revalidation refused the refund
+    # Set only where the ticket's status does not follow from the run's (after a decision).
+    ticket_status: NotRequired[TicketStatus]
     errors: Annotated[list[WorkflowError], operator.add]
+
+
+# Top-level enum fields. A checkpoint stores a StrEnum as a plain string, so these come back
+# as `str`; `restore_enums` turns them back into members after reading a checkpoint.
+_ENUM_FIELDS: dict[str, type[StrEnum]] = {
+    "status": RunStatus,
+    "order_hint": OrderHint,
+    "asked_for": AskedFor,
+    "approval_decision": ApprovalDecision,
+    "refund_status": RefundOperationStatus,
+    "ticket_status": TicketStatus,
+}
+
+
+def restore_enums(values: dict[str, object]) -> WorkflowState:
+    """The state read from a checkpoint, with its enum fields typed again."""
+    restored = dict(values)
+    for key, enum in _ENUM_FIELDS.items():
+        value = restored.get(key)
+        if isinstance(value, str):
+            restored[key] = enum(value)
+    errors = restored.get("errors")
+    if isinstance(errors, list):
+        restored["errors"] = [WorkflowError(code) for code in errors]
+    return cast(WorkflowState, restored)
+
+
+def customer_text(state: WorkflowState) -> str:
+    """The complaint plus every reply so far: what the agents read as the customer's words.
+
+    Still untrusted data: each agent wraps it with `wrap_untrusted` before sending it.
+    """
+    replies = state.get("customer_replies") or []
+    parts = [state["complaint_text"]]
+    parts += [f"Customer follow-up {i}: {reply}" for i, reply in enumerate(replies, start=1)]
+    return "\n\n".join(parts)

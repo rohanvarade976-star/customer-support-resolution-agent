@@ -112,12 +112,50 @@ class RefundOperationStatus(StrEnum):
 
 
 class JobStatus(StrEnum):
-    """Background job queue. A retry puts a job back to QUEUED with a later available_at."""
+    """Background job queue (worker/queue.py).
+
+    A retry puts a job back to QUEUED with a later available_at. A job that has used all its
+    attempts is DEAD: it is never tried again, and its run is escalated to a person.
+    """
 
     QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
-    FAILED = "failed"
+    DEAD = "dead"
+
+
+class JobType(StrEnum):
+    """What a background job does (worker/handlers.py has one handler per type)."""
+
+    START_RUN = "start_run"
+    RESUME_AFTER_DECISION = "resume_after_decision"
+    RESUME_AFTER_CUSTOMER_REPLY = "resume_after_customer_reply"
+    EXPIRE_APPROVALS = "expire_approvals"  # scheduled, no run
+    PURGE_EXPIRED_MEMORY = "purge_expired_memory"  # scheduled, no run
+
+
+# The scheduled sweeps: they work on no run, and at most one of each may be open at a time.
+SWEEP_JOB_TYPES = frozenset({JobType.EXPIRE_APPROVALS, JobType.PURGE_EXPIRED_MEMORY})
+
+
+class MemoryKind(StrEnum):
+    """How a run ended, as stored in long-term customer memory (ADR-013)."""
+
+    CASE_COMPLETED = "case_completed"  # answered, or the reviewer rejected the refund
+    CASE_ESCALATED = "case_escalated"  # passed to a person
+    REFUND_EXECUTED = "refund_executed"  # the payment provider gave a definite answer
+
+
+class MemoryOutcome(StrEnum):
+    """The verified outcome of a past run. Fixed codes only: memory holds no free text."""
+
+    STATUS_EXPLAINED = "status_explained"  # the validated reply explained the order's status
+    REFUND_REJECTED = "refund_rejected"  # a reviewer rejected the proposed refund
+    REFUND_SUBMITTED = "refund_submitted"  # the provider accepted the refund
+    REFUND_PROCESSING = "refund_processing"  # the provider is processing it
+    REFUND_SUCCEEDED = "refund_succeeded"  # the provider confirmed the money was paid out
+    REFUND_FAILED = "refund_failed"  # the provider confirmed the refund failed
+    ESCALATED = "escalated"  # a person took over
 
 
 class StaffRole(StrEnum):

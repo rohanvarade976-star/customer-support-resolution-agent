@@ -2,6 +2,8 @@
 
 The LLM is the scripted fake (never a real API). Money and security outcomes are
 checked in the database, not only in the response.
+
+The API only queues the run (202); `drain_jobs()` then plays the background worker.
 """
 
 from collections.abc import Awaitable, Callable
@@ -14,14 +16,22 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from support_agent.db.models import AuditEvent, Ticket, WorkflowRun
+from support_agent.db.models import AuditEvent, Job, Ticket, WorkflowRun
 from support_agent.db.seed import load_scenarios, seed
-from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, TicketStatus
+from support_agent.domain.enums import (
+    JobStatus,
+    JobType,
+    RunMode,
+    RunStatus,
+    TicketCategory,
+    TicketStatus,
+)
 from support_agent.llm.fake import FakeProvider, ScriptStep, tool_reply, transient
 
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 HeadersFor = Callable[[str], Awaitable[dict[str, str]]]
 UseLLM = Callable[[list[ScriptStep]], FakeProvider]
+Drain = Callable[[], Awaitable[int]]
 
 
 @pytest.fixture(autouse=True)
@@ -62,8 +72,37 @@ async def run_count(session: AsyncSession, ticket_id: str) -> int:
 # ---------------------------------------------------------------- each outcome
 
 
-async def test_confident_run_is_classified_and_saved(
+async def test_starting_a_run_only_queues_it(
     client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
+) -> None:
+    fake = use_llm([answer("refund", 0.95)])
+    priya = await auth_headers("priya@example.com")
+    ticket_id = await create_ticket(client, priya, "Where is my refund?", order="ORD-1001")
+
+    response = await client.post(f"/tickets/{ticket_id}/runs", headers=priya)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "created"
+    assert body["job"] == {
+        "job_type": "start_run",
+        "status": "queued",
+        "attempts": 0,
+        "next_attempt_at": body["job"]["next_attempt_at"],
+    }
+    assert fake.requests == []  # the graph did not run inside the request
+    run = await session.get(WorkflowRun, UUID(body["run_id"]))
+    assert run is not None and run.status == RunStatus.CREATED
+    (job,) = (await session.scalars(select(Job).where(Job.run_id == run.id))).all()
+    assert (job.job_type, job.status, job.payload) == (JobType.START_RUN, JobStatus.QUEUED, {})
+
+
+async def test_confident_run_is_classified_and_saved(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    auth_headers: HeadersFor,
+    use_llm: UseLLM,
+    drain_jobs: Drain,
 ) -> None:
     # A confident label, then the supervisor fails: the label is kept, the run escalates.
     # (The full multi-agent paths are in test_workflow_outcomes.py.)
@@ -72,10 +111,12 @@ async def test_confident_run_is_classified_and_saved(
     ticket_id = await create_ticket(client, priya, "Where is my refund?", order="ORD-1001")
 
     response = await client.post(f"/tickets/{ticket_id}/runs", headers=priya)
-
     assert response.status_code == 202
-    body = response.json()
+    assert await drain_jobs() == 1
+
+    body = (await client.get(f"/runs/{response.json()['run_id']}", headers=priya)).json()
     assert (body["status"], body["category"]) == ("escalated", "refund")
+    assert (body["job"]["status"], body["job"]["attempts"]) == ("succeeded", 1)
 
     run = await session.get(WorkflowRun, UUID(body["run_id"]))
     ticket = await session.get(Ticket, UUID(ticket_id))
@@ -102,13 +143,18 @@ async def test_confident_run_is_classified_and_saved(
 
 
 async def test_low_confidence_run_waits_for_the_customer(
-    client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    auth_headers: HeadersFor,
+    use_llm: UseLLM,
+    drain_jobs: Drain,
 ) -> None:
     use_llm([answer("refund", 0.4)])
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "something is wrong")
 
     body = (await client.post(f"/tickets/{ticket_id}/runs", headers=priya)).json()
+    await drain_jobs()
 
     run = await session.get(WorkflowRun, UUID(body["run_id"]))
     ticket = await session.get(Ticket, UUID(ticket_id))
@@ -122,7 +168,11 @@ async def test_low_confidence_run_waits_for_the_customer(
 
 
 async def test_llm_failure_escalates_the_run(
-    client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    auth_headers: HeadersFor,
+    use_llm: UseLLM,
+    drain_jobs: Drain,
 ) -> None:
     use_llm([transient()])
     priya = await auth_headers("priya@example.com")
@@ -131,6 +181,7 @@ async def test_llm_failure_escalates_the_run(
     response = await client.post(f"/tickets/{ticket_id}/runs", headers=priya)
 
     assert response.status_code == 202
+    await drain_jobs()
     run = await session.get(WorkflowRun, UUID(response.json()["run_id"]))
     ticket = await session.get(Ticket, UUID(ticket_id))
     assert run is not None and ticket is not None
@@ -143,7 +194,11 @@ async def test_llm_failure_escalates_the_run(
 
 
 async def test_another_customers_order_number_is_ignored(
-    client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    auth_headers: HeadersFor,
+    use_llm: UseLLM,
+    drain_jobs: Drain,
 ) -> None:
     # Rahul names Priya's order in the text; the classifier extracts it.
     use_llm([answer("refund", 0.9, order_number="ORD-1001")])
@@ -151,6 +206,7 @@ async def test_another_customers_order_number_is_ignored(
     ticket_id = await create_ticket(client, rahul, "Refund my order ORD-1001 now")
 
     body = (await client.post(f"/tickets/{ticket_id}/runs", headers=rahul)).json()
+    await drain_jobs()
 
     ticket = await session.get(Ticket, UUID(ticket_id))
     assert ticket is not None and ticket.order_id is None  # never attached to Priya's order
@@ -217,12 +273,13 @@ async def test_second_run_while_one_is_unfinished_is_409(
 
 
 async def test_owner_and_reviewer_can_read_a_run_others_get_404(
-    client: httpx.AsyncClient, auth_headers: HeadersFor, use_llm: UseLLM
+    client: httpx.AsyncClient, auth_headers: HeadersFor, use_llm: UseLLM, drain_jobs: Drain
 ) -> None:
     use_llm([answer("damaged_item", 0.9), transient()])
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "It arrived broken", order="ORD-1001")
     run_id = (await client.post(f"/tickets/{ticket_id}/runs", headers=priya)).json()["run_id"]
+    await drain_jobs()
 
     for email in ("priya@example.com", "anita@example.com"):
         response = await client.get(f"/runs/{run_id}", headers=await auth_headers(email))

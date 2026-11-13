@@ -16,7 +16,7 @@ from uuid import UUID
 from support_agent.agents.classifier import classify as run_classifier
 from support_agent.llm.client import LLMClient
 from support_agent.llm.errors import LLMUnavailableError, StructuredOutputError
-from support_agent.workflow.state import OrderHint, WorkflowError, WorkflowState
+from support_agent.workflow.state import OrderHint, WorkflowError, WorkflowState, customer_text
 
 # (customer_id, order_number) -> does this customer own that order?
 OwnsOrder = Callable[[UUID, str], Awaitable[bool]]
@@ -56,7 +56,7 @@ async def classify(
     state: WorkflowState, *, llm: LLMClient, owns_order: OwnsOrder
 ) -> dict[str, object]:
     try:
-        result = await run_classifier(llm, state["complaint_text"])
+        result = await run_classifier(llm, customer_text(state))
     except LLMUnavailableError:
         return {"classification": None, "errors": [WorkflowError.LLM_UNAVAILABLE]}
     except StructuredOutputError:

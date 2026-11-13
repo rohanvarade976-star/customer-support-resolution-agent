@@ -17,8 +17,6 @@ from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mock_providers.shipping.app import create_app as create_shipping_app
-from mock_providers.shipping.config import ShippingSettings
 from support_agent.agents.fake import (
     AgentFake,
     critique_reply,
@@ -32,6 +30,7 @@ from support_agent.agents.fake import (
     supervisor_reply,
 )
 from support_agent.agents.resolve import ESCALATION_MESSAGE
+from support_agent.api.deps import get_clock, get_llm_client
 from support_agent.core.config import Settings, get_settings
 from support_agent.db.models import (
     ActionProposal,
@@ -52,18 +51,18 @@ from support_agent.domain.enums import (
     TicketCategory,
     TicketStatus,
 )
-from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.fake import ScriptStep, text_reply, tool_reply, transient
 from support_agent.rag.embeddings import FakeEmbedder
 from support_agent.schemas.auth import Principal
 from support_agent.services import policy_search
 from support_agent.services import runs as runs_service
-from support_agent.workflow.deps import BranchSessions
 from support_agent.workflow.fake import scripted_client
+from support_agent.workflow.graph import Checkpointer
 
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 PRIYA_AMOUNT = 249900
 HeadersFor = Callable[[str], Awaitable[dict[str, str]]]
+Drain = Callable[[], Awaitable[int]]
 UseAgents = Callable[[dict[str, list[ScriptStep]]], AgentFake]
 
 
@@ -108,7 +107,11 @@ async def policy_citation(session: AsyncSession, settings: Settings, email: str,
 
 
 async def start_run(
-    client: httpx.AsyncClient, headers: dict[str, str], message: str, order: str | None
+    client: httpx.AsyncClient,
+    drain: Drain,
+    headers: dict[str, str],
+    message: str,
+    order: str | None,
 ) -> tuple[str, str]:
     """Create a ticket and start its run. Returns (ticket_id, run_id)."""
     body: dict[str, str] = {"message": message}
@@ -119,6 +122,7 @@ async def start_run(
     ticket_id = str(created.json()["id"])
     response = await client.post(f"/tickets/{ticket_id}/runs", headers=headers)
     assert response.status_code == 202
+    await drain()  # the background worker's turn
     return ticket_id, str(response.json()["run_id"])
 
 
@@ -160,6 +164,7 @@ async def priya_scripts(
 
 async def test_priya_run_creates_a_pending_approval_and_moves_no_money(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -172,7 +177,9 @@ async def test_priya_run_creates_a_pending_approval_and_moves_no_money(
 
     refunds_before = await count(session, RefundOperation)
 
-    ticket_id, run_id = await start_run(client, priya, "COMPLAINT-TEXT refund please", "ORD-1001")
+    ticket_id, run_id = await start_run(
+        client, drain_jobs, priya, "COMPLAINT-TEXT refund please", "ORD-1001"
+    )
 
     run = await reload(session, WorkflowRun, run_id)
     ticket = await reload(session, Ticket, ticket_id)
@@ -203,6 +210,7 @@ async def test_priya_run_creates_a_pending_approval_and_moves_no_money(
 
 async def test_the_audit_trail_has_every_step_and_no_content(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -219,7 +227,9 @@ async def test_the_audit_trail_has_every_step_and_no_content(
     fake = use_agents(scripts)
     priya = await auth_headers("priya@example.com")
 
-    _, run_id = await start_run(client, priya, "COMPLAINT-TEXT refund please", "ORD-1001")
+    _, run_id = await start_run(
+        client, drain_jobs, priya, "COMPLAINT-TEXT refund please", "ORD-1001"
+    )
 
     rows = await audit_rows(session, run_id)
     types = {row.event_type for row in rows}
@@ -261,6 +271,7 @@ async def test_the_audit_trail_has_every_step_and_no_content(
 
 async def test_the_run_records_its_llm_calls_and_tokens(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -269,7 +280,7 @@ async def test_the_run_records_its_llm_calls_and_tokens(
     fake = use_agents(await priya_scripts(session, permissive_policy_search))
     priya = await auth_headers("priya@example.com")
 
-    _, run_id = await start_run(client, priya, "refund please", "ORD-1001")
+    _, run_id = await start_run(client, drain_jobs, priya, "refund please", "ORD-1001")
 
     run = await reload(session, WorkflowRun, run_id)
     assert run.llm_calls == len(fake.requests) > 0
@@ -286,6 +297,7 @@ async def test_the_run_records_its_llm_calls_and_tokens(
 
 async def test_a_refund_for_an_order_that_is_not_eligible_creates_no_proposal(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -310,7 +322,9 @@ async def test_a_refund_for_an_order_that_is_not_eligible_creates_no_proposal(
 
     refunds_before = await count(session, RefundOperation)
 
-    ticket_id, run_id = await start_run(client, rahul, "I want my money back", "ORD-1004")
+    ticket_id, run_id = await start_run(
+        client, drain_jobs, rahul, "I want my money back", "ORD-1004"
+    )
 
     run = await reload(session, WorkflowRun, run_id)
     ticket = await reload(session, Ticket, ticket_id)
@@ -325,10 +339,12 @@ async def test_a_refund_for_an_order_that_is_not_eligible_creates_no_proposal(
 
 
 async def test_baseline_mode_creates_the_same_pending_approval_with_one_agent(
+    app: FastAPI,
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
-    branch_sessions: BranchSessions,
+    checkpointer: Checkpointer,
     permissive_policy_search: Settings,
 ) -> None:
     citation = await policy_citation(
@@ -356,23 +372,16 @@ async def test_baseline_mode_creates_the_same_pending_approval_with_one_agent(
         name="Priya",
         email="priya@example.com",
     )
-    shipping_mock = create_shipping_app(ShippingSettings(app_env="test"), clock=lambda: NOW)
-
-    async with ShippingClient(
-        permissive_policy_search, transport=httpx.ASGITransport(app=shipping_mock)
-    ) as shipping:
-        response = await runs_service.start_run(
-            session,
-            principal,
-            ticket_id,
-            llm=scripted_client(fake),
-            settings=permissive_policy_search,
-            shipping_client=shipping,
-            embedder=FakeEmbedder(),
-            clock=lambda: NOW,
-            branch_sessions=branch_sessions,
-            mode=RunMode.BASELINE,
-        )
+    # No API route starts a baseline run, so this queues one through the service. The worker
+    # then uses the app's dependencies: this fake, and the seed's instant as "now".
+    llm = scripted_client(fake)
+    app.dependency_overrides[get_llm_client] = lambda: llm
+    app.dependency_overrides[get_clock] = lambda: lambda: NOW
+    env = runs_service.EnqueueEnv(permissive_policy_search, lambda: NOW, checkpointer)
+    response = await runs_service.start_run(
+        session, principal, ticket_id, env, mode=RunMode.BASELINE
+    )
+    await drain_jobs()
 
     run = await reload(session, WorkflowRun, str(response.run_id))
     assert (run.mode, run.status) == (RunMode.BASELINE, RunStatus.AWAITING_APPROVAL)
@@ -396,6 +405,7 @@ async def test_baseline_mode_creates_the_same_pending_approval_with_one_agent(
 
 async def test_order_status_is_explained_saved_on_the_ticket_and_completed(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -413,7 +423,9 @@ async def test_order_status_is_explained_saved_on_the_ticket_and_completed(
     )
     arjun = await auth_headers("arjun@example.com")
 
-    ticket_id, run_id = await start_run(client, arjun, "Where is my laptop?", "ORD-1002")
+    ticket_id, run_id = await start_run(
+        client, drain_jobs, arjun, "Where is my laptop?", "ORD-1002"
+    )
 
     run = await reload(session, WorkflowRun, run_id)
     ticket = await reload(session, Ticket, ticket_id)
@@ -429,6 +441,7 @@ async def test_order_status_is_explained_saved_on_the_ticket_and_completed(
 
 async def test_request_info_saves_the_question_and_waits_for_the_customer(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -440,7 +453,7 @@ async def test_request_info_saves_the_question_and_waits_for_the_customer(
     use_agents(scripts)
     priya = await auth_headers("priya@example.com")
 
-    ticket_id, run_id = await start_run(client, priya, "Something is wrong", "ORD-1001")
+    ticket_id, run_id = await start_run(client, drain_jobs, priya, "Something is wrong", "ORD-1001")
 
     run = await reload(session, WorkflowRun, run_id)
     ticket = await reload(session, Ticket, ticket_id)
@@ -456,6 +469,7 @@ async def test_request_info_saves_the_question_and_waits_for_the_customer(
 
 async def test_a_draft_that_chooses_escalate_escalates_with_a_fixed_reply(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -466,7 +480,9 @@ async def test_a_draft_that_chooses_escalate_escalates_with_a_fixed_reply(
     use_agents(scripts)
     priya = await auth_headers("priya@example.com")
 
-    ticket_id, run_id = await start_run(client, priya, "I want to speak to someone", "ORD-1001")
+    ticket_id, run_id = await start_run(
+        client, drain_jobs, priya, "I want to speak to someone", "ORD-1001"
+    )
 
     run = await reload(session, WorkflowRun, run_id)
     ticket = await reload(session, Ticket, ticket_id)
@@ -477,6 +493,7 @@ async def test_a_draft_that_chooses_escalate_escalates_with_a_fixed_reply(
 
 async def test_llm_failure_while_resolving_escalates_and_creates_nothing(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -487,7 +504,7 @@ async def test_llm_failure_while_resolving_escalates_and_creates_nothing(
     use_agents(scripts)
     priya = await auth_headers("priya@example.com")
 
-    ticket_id, run_id = await start_run(client, priya, "refund please", "ORD-1001")
+    ticket_id, run_id = await start_run(client, drain_jobs, priya, "refund please", "ORD-1001")
 
     run = await reload(session, WorkflowRun, run_id)
     ticket = await reload(session, Ticket, ticket_id)
@@ -502,6 +519,7 @@ async def test_llm_failure_while_resolving_escalates_and_creates_nothing(
 
 async def test_another_customers_order_is_not_found_and_leaks_nothing(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -535,7 +553,7 @@ async def test_another_customers_order_is_not_found_and_leaks_nothing(
     )
     rahul = await auth_headers("rahul@example.com")
 
-    _, run_id = await start_run(client, rahul, "Where is my order?", "ORD-1004")
+    _, run_id = await start_run(client, drain_jobs, rahul, "Where is my order?", "ORD-1004")
 
     rows = await audit_rows(session, run_id)
     calls = {p["call_id"]: p for p in payloads(rows, "tool.called")}

@@ -115,10 +115,17 @@ async def create_proposal_for_run(
 
     The agents have only proposed. Here code recomputes eligibility from the database and
     refuses (AppError, nothing stored) unless the order is still eligible for exactly the
-    amount the workflow validated and no proposal for it is already open. Nothing is
-    committed: the caller commits together with the rest of the run's changes.
+    amount the workflow validated and no proposal for it is already open.
+
+    If THIS run already has an open proposal for the order, its id is returned and nothing
+    new is stored: the step ran before, and the worker died before the graph saved it
+    (ADR-012). Nothing is committed here: the workflow's `propose_refund` dependency commits
+    straight after, before the graph's checkpoint can point at the proposal.
     """
     loaded = await eligibility.load_order(session, ticket.customer_id, order_number)
+    existing = await proposals.open_proposal_for_run(session, run_id, loaded.order_id, now)
+    if existing is not None:
+        return existing.id
     decision = check_eligibility(loaded.facts, now)
     if not decision.eligible:
         raise AppError(409, "NOT_ELIGIBLE", "This order is not eligible for a refund.")
@@ -186,9 +193,15 @@ async def create_refund_proposal(
             409, "PROPOSAL_ALREADY_PENDING", "A refund proposal for this order awaits a decision."
         )
 
-    run = await workflow_runs.create_manual(
-        session, ticket_id=ticket.id, status=RunStatus.AWAITING_APPROVAL, now=now
-    )
+    try:
+        run = await workflow_runs.create_manual(
+            session, ticket_id=ticket.id, status=RunStatus.AWAITING_APPROVAL, now=now
+        )
+    except workflow_runs.RunAlreadyActiveError:
+        await session.rollback()
+        raise AppError(
+            409, "RUN_ALREADY_ACTIVE", "This ticket already has a run in progress."
+        ) from None
     stored = await _store_proposal(
         session,
         run_id=run.id,

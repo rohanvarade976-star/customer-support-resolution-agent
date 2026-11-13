@@ -1,19 +1,24 @@
 """FastAPI dependencies: the database session, "who is calling", the clock, the
-payment and shipping provider clients, the embedder and the LLM client.
+payment and shipping provider clients, the embedder, the LLM client, the checkpointer, and
+the `EnqueueEnv` that requests use to queue work for the background worker.
 
 Every protected route depends on one of these, so identity always comes from the
 verified token and never from the request body. Tests override the clock, the
 payment and shipping clients, the embedder and the LLM client (fixed time, in-memory
-mock providers, fake embedder, fake LLM).
+mock providers, fake embedder, fake LLM) and the checkpointer (the test database).
+
+Since M7 Task 2 the API never runs the workflow, so no route needs the LLM client or a
+`WorkflowEnv`. The worker builds those itself (worker/main.py); the tests build them from
+these same dependencies (tests/integration/conftest.py), so their overrides still apply.
 """
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, cast
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +33,9 @@ from support_agent.llm.providers import build_llm_client
 from support_agent.rag import embeddings
 from support_agent.schemas.auth import Principal
 from support_agent.services import auth as auth_service
+from support_agent.services.runs import EnqueueEnv
 from support_agent.workflow.deps import BranchSessions
+from support_agent.workflow.graph import Checkpointer
 
 # auto_error=False so a missing header goes through our own error format.
 _bearer = HTTPBearer(auto_error=False)
@@ -55,7 +62,6 @@ def get_branch_sessions() -> BranchSessions:
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
-BranchSessionsDep = Annotated[BranchSessions, Depends(get_branch_sessions)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 Clock = Callable[[], datetime]
@@ -85,15 +91,9 @@ async def get_shipping_client(settings: SettingsDep) -> AsyncIterator[ShippingCl
         yield client
 
 
-ShippingClientDep = Annotated[ShippingClient, Depends(get_shipping_client)]
-
-
 def get_embedder(settings: SettingsDep) -> embeddings.Embedder:
     """The process-wide embedder (loaded on first use). Tests override it with a fake."""
     return embeddings.get_embedder(settings)
-
-
-EmbedderDep = Annotated[embeddings.Embedder, Depends(get_embedder)]
 
 
 @lru_cache
@@ -102,7 +102,22 @@ def get_llm_client() -> LLMClient:
     return build_llm_client(get_settings())
 
 
-LLMClientDep = Annotated[LLMClient, Depends(get_llm_client)]
+def get_checkpointer(request: Request) -> Checkpointer:
+    """The process-wide checkpointer, opened (and set up) by the app's lifespan in main.py."""
+    return cast(Checkpointer, request.app.state.checkpointer)
+
+
+CheckpointerDep = Annotated[Checkpointer, Depends(get_checkpointer)]
+
+
+def get_enqueue_env(
+    settings: SettingsDep, clock: ClockDep, checkpointer: CheckpointerDep
+) -> EnqueueEnv:
+    """For routes that queue work for the worker: no model, no provider clients."""
+    return EnqueueEnv(settings, clock, checkpointer)
+
+
+EnqueueEnvDep = Annotated[EnqueueEnv, Depends(get_enqueue_env)]
 
 
 async def get_current_principal(
