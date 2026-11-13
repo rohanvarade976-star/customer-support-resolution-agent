@@ -1,6 +1,7 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, String
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from support_agent.db.base import Base
@@ -17,7 +18,16 @@ class RefundOperation(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
     """
 
     __tablename__ = "refund_operations"
-    __table_args__ = (CheckConstraint("amount_minor > 0", name="amount_minor_positive"),)
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="amount_minor_positive"),
+        CheckConstraint("reconcile_checks >= 0", name="reconcile_checks_non_negative"),
+        # Serves the reconciler's query: "operations whose next check is due".
+        Index(
+            "ix_refund_operations_next_reconcile_at",
+            "next_reconcile_at",
+            postgresql_where=text("next_reconcile_at IS NOT NULL"),
+        ),
+    )
 
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id"), index=True)
     # Unique: one approved proposal can never turn into two refunds.
@@ -31,3 +41,15 @@ class RefundOperation(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
         default=RefundOperationStatus.RESERVED,
         server_default=RefundOperationStatus.RESERVED.value,
     )
+
+    # ---- Reconciliation (services/reconciliation.py, ADR-014)
+    # Every claim by a reconciler adds one. It is also the fencing token: a reconciler may
+    # settle the operation only while the count is still the one it claimed.
+    reconcile_checks: Mapped[int] = mapped_column(default=0, server_default="0")
+    # When a reconciler may next check this operation; while one is checking, the end of its
+    # lease. NULL: nothing left to check (a final status, or escalated to a person).
+    next_reconcile_at: Mapped[datetime | None]
+    # When the reconciler re-sent the refund request (at most once per operation, ADR-004).
+    resent_at: Mapped[datetime | None]
+    # The last check's failure, as a code only.
+    last_reconcile_error: Mapped[str | None] = mapped_column(String(64))

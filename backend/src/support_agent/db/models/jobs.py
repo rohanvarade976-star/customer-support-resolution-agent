@@ -11,7 +11,7 @@ from support_agent.domain.enums import JobStatus, JobType
 
 # Kept as SQL because the constraint and the partial index need it. Same set as
 # domain/enums.py SWEEP_JOB_TYPES; worker/queue.py uses OPEN_SWEEP_SQL for ON CONFLICT.
-SWEEP_TYPES_SQL = "job_type IN ('expire_approvals', 'purge_expired_memory')"
+SWEEP_TYPES_SQL = "job_type IN ('expire_approvals', 'purge_expired_memory', 'reconcile_refunds')"
 OPEN_SWEEP_SQL = f"{SWEEP_TYPES_SQL} AND status IN ('queued', 'running')"
 
 

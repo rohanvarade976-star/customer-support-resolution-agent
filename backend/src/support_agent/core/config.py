@@ -164,6 +164,22 @@ class Settings(BaseSettings):
     # How often each worker schedules the purge of expired memory.
     memory_purge_check_seconds: int = Field(default=3600, ge=1, le=86400)
 
+    # Refund reconciliation (services/reconciliation.py, ADR-014).
+    # How often each worker schedules the reconciliation sweep, and how many refund
+    # operations one sweep checks at most.
+    reconcile_check_seconds: int = Field(default=30, ge=1, le=3600)
+    reconcile_batch_size: int = Field(default=20, ge=1, le=500)
+    # Checks per refund operation before its run is escalated to a person (money untouched).
+    reconcile_max_checks: int = Field(default=10, ge=1, le=50)
+    # Wait between checks of one operation: base * 2^(check-1), capped, then jittered.
+    reconcile_backoff_base_seconds: float = Field(default=30.0, ge=0, le=3600)
+    reconcile_backoff_max_seconds: float = Field(default=3600.0, ge=0, le=86400)
+    # A claimed operation belongs to its reconciler for this long (one check).
+    reconcile_lease_seconds: int = Field(default=120, ge=5, le=3600)
+    # A refund still "reserved" this long after reserving means the executor died before
+    # (or while) calling the provider. Must outlast the executor's own provider call.
+    reconcile_stale_reserved_seconds: int = Field(default=300, ge=1, le=86400)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
@@ -186,6 +202,19 @@ class Settings(BaseSettings):
         # Renew at least twice per lease, so one slow heartbeat does not lose the job.
         if self.job_heartbeat_seconds * 2 > self.job_lease_seconds:
             raise ValueError("JOB_HEARTBEAT_SECONDS must be at most half of JOB_LEASE_SECONDS")
+        return self
+
+    @model_validator(mode="after")
+    def _reconciler_outlasts_provider_calls(self) -> "Settings":
+        # The longest a provider exchange can take: every retried read, plus one refund send.
+        # A reconciler must not take over an operation while the executor (stale reserved)
+        # or another reconciler (lease) may still be waiting on the provider (ADR-014).
+        one_call = self.provider_connect_timeout_seconds + self.provider_read_timeout_seconds
+        budget = (self.provider_max_attempts + 1) * one_call
+        if self.reconcile_stale_reserved_seconds <= budget:
+            raise ValueError("RECONCILE_STALE_RESERVED_SECONDS must exceed the provider call time")
+        if self.reconcile_lease_seconds <= budget:
+            raise ValueError("RECONCILE_LEASE_SECONDS must exceed the provider call time")
         return self
 
     @field_validator("jwt_secret")

@@ -474,7 +474,7 @@ def _build_deps(
 
     async def execute_refund(proposal_id: UUID) -> RefundResult:
         operation = await refund_execution.execute_approved_refund(
-            session, env.payments, proposal_id, now=clock()
+            session, env.payments, proposal_id, now=clock(), settings=settings
         )
         return RefundResult(operation.status, refund_execution.describe(operation.status))
 
