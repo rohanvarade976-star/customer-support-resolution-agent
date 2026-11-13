@@ -29,3 +29,13 @@ def test_prose_window_matches_front_matter(path: Path) -> None:
     days = policy.metadata.refund_window_days
     assert days is not None
     assert f"{days} days to request a return" in policy.body
+
+
+def test_shipping_prose_threshold_matches_front_matter() -> None:
+    # The investigation threshold is read from the front matter (ADR-005); the prose is what
+    # agents cite. They must state the same number.
+    policy = load_policy_file(POLICY_DIR / "shipping_delays_v1.md")
+
+    days = policy.metadata.investigation_threshold_days
+    assert days is not None
+    assert f"more than {days} days past its expected delivery date" in policy.body

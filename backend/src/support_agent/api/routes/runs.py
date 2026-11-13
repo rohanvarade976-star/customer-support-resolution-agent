@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter
 
 from support_agent.api.deps import (
+    BranchSessionsDep,
     ClockDep,
     CustomerDep,
     EmbedderDep,
@@ -31,6 +32,7 @@ async def start_run(
     shipping_client: ShippingClientDep,
     embedder: EmbedderDep,
     clock: ClockDep,
+    branch_sessions: BranchSessionsDep,
 ) -> RunResponse:
     return await runs_service.start_run(
         session,
@@ -41,6 +43,7 @@ async def start_run(
         shipping_client=shipping_client,
         embedder=embedder,
         clock=clock,
+        branch_sessions=branch_sessions,
     )
 
 

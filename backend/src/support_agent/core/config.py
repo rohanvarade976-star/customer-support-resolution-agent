@@ -3,6 +3,7 @@
 Every other module reads config through `get_settings()`, never from `os.environ`.
 """
 
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -41,6 +42,9 @@ class Settings(BaseSettings):
     access_token_minutes: int = Field(default=60, ge=1, le=1440)
     # Password given to every seeded demo account. Only the seed script needs it.
     demo_password: SecretStr | None = None
+    # Pins the demo scenarios' "N days ago" to noon UTC on this date, for the database
+    # seed and the mock shipping provider alike (core/demo_anchor.py). Unset: "now".
+    demo_anchor_date: date | None = None
 
     # External providers (the mocks locally). Used only by `integrations/`.
     payments_base_url: str = "http://localhost:8001"
@@ -111,6 +115,26 @@ class Settings(BaseSettings):
     # model wants more, the run escalates instead of looping.
     investigator_max_tool_calls: int = Field(default=8, ge=1, le=20)
 
+    # The policy agent (agents/policy.py) has two tiers (ADR-009). The search loop is cheap
+    # and runs on small. The findings step needs the large model: on small it often names
+    # a rule's fields wrongly and the provider rejects the call.
+    policy_agent_search_tier: Literal["small", "large"] = "small"
+    policy_agent_findings_tier: Literal["small", "large"] = "large"
+    # The most searches it may make (PRD "Agent specifications": max 4).
+    policy_agent_max_searches: int = Field(default=4, ge=1, le=8)
+
+    # Resolution (agents/resolve.py). The most times a draft may be revised after the
+    # validator or critic objects (PRD FR-10: one revision; at most 2 allowed here).
+    resolution_max_revisions: int = Field(default=1, ge=0, le=2)
+    # The critic's tier. It reviews text and cannot change amounts or override the validator.
+    critic_tier: Literal["small", "large"] = "large"
+    # The supervisor's tier (agents/supervisor.py). It only picks which specialists gather
+    # information and what each should focus on; it decides nothing about the outcome.
+    supervisor_tier: Literal["small", "large"] = "small"
+    # Order and carrier delivery times that differ by more than this are a conflict, and the
+    # case escalates (domain/validation.py).
+    delivery_date_tolerance_hours: int = Field(default=24, ge=0, le=168)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
@@ -118,7 +142,9 @@ class Settings(BaseSettings):
             raise ValueError("provider base URLs must start with 'http://' or 'https://'")
         return value
 
-    @field_validator("groq_api_key", "gemini_api_key", "groq_reasoning_effort", mode="before")
+    @field_validator(
+        "groq_api_key", "gemini_api_key", "groq_reasoning_effort", "demo_anchor_date", mode="before"
+    )
     @classmethod
     def _blank_means_unset(cls, value: object) -> object:
         # `GEMINI_API_KEY=` (blank, as in .env.example) means "not configured".

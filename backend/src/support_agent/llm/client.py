@@ -41,6 +41,7 @@ from support_agent.llm.types import (
     ToolSpec,
     check_message_order,
 )
+from support_agent.llm.usage import record_usage
 
 log = logging.getLogger(__name__)
 
@@ -191,6 +192,7 @@ class RoutedLLMClient:
                 attempt += 1
                 continue
             _log_usage(provider.name, model, request.tier, attempt, started, reply=reply)
+            record_usage(reply.usage)
             return LLMResult(
                 content=reply.content,
                 tool_calls=reply.tool_calls,

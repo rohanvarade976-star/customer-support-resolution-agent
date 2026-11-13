@@ -14,7 +14,11 @@ exist comes from the registry we are given (an agent's restricted registry, tool
 
 `trace` keeps one record per call: tool name, call id, outcome code, latency. It never
 holds arguments (except a successful call's order number) or results, so it is safe to
-store in the audit trail. Refused and failed calls count towards the limit, so a model
+store in the audit trail. `results` is different: it keeps the typed output (and arguments)
+of each successful call, in memory, so an agent can check its own claims against what the
+tools really returned (e.g. policy citations). Never store or log it.
+
+Refused and failed calls count towards the limit, so a model
 that keeps asking for a forbidden tool cannot loop forever.
 """
 
@@ -22,6 +26,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -71,6 +76,16 @@ class ToolCallRecord(BaseModel):
 
 
 @dataclass(frozen=True)
+class ToolResult:
+    """A successful call's arguments and typed output. Holds content: keep it in memory."""
+
+    call_id: str
+    tool: str
+    args: dict[str, Any]
+    output: BaseModel
+
+
+@dataclass(frozen=True)
 class ToolLoopResult:
     messages: list[ChatMessage]  # the whole conversation, including the tool exchanges
     step_limit_reached: bool  # True: the model wanted more calls than allowed
@@ -101,6 +116,7 @@ class ToolLoop:
             for s in registry.export_schemas()
         ]
         self.trace: list[ToolCallRecord] = []
+        self.results: list[ToolResult] = []  # successful calls only, with their content
 
     async def run(self, messages: list[ChatMessage]) -> ToolLoopResult:
         conversation = list(messages)
@@ -149,6 +165,7 @@ class ToolLoop:
             outcome, recorded_order = result.error_code, None
         else:
             outcome = OUTCOME_OK
+            self.results.append(ToolResult(call.id, call.name, dict(call.args), result))
             recorded_order = order_number if isinstance(order_number, str) else None
         record = ToolCallRecord(
             call_id=call.id,

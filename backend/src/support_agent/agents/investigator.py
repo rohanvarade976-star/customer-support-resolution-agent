@@ -17,7 +17,7 @@ LLM failures do not raise: they come back as `InvestigationOutcome.failure`, tog
 with whatever trace exists so far, and the workflow escalates (nodes/investigate.py).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import cache
 from pathlib import Path
@@ -27,7 +27,13 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from support_agent.llm.client import LLMClient
 from support_agent.llm.errors import LLMUnavailableError, StructuredOutputError, ToolLoopOutputError
-from support_agent.llm.tool_loop import OUTCOME_OK, ToolCallRecord, ToolLoop, wrap_untrusted
+from support_agent.llm.tool_loop import (
+    OUTCOME_OK,
+    ToolCallRecord,
+    ToolLoop,
+    ToolResult,
+    wrap_untrusted,
+)
 from support_agent.llm.types import ChatMessage, system_message, user_message
 from support_agent.tools.base import ToolContext, ToolRegistry
 
@@ -105,6 +111,10 @@ class InvestigationOutcome:
     trace: list[ToolCallRecord]  # what ran so far, even on failure
     evidence: Evidence | None  # None on failure
     failure: InvestigationFailure | None
+    # Structured outputs of the successful calls, so code can compare real data (e.g. dates
+    # in two systems) instead of fact sentences. Holds customer data: in memory only, never
+    # store or log it. The content-free `trace` is the part to store.
+    results: list[ToolResult] = field(default_factory=list)
 
 
 @cache
@@ -125,13 +135,15 @@ def ground_facts(summary: EvidenceSummary, trace: list[ToolCallRecord]) -> Evide
     )
 
 
-def _case_message(complaint_text: str, order_number: str) -> ChatMessage:
+def _case_message(complaint_text: str, order_number: str, focus: str | None) -> ChatMessage:
     # The order number is verified by code before the investigator runs (classify node).
-    # The complaint is untrusted text.
-    return user_message(
-        f"Order number for this case: {order_number}\n\n"
-        + wrap_untrusted("customer_complaint", complaint_text)
+    # The complaint and the supervisor's hint are untrusted text.
+    text = f"Order number for this case: {order_number}\n\n" + wrap_untrusted(
+        "customer_complaint", complaint_text
     )
+    if focus:
+        text += "\n\n" + wrap_untrusted("supervisor_hint", focus)
+    return user_message(text)
 
 
 def _plan_text(plan: InvestigationPlan) -> str:
@@ -147,12 +159,13 @@ async def investigate(
     complaint_text: str,
     order_number: str,
     max_tool_calls: int,
+    focus: str | None = None,
 ) -> InvestigationOutcome:
     """Run plan -> tool loop -> evidence. `registry` is cut down to INVESTIGATOR_TOOLS here."""
     loop = ToolLoop(
         llm, registry.restricted(INVESTIGATOR_TOOLS), ctx, max_calls=max_tool_calls, tier="large"
     )
-    base = [system_message(load_prompt()), _case_message(complaint_text, order_number)]
+    base = [system_message(load_prompt()), _case_message(complaint_text, order_number, focus)]
     plan: InvestigationPlan | None = None
     try:
         plan = await llm.structured(
@@ -167,18 +180,18 @@ async def investigate(
         )
         if looped.step_limit_reached:
             return InvestigationOutcome(
-                plan, list(loop.trace), None, InvestigationFailure.STEP_LIMIT
+                plan, list(loop.trace), None, InvestigationFailure.STEP_LIMIT, list(loop.results)
             )
         summary = await llm.structured(
             [*looped.messages, user_message(_SUMMARY_INSTRUCTION)], EvidenceSummary, tier="large"
         )
     except LLMUnavailableError:
         return InvestigationOutcome(
-            plan, list(loop.trace), None, InvestigationFailure.LLM_UNAVAILABLE
+            plan, list(loop.trace), None, InvestigationFailure.LLM_UNAVAILABLE, list(loop.results)
         )
     except (StructuredOutputError, ToolLoopOutputError):
         return InvestigationOutcome(
-            plan, list(loop.trace), None, InvestigationFailure.OUTPUT_INVALID
+            plan, list(loop.trace), None, InvestigationFailure.OUTPUT_INVALID, list(loop.results)
         )
     trace = list(loop.trace)
-    return InvestigationOutcome(plan, trace, ground_facts(summary, trace), None)
+    return InvestigationOutcome(plan, trace, ground_facts(summary, trace), None, list(loop.results))

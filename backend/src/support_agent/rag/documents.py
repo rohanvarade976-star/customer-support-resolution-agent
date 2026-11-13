@@ -7,6 +7,7 @@
     effective_from: 2026-07-01
     effective_to: null          # null = still in force; otherwise the last day it applies
     refund_window_days: 30      # refund_policy only
+    investigation_threshold_days: 7   # shipping_delays only
     ---
     # Refund Policy (v2)
     ## 1. Purpose and scope
@@ -27,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 FRONT_MATTER_DELIMITER = "---"
 REFUND_POLICY_KEY = "refund_policy"
+SHIPPING_POLICY_KEY = "shipping_delays"
 
 
 class PolicyFormatError(ValueError):
@@ -34,7 +36,7 @@ class PolicyFormatError(ValueError):
 
 
 class PolicyMetadata(BaseModel):
-    """The front matter. Every key is required except refund_window_days."""
+    """The front matter. Every key is required except the two policy-specific numbers."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")  # a typo'd key is an error
 
@@ -45,6 +47,7 @@ class PolicyMetadata(BaseModel):
     # No default: the key must be written, even if its value is null. Inclusive last day.
     effective_to: date | None
     refund_window_days: int | None = Field(default=None, ge=1, le=365)
+    investigation_threshold_days: int | None = Field(default=None, ge=1, le=365)
 
     @model_validator(mode="after")
     def _check_rules(self) -> Self:
@@ -56,6 +59,11 @@ class PolicyMetadata(BaseModel):
             raise ValueError("refund_policy needs refund_window_days")
         if not is_refund_policy and self.refund_window_days is not None:
             raise ValueError("only refund_policy may set refund_window_days")
+        is_shipping_policy = self.policy_key == SHIPPING_POLICY_KEY
+        if is_shipping_policy and self.investigation_threshold_days is None:
+            raise ValueError("shipping_delays needs investigation_threshold_days")
+        if not is_shipping_policy and self.investigation_threshold_days is not None:
+            raise ValueError("only shipping_delays may set investigation_threshold_days")
         return self
 
 

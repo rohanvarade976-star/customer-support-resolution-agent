@@ -4,8 +4,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.domain.policies import SHIPPING_POLICY_KEY, policy_date
 from support_agent.integrations.shipping import Shipment, ShippingClient
-from support_agent.repositories import orders, refunds
+from support_agent.repositories import orders, policies, refunds
 from support_agent.schemas.order_status import (
     PaymentStatusResponse,
     RefundSummary,
@@ -54,3 +55,19 @@ async def get_shipment(
     if await orders.find_id_for_customer(session, customer_id, order_number) is None:
         raise order_not_found()
     return await shipping.get_shipment(order_number)
+
+
+async def get_investigation_threshold(
+    session: AsyncSession, customer_id: UUID, order_number: str
+) -> int | None:
+    """The shipping policy's investigation threshold in force on the order's placed date.
+
+    None when no shipping policy applies: the caller then must not promise an investigation.
+    """
+    order = await orders.get_for_customer(session, customer_id, order_number)
+    if order is None:
+        raise order_not_found()
+    policy = await policies.get_policy_in_force(
+        session, SHIPPING_POLICY_KEY, policy_date(order.placed_at)
+    )
+    return None if policy is None else policy.investigation_threshold_days

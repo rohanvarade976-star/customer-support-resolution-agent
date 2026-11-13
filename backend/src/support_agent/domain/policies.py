@@ -9,6 +9,7 @@ time zone is.
 from datetime import UTC, date, datetime
 
 REFUND_POLICY_KEY = "refund_policy"
+SHIPPING_POLICY_KEY = "shipping_delays"
 
 
 def policy_date(moment: datetime) -> date:

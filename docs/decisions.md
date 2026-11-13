@@ -425,3 +425,190 @@ recorded per call. Customer text and model output must never reach logs.
 - The Gemini fallback is untested against the real API until a `GEMINI_API_KEY` is added.
 - Dropping the SDK error cause makes some provider failures harder to debug. The HTTP
   status and Groq's error code are kept for that reason.
+
+
+## ADR-008: One demo anchor for the seed and the mock shipping provider; the policy agent's grounding
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Milestone:** M6
+
+### Context
+
+The database seed turned "N days ago" into dates once, when it ran. The mock shipping
+provider did the same when it started. Run on different days, they disagreed (Meera's
+order said delivered 2026-11-08, shipping said 2026-11-12). The policy agent also needed
+a rule for trusting what a model cites.
+
+### Decision
+
+1. `DEMO_ANCHOR_DATE` (optional) pins both to noon UTC on that date. Unset, the seed uses
+   the moment it runs and the shipping mock the moment it started, so they agree on the
+   same UTC day. `scripts/reset_demo.py` rebuilds the data and reminds you to restart the
+   mock. The mocks cannot import from `support_agent`, so the rule exists twice
+   (`core/demo_anchor.py`, `mock_providers/common/clock.py`) and a test keeps them equal.
+2. The policy agent (`agents/policy.py`) has one tool, `search_policy`. A rule is kept only
+   if its citation is a chunk_key returned by a search in the same run; others are dropped
+   and flagged. Policy versions come from the kept citations, and `no_relevant_policy` is
+   forced on when no grounded rule remains. It states rules only: eligibility and amounts
+   stay in code.
+3. `ToolLoop.results` keeps successful calls' arguments and typed outputs, in memory only,
+   so agents can ground claims. The content-free `trace` is still the only part to store.
+4. The policy agent uses the `small` tier by default (`POLICY_AGENT_TIER`): the large model
+   hit many rate limits in the live investigation. Quality is measured in M9.
+   *Superseded by ADR-009: the findings step now runs on `large`.*
+
+### Alternatives considered
+
+- A fixed default anchor date: stable, but eligibility uses the real clock, so scenarios
+  would silently stop matching the PRD.
+- A shared data file for the anchor: more moving parts than one environment variable.
+
+### Consequences
+
+- With the anchor unset, restart the shipping mock after the UTC date changes.
+- `reset_demo` deletes only what belongs to the seeded customers, plus audit events with
+  no run and the mock tables. LangGraph checkpoint tables (M7) will need adding then.
+
+
+## ADR-009: The policy agent's findings step runs on the large tier and names its fields
+
+- **Date:** 2026-11-13
+- **Status:** Accepted, with a known limitation (below)
+- **Milestone:** M6
+
+### Context
+
+The first real run of the policy agent failed in all four scenarios with
+`POLICY_OUTPUT_INVALID`. The search loop worked. The findings call, one forced tool call
+returning `PolicyFindingsDraft`, always ended in `LLMInvalidOutputError` and the one repair
+attempt failed the same way. The investigator's structured summary worked on the same models.
+
+Groq's error (read in a local debug run only, never logged) was `tool_use_failed`:
+`parameters for tool policy_findings_draft did not match schema: /rules/0: missing
+properties: 'statement'`. The model had written each rule as `{"text": ..., "citation": ...}`
+instead of `{"statement": ..., "citation": ...}`. Groq checks tool arguments against the
+schema itself and rejects the call with a 400. One of the rules was also about 350
+characters, over the schema's 300-character limit.
+
+The two schemas have the same shape (one forced tool, `list[Model]` with a `statement`
+field), and `max_tokens` is the same, so the difference is in the conversation and prompt,
+and I did not find which part. The search results use `content`, not `text`, so the model was
+not copying a field name from them.
+
+### Experiments
+
+The real post-search conversation for Rahul was captured once, then the findings call was
+replayed 4-5 times per variant on Groq. The number is calls that returned a valid answer.
+
+| Variant | Small (gpt-oss-20b) | Large (gpt-oss-120b) |
+|---|---|---|
+| Baseline (old instruction, 300-char cap) | 0/5 | 3/5 |
+| 300-char cap removed | 0/5 | 5/5 |
+| Instruction names the keys `statement` and `citation` | 0/5 | 5/5 |
+| Step-1 prose note removed from the context | 0/5 | not run |
+
+Small fails every time whatever we change. Large already worked 3 times in 5 and worked every
+time once either the cap or the key names were changed. Five tries is a small sample, so
+"5/5" means "no failure seen", not "reliable".
+
+### Decision
+
+1. Two configurable tiers: `POLICY_AGENT_SEARCH_TIER` (default `small`) for the cheap search
+   loop, `POLICY_AGENT_FINDINGS_TIER` (default `large`) for the findings step. This replaces
+   `POLICY_AGENT_TIER`. An old `POLICY_AGENT_TIER` line in `.env` is ignored.
+2. The findings instruction and the prompt name the fields: each rule has exactly the keys
+   `statement` and `citation`.
+3. The statement limit goes from 300 to 500 characters. Passages are long and the model
+   restates them closely.
+4. A malformed answer still ends in `POLICY_OUTPUT_INVALID`, never an exception. The workflow
+   escalates. Tests (fake LLM): findings use the large tier, the instruction names the
+   fields, a rule with `text` instead of `statement` ends in `POLICY_OUTPUT_INVALID`.
+
+### Alternatives considered
+
+- Keep everything on small: it returned a valid answer 0 times out of 5 in every variant.
+- Run the whole agent on large: the large model hit Groq rate limits in the live
+  investigation (ADR-008), and the search loop does not need it.
+- Plain-text findings parsed by code: it moves the problem into a parser and gives up
+  schema validation.
+
+### Known limitation
+
+- **Unexplained:** why the small model writes `text` for `statement` even when the instruction
+  names the keys. I did not find the cause. It may be a quirk of gpt-oss-20b with Groq's
+  forced tool calls.
+- **Untested hypotheses:** (a) the earlier `search_policy` tool call in the history confuses a
+  forced call to a different tool, so a flattened history would work; (b) renaming the field
+  (for example to `text`) would work; (c) plain-string rules would work; (d) a stricter
+  provider mode would help. These runs were stopped when Groq's free-tier limit was hit.
+- The large-tier results above come from one conversation (Rahul). The post-fix runs of all
+  four scenarios happened while Groq was rate limited, so most of them were answered by the
+  Gemini fallback (`gemini-3.5-flash-lite` for the search, `gemini-3.6-flash` for the
+  findings), not by Groq large. So the fix is confirmed against Groq large only by the
+  replay table and one live Groq run. M9 should measure the findings failure rate per tier.
+- If the findings step fails on both providers, the run escalates to a human: safe, but slow.
+
+### Consequences
+
+- Each policy run makes one large-tier call (findings) per run, not zero. The cost is small.
+- The investigator's structured steps are unchanged.
+
+
+## ADR-010: Parallel branches, the extra investigation round, and what the baseline comparison shows
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Milestone:** M6
+
+### Context
+
+The multi-agent workflow runs the investigator and the policy agent at the same time
+(PRD FR-8). Both read the database through tools. The supervisor may also leave a required
+record missing, and the PRD asks for at most one extra investigation round. Separately, the
+single-agent baseline (FR-23) exists so the two designs can be compared, and the comparison
+is only useful if we say what it does and does not measure.
+
+### Decision
+
+1. **One short-lived database session per parallel branch.** A SQLAlchemy `AsyncSession` is
+   not safe for concurrent use, so two branches must not share one. Each branch opens its
+   own session from `WorkflowDeps.branch_sessions` and closes it when the branch ends. Each
+   branch writes only its own state key (`investigation`, `policy`); `errors` is the one
+   shared key and has an append reducer, so the merge is safe. Everything after the join
+   (required evidence, eligibility, the proposal) uses the main session.
+2. **The extra investigation round is triggered by code, at most once.** After the join, if
+   a required lookup (`get_order`, and `get_shipment` where it applies) still has no
+   successful result after code has fetched it itself, the graph runs the investigator one
+   more time, told which records are missing. The supervisor and the model do not decide
+   this, and a second extra round is impossible (the round is skipped once
+   `investigation_retry` exists; baseline mode never has one). The second round's call ids
+   are prefixed `r2_` before the two rounds are merged, because providers (and the test
+   fakes) can reuse ids such as `call_1`, and the validator looks calls up by id.
+3. **The baseline comparison has a caveat.** Baseline mode has no supervisor, no separate
+   specialists, no critic and no revision. It shares everything that decides: required
+   evidence, code-computed eligibility and delay facts, the validator, and the rule that
+   only code sets the amount. So a difference in outcome, calls, tokens or latency between
+   `multi_agent` and `baseline` reflects specialization (separate investigator and policy
+   agent, supervisor hints) **and** the critic and revision loop together. It cannot say
+   which of the two caused it. Isolating them needs a third configuration, for example
+   multi-agent with the critic off, or baseline with one revision.
+
+### Alternatives considered
+
+- Share one session and serialise the branches: safe, but the two LLM-heavy branches would
+  no longer overlap, which removes the point of FR-8.
+- Let the supervisor ask for more rounds, or let the model say when evidence is missing:
+  unbounded cost and a model deciding what counts as enough. Code decides, once.
+- Give the baseline a critic so the comparison is like for like: then it is no longer the
+  simple single-agent reference the PRD describes.
+
+### Consequences
+
+- Each parallel run holds two connections for its gathering step. Reads only: no locks, but
+  a connection is open while the model is called.
+- Integration tests cannot use two real sessions (one rolled-back transaction on one
+  connection), so they hand every branch the test session one at a time. Real overlap with
+  separate sessions is tested with fakes in `tests/unit/test_workflow_multi_agent.py`.
+- M9's comparison report must state the caveat in item 3 next to any multi-agent versus
+  baseline number.

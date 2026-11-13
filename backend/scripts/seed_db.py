@@ -11,6 +11,7 @@ import sys
 from datetime import UTC, datetime
 
 from support_agent.core.config import get_settings
+from support_agent.core.demo_anchor import resolve_demo_now
 from support_agent.core.security import hash_password
 from support_agent.db.seed import ResetRefusedError, load_scenarios, reset, seed
 from support_agent.db.session import get_engine, get_sessionmaker
@@ -23,7 +24,8 @@ async def run(do_reset: bool, password_hash: str) -> dict[str, int]:
         async with get_sessionmaker()() as session, session.begin():
             if do_reset:
                 return await reset(session, data)
-            return await seed(session, data, now=datetime.now(UTC), password_hash=password_hash)
+            now = resolve_demo_now(get_settings().demo_anchor_date, datetime.now(UTC))
+            return await seed(session, data, now=now, password_hash=password_hash)
     finally:
         await get_engine().dispose()
 

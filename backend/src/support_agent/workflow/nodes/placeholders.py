@@ -1,9 +1,12 @@
-"""End-of-graph placeholders for this task. Each only sets where the run stopped.
+"""Stops that need no agent. Each only sets where the run stopped.
 
 (The parameter must be named `state`: LangGraph's node type requires that name.)
 
-- needs_clarification: replaced by the pause-and-ask loop in M7.
-- escalate: hands the case to a human.
+- needs_clarification: the label is unclear or low-confidence. Replaced by the
+  pause-and-ask loop in M7.
+- ask_for_order: a confident label but no verified order number to work on. Same.
+
+The escalation node lives in finish.py with the other outcomes.
 """
 
 from support_agent.domain.enums import RunStatus
@@ -14,5 +17,5 @@ async def needs_clarification(state: WorkflowState) -> dict[str, object]:
     return {"status": RunStatus.AWAITING_CUSTOMER}
 
 
-async def escalate(state: WorkflowState) -> dict[str, object]:
-    return {"status": RunStatus.ESCALATED}
+async def ask_for_order(state: WorkflowState) -> dict[str, object]:
+    return {"status": RunStatus.AWAITING_CUSTOMER, "missing_information": ["order_number"]}
