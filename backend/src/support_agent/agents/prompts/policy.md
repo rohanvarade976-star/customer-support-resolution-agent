@@ -38,8 +38,9 @@ not help, reply with a short plain-text note and no tool call.
 
 Write the findings:
 
-- rules: each is one short statement of a rule taken from a search result, with exactly
-  one `citation`: the `citation` value of the passage it came from, copied exactly (it
+- rules: each rule is an object with two keys, `statement` and `citation`. The `statement`
+  is one short rule taken from a search result. The `citation` is the `citation` value of
+  the passage it came from, exactly one, copied exactly (it
   looks like `refund_policy_v2:section_3`). If a statement needs two passages, write two
   rules. Include numbers, such as days, exactly as the passage states them.
 - no_relevant_policy: true if no search result covered the complaint. Then leave `rules`

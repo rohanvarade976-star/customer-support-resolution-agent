@@ -23,7 +23,7 @@ The first run downloads the local embedding model (fastembed).
 
     uv run python scripts/run_policy_agent.py
     uv run python scripts/run_policy_agent.py --only rahul
-    uv run python scripts/run_policy_agent.py --tier large
+    uv run python scripts/run_policy_agent.py --search-tier large --findings-tier small
 
 Not run in CI or pytest: it calls the real LLM. The model is not fully deterministic, so
 queries and rules differ a little between runs.
@@ -146,7 +146,11 @@ def show(scenario: Scenario, outcome: PolicyOutcome) -> None:
 
 
 async def run_scenario(
-    scenario: Scenario, llm: LLMClient, settings: Settings, tier: ModelTier
+    scenario: Scenario,
+    llm: LLMClient,
+    settings: Settings,
+    search_tier: ModelTier,
+    findings_tier: ModelTier,
 ) -> None:
     async with get_sessionmaker()() as session:
         ctx = ToolContext(
@@ -165,7 +169,8 @@ async def run_scenario(
             category=scenario.category,
             order_number=scenario.order_number,
             max_searches=settings.policy_agent_max_searches,
-            tier=tier,
+            search_tier=search_tier,
+            findings_tier=findings_tier,
         )
     show(scenario, outcome)
 
@@ -173,7 +178,12 @@ async def run_scenario(
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--only", choices=[s.name for s in SCENARIOS], help="run one scenario")
-    parser.add_argument("--tier", choices=["small", "large"], help="override POLICY_AGENT_TIER")
+    parser.add_argument(
+        "--search-tier", choices=["small", "large"], help="override POLICY_AGENT_SEARCH_TIER"
+    )
+    parser.add_argument(
+        "--findings-tier", choices=["small", "large"], help="override POLICY_AGENT_FINDINGS_TIER"
+    )
     args = parser.parse_args()
 
     configure_logging("WARNING")  # hide the per-call log lines; the output below shows them
@@ -182,11 +192,12 @@ async def main() -> None:
     if settings.groq_api_key is None:
         sys.exit("GROQ_API_KEY is not set in .env. Add it and run again.")
     llm = build_llm_client(settings)
-    tier: ModelTier = args.tier or settings.policy_agent_tier
+    search_tier: ModelTier = args.search_tier or settings.policy_agent_search_tier
+    findings_tier: ModelTier = args.findings_tier or settings.policy_agent_findings_tier
 
     try:
         for scenario in [s for s in SCENARIOS if args.only in (None, s.name)]:
-            await run_scenario(scenario, llm, settings, tier)
+            await run_scenario(scenario, llm, settings, search_tier, findings_tier)
     except LLMError as exc:
         # Our error messages never contain prompts, responses or keys.
         sys.exit(f"LLM call failed: {type(exc).__name__}: {exc}")

@@ -456,6 +456,7 @@ a rule for trusting what a model cites.
    so agents can ground claims. The content-free `trace` is still the only part to store.
 4. The policy agent uses the `small` tier by default (`POLICY_AGENT_TIER`): the large model
    hit many rate limits in the live investigation. Quality is measured in M9.
+   *Superseded by ADR-009: the findings step now runs on `large`.*
 
 ### Alternatives considered
 
@@ -468,3 +469,87 @@ a rule for trusting what a model cites.
 - With the anchor unset, restart the shipping mock after the UTC date changes.
 - `reset_demo` deletes only what belongs to the seeded customers, plus audit events with
   no run and the mock tables. LangGraph checkpoint tables (M7) will need adding then.
+
+
+## ADR-009: The policy agent's findings step runs on the large tier and names its fields
+
+- **Date:** 2026-11-13
+- **Status:** Accepted, with a known limitation (below)
+- **Milestone:** M6
+
+### Context
+
+The first real run of the policy agent failed in all four scenarios with
+`POLICY_OUTPUT_INVALID`. The search loop worked. The findings call, one forced tool call
+returning `PolicyFindingsDraft`, always ended in `LLMInvalidOutputError` and the one repair
+attempt failed the same way. The investigator's structured summary worked on the same models.
+
+Groq's error (read in a local debug run only, never logged) was `tool_use_failed`:
+`parameters for tool policy_findings_draft did not match schema: /rules/0: missing
+properties: 'statement'`. The model had written each rule as `{"text": ..., "citation": ...}`
+instead of `{"statement": ..., "citation": ...}`. Groq checks tool arguments against the
+schema itself and rejects the call with a 400. One of the rules was also about 350
+characters, over the schema's 300-character limit.
+
+The two schemas have the same shape (one forced tool, `list[Model]` with a `statement`
+field), and `max_tokens` is the same, so the difference is in the conversation and prompt,
+and I did not find which part. The search results use `content`, not `text`, so the model was
+not copying a field name from them.
+
+### Experiments
+
+The real post-search conversation for Rahul was captured once, then the findings call was
+replayed 4-5 times per variant on Groq. The number is calls that returned a valid answer.
+
+| Variant | Small (gpt-oss-20b) | Large (gpt-oss-120b) |
+|---|---|---|
+| Baseline (old instruction, 300-char cap) | 0/5 | 3/5 |
+| 300-char cap removed | 0/5 | 5/5 |
+| Instruction names the keys `statement` and `citation` | 0/5 | 5/5 |
+| Step-1 prose note removed from the context | 0/5 | not run |
+
+Small fails every time whatever we change. Large already worked 3 times in 5 and worked every
+time once either the cap or the key names were changed. Five tries is a small sample, so
+"5/5" means "no failure seen", not "reliable".
+
+### Decision
+
+1. Two configurable tiers: `POLICY_AGENT_SEARCH_TIER` (default `small`) for the cheap search
+   loop, `POLICY_AGENT_FINDINGS_TIER` (default `large`) for the findings step. This replaces
+   `POLICY_AGENT_TIER`. An old `POLICY_AGENT_TIER` line in `.env` is ignored.
+2. The findings instruction and the prompt name the fields: each rule has exactly the keys
+   `statement` and `citation`.
+3. The statement limit goes from 300 to 500 characters. Passages are long and the model
+   restates them closely.
+4. A malformed answer still ends in `POLICY_OUTPUT_INVALID`, never an exception. The workflow
+   escalates. Tests (fake LLM): findings use the large tier, the instruction names the
+   fields, a rule with `text` instead of `statement` ends in `POLICY_OUTPUT_INVALID`.
+
+### Alternatives considered
+
+- Keep everything on small: it returned a valid answer 0 times out of 5 in every variant.
+- Run the whole agent on large: the large model hit Groq rate limits in the live
+  investigation (ADR-008), and the search loop does not need it.
+- Plain-text findings parsed by code: it moves the problem into a parser and gives up
+  schema validation.
+
+### Known limitation
+
+- **Unexplained:** why the small model writes `text` for `statement` even when the instruction
+  names the keys. I did not find the cause. It may be a quirk of gpt-oss-20b with Groq's
+  forced tool calls.
+- **Untested hypotheses:** (a) the earlier `search_policy` tool call in the history confuses a
+  forced call to a different tool, so a flattened history would work; (b) renaming the field
+  (for example to `text`) would work; (c) plain-string rules would work; (d) a stricter
+  provider mode would help. These runs were stopped when Groq's free-tier limit was hit.
+- The large-tier results above come from one conversation (Rahul). The post-fix runs of all
+  four scenarios happened while Groq was rate limited, so most of them were answered by the
+  Gemini fallback (`gemini-3.5-flash-lite` for the search, `gemini-3.6-flash` for the
+  findings), not by Groq large. So the fix is confirmed against Groq large only by the
+  replay table and one live Groq run. M9 should measure the findings failure rate per tier.
+- If the findings step fails on both providers, the run escalates to a human: safe, but slow.
+
+### Consequences
+
+- Each policy run makes one large-tier call (findings) per run, not zero. The cost is small.
+- The investigator's structured steps are unchanged.

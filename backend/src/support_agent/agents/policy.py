@@ -3,8 +3,9 @@
 Two steps (PRD "Agent specifications", FR-5, FR-6):
 
 1. Search: the tool loop (llm/tool_loop.py) lets the model call `search_policy`, refining
-   its query, up to the search limit.
-2. Findings: one structured call. Each rule carries one citation (a chunk_key).
+   its query, up to the search limit. Runs on the search tier (small by default).
+2. Findings: one structured call on the findings tier (large by default, ADR-009). Each
+   rule carries one citation (a chunk_key).
 
 The model only proposes. Code decides what counts:
 - `POLICY_TOOLS` is the allowlist: `search_policy` and nothing else, no read tools, no
@@ -41,20 +42,23 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / "policy.md"
 # The only tool this agent may use. Read-only, and the only way it sees policy text.
 POLICY_TOOLS: tuple[str, ...] = ("search_policy",)
 
-ShortText = Annotated[str, StringConstraints(min_length=1, max_length=300)]
+RuleText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
 _SEARCH_INSTRUCTION = (
     "Step 1. Search the policies for the rules that matter here. "
     "Use the order number above in every search."
 )
+# The field names are spelled out: a model that is only told "write the findings" may
+# invent its own key (it wrote "text" for "statement"), which the provider rejects (ADR-009).
 _FINDINGS_INSTRUCTION = (
-    "Step 2. Write the findings now. Copy each citation exactly as it appears in the "
-    "search results. State rules only: no eligibility decisions and no amounts."
+    "Step 2. Write the findings now. Each rule is an object with exactly two keys: "
+    "`statement` (the rule in your own short words) and `citation` (copied exactly as it "
+    "appears in the search results). State rules only: no eligibility decisions and no amounts."
 )
 
 
 class PolicyRuleDraft(BaseModel):
-    statement: ShortText = Field(description="One short rule, taken from a search result.")
+    statement: RuleText = Field(description="One short rule, taken from a search result.")
     citation: str = Field(
         min_length=1,
         max_length=200,
@@ -176,10 +180,13 @@ async def research_policy(
     category: str,
     order_number: str,
     max_searches: int,
-    tier: ModelTier,
+    search_tier: ModelTier,
+    findings_tier: ModelTier,
 ) -> PolicyOutcome:
     """Run search loop -> findings. `registry` is cut down to POLICY_TOOLS here."""
-    loop = ToolLoop(llm, registry.restricted(POLICY_TOOLS), ctx, max_calls=max_searches, tier=tier)
+    loop = ToolLoop(
+        llm, registry.restricted(POLICY_TOOLS), ctx, max_calls=max_searches, tier=search_tier
+    )
     base = [system_message(load_prompt()), _case_message(complaint_text, category, order_number)]
 
     def outcome(findings: PolicyFindings | None, failure: PolicyFailure | None) -> PolicyOutcome:
@@ -190,7 +197,9 @@ async def research_policy(
         if looped.step_limit_reached:
             return outcome(None, PolicyFailure.STEP_LIMIT)
         draft = await llm.structured(
-            [*looped.messages, user_message(_FINDINGS_INSTRUCTION)], PolicyFindingsDraft, tier=tier
+            [*looped.messages, user_message(_FINDINGS_INSTRUCTION)],
+            PolicyFindingsDraft,
+            tier=findings_tier,
         )
     except LLMUnavailableError:
         return outcome(None, PolicyFailure.LLM_UNAVAILABLE)

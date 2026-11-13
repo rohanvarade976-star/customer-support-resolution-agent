@@ -115,9 +115,11 @@ class Settings(BaseSettings):
     # model wants more, the run escalates instead of looping.
     investigator_max_tool_calls: int = Field(default=8, ge=1, le=20)
 
-    # The policy agent (agents/policy.py). Small by default: the large model hit many rate
-    # limits in the live investigation. Quality is measured in M9.
-    policy_agent_tier: Literal["small", "large"] = "small"
+    # The policy agent (agents/policy.py) has two tiers (ADR-009). The search loop is cheap
+    # and runs on small. The findings step needs the large model: on small it often names
+    # a rule's fields wrongly and the provider rejects the call.
+    policy_agent_search_tier: Literal["small", "large"] = "small"
+    policy_agent_findings_tier: Literal["small", "large"] = "large"
     # The most searches it may make (PRD "Agent specifications": max 4).
     policy_agent_max_searches: int = Field(default=4, ge=1, le=8)
 

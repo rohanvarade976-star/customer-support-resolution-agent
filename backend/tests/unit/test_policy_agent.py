@@ -13,6 +13,7 @@ from support_agent.agents.policy import (
 )
 from support_agent.llm.client import RetrySettings, RoutedLLMClient
 from support_agent.llm.fake import FakeProvider, ScriptStep, text_reply, tool_reply, transient
+from support_agent.llm.types import ProviderReply
 from support_agent.schemas.policies import PolicyPassage, PolicySearchResult
 from support_agent.tools.base import Tool, ToolContext, ToolRegistry
 from support_agent.tools.fake import FakeRecord, fake_tool_context
@@ -99,7 +100,8 @@ async def run_agent(
         category="refund",
         order_number=ORDER,
         max_searches=max_searches,
-        tier="small",
+        search_tier="small",
+        findings_tier="large",
     )
     return outcome, fake
 
@@ -128,7 +130,6 @@ async def test_grounded_rules_are_kept_with_versions_taken_from_the_citations() 
     assert [s.order_number for s in search.searches] == [ORDER]
     [made] = outcome.searches
     assert (made.query, made.citations) == ("how long to return", [RULE_V2])
-    assert all(request.tier == "small" for request in fake.requests)
     assert fake.requests[-1].forced_tool == "policy_findings_draft"
 
 
@@ -290,3 +291,78 @@ async def test_complaint_is_data_and_the_prompt_forbids_eligibility_decisions() 
         assert 'trust="untrusted_data"' in user_text and "SECRET-COMPLAINT-TEXT" in user_text
         assert f"Order number for this case: {ORDER}" in user_text
     assert "Never say whether this customer is eligible" in load_prompt()
+
+
+# ---------------------------------------------------------------- tiers and field names (ADR-009)
+
+
+async def test_search_runs_on_small_and_findings_on_large() -> None:
+    _, fake = await run_agent(
+        [
+            search_call("return window", ORDER, "s1"),
+            text_reply("Done."),
+            findings_reply([("Returns within 30 days.", RULE_V2)]),
+        ],
+        FakePolicySearch(passage(RULE_V2)),
+    )
+
+    loop_requests, findings_request = fake.requests[:-1], fake.requests[-1]
+    assert findings_request.forced_tool == "policy_findings_draft"
+    assert findings_request.tier == "large"
+    assert all(request.tier == "small" for request in loop_requests)
+
+
+async def test_findings_instruction_names_the_rule_fields() -> None:
+    _, fake = await run_agent(
+        [text_reply("Nothing."), findings_reply(no_relevant_policy=True)], FakePolicySearch()
+    )
+
+    instruction = fake.requests[-1].messages[-1].content
+    assert fake.requests[-1].messages[-1].role == "user"
+    assert "`statement`" in instruction and "`citation`" in instruction
+    assert "`statement`" in load_prompt()
+
+
+def wrong_key_reply() -> ProviderReply:
+    """What the small model sent live: each rule has "text" where "statement" is required."""
+    return tool_reply(
+        "policy_findings_draft",
+        {
+            "rules": [{"text": "Returns within 30 days.", "citation": RULE_V2}],
+            "no_relevant_policy": False,
+            "conflicting_passages": False,
+        },
+        call_id="findings",
+    )
+
+
+async def test_a_rule_with_text_instead_of_statement_is_an_output_failure_not_a_crash() -> None:
+    outcome, fake = await run_agent(
+        [
+            search_call("return window", ORDER, "s1"),
+            text_reply("Done."),
+            wrong_key_reply(),
+            wrong_key_reply(),  # the one repair attempt fails the same way
+        ],
+        FakePolicySearch(passage(RULE_V2)),
+    )
+
+    assert outcome.failure is PolicyFailure.OUTPUT_INVALID
+    assert outcome.findings is None
+    assert [s.query for s in outcome.searches] == ["return window"]  # the searches are kept
+    assert [r.tier for r in fake.requests[-2:]] == ["large", "large"]
+
+
+async def test_a_statement_up_to_500_characters_is_accepted() -> None:
+    long_rule = "A" * 500
+    outcome, _ = await run_agent(
+        [
+            search_call("return window", ORDER, "s1"),
+            text_reply("Done."),
+            findings_reply([(long_rule, RULE_V2)]),
+        ],
+        FakePolicySearch(passage(RULE_V2)),
+    )
+
+    assert outcome.findings is not None
+    assert [r.statement for r in outcome.findings.rules] == [long_rule]
