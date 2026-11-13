@@ -44,6 +44,32 @@ def summary_reply(
     )
 
 
+def search_call(query: str, order_number: str | None, call_id: str) -> ProviderReply:
+    """The policy agent asks for a `search_policy` call."""
+    args = {"query": query}
+    if order_number is not None:
+        args["order_number"] = order_number
+    return tool_reply("search_policy", args, call_id=call_id)
+
+
+def findings_reply(
+    rules: Sequence[tuple[str, str]] = (),
+    *,
+    no_relevant_policy: bool = False,
+    conflicting_passages: bool = False,
+) -> ProviderReply:
+    """The structured policy findings. `rules` are (statement, citation) pairs."""
+    return tool_reply(
+        "policy_findings_draft",
+        {
+            "rules": [{"statement": text, "citation": cite} for text, cite in rules],
+            "no_relevant_policy": no_relevant_policy,
+            "conflicting_passages": conflicting_passages,
+        },
+        call_id="findings",
+    )
+
+
 def simple_investigation(order_number: str = "ORD-1001") -> list[ScriptStep]:
     return [
         plan_reply(),

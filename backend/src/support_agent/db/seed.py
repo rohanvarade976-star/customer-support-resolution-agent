@@ -1,8 +1,8 @@
 """Load the demo scenarios from data/seed/scenarios.json into the database.
 
-Dates in the JSON are "N days ago", turned into timestamps relative to `now` at
-seed time, so the demo situations (e.g. "delivered 12 days ago") stay true
-whenever the seed runs.
+Dates in the JSON are "N days ago", turned into timestamps relative to the `now` the
+caller passes in. The scripts pass the demo anchor (core/demo_anchor.py), the same
+instant the mock shipping provider counts back from, so both always agree.
 
 `seed()` and `reset()` only flush; the caller owns the transaction and commits,
 so a whole seed or reset either fully happens or not at all.

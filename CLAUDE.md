@@ -117,4 +117,4 @@ From the repo root: `docker compose up -d` starts Postgres.
 
 ## Current milestone
 
-M5 — LLM fundamentals and the first agent. See the master plan and PRD section "Milestones".
+M6 — Multi-agent system. See the master plan and PRD section "Milestones".

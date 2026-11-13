@@ -42,7 +42,17 @@ Before running the API or the seed, set these in `.env` (see `.env.example`):
   `uv run python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 - `DEMO_PASSWORD`: the password for every seeded demo account.
 
-To start the demo data over: `uv run python scripts/seed_db.py --reset` and then seed again.
+To start the demo data over, run `uv run python scripts/reset_demo.py`. It deletes what demos
+and runs created (tickets, runs, proposals, approvals, refunds, audit events, and the mock
+payment and ticketing records), seeds the scenarios again, and refuses to run in production.
+Then restart the mock shipping provider.
+
+**Demo dates.** Scenario dates are "N days ago". The seed and the mock shipping provider
+both count back from one anchor, so an order's delivery date matches its tracking page.
+Set `DEMO_ANCHOR_DATE=2026-11-10` in `.env` to pin it (noon UTC on that date). Left blank,
+the seed uses the moment it runs and the shipping mock the moment it started: after the
+date changes, run `reset_demo.py` and restart the shipping mock. A pinned date never
+drifts, but refund eligibility uses the real clock, so scenarios slowly stop matching.
 
 ## Run the API (from `backend/`)
 

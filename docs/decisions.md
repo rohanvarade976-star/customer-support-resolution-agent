@@ -425,3 +425,46 @@ recorded per call. Customer text and model output must never reach logs.
 - The Gemini fallback is untested against the real API until a `GEMINI_API_KEY` is added.
 - Dropping the SDK error cause makes some provider failures harder to debug. The HTTP
   status and Groq's error code are kept for that reason.
+
+
+## ADR-008: One demo anchor for the seed and the mock shipping provider; the policy agent's grounding
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Milestone:** M6
+
+### Context
+
+The database seed turned "N days ago" into dates once, when it ran. The mock shipping
+provider did the same when it started. Run on different days, they disagreed (Meera's
+order said delivered 2026-11-08, shipping said 2026-11-12). The policy agent also needed
+a rule for trusting what a model cites.
+
+### Decision
+
+1. `DEMO_ANCHOR_DATE` (optional) pins both to noon UTC on that date. Unset, the seed uses
+   the moment it runs and the shipping mock the moment it started, so they agree on the
+   same UTC day. `scripts/reset_demo.py` rebuilds the data and reminds you to restart the
+   mock. The mocks cannot import from `support_agent`, so the rule exists twice
+   (`core/demo_anchor.py`, `mock_providers/common/clock.py`) and a test keeps them equal.
+2. The policy agent (`agents/policy.py`) has one tool, `search_policy`. A rule is kept only
+   if its citation is a chunk_key returned by a search in the same run; others are dropped
+   and flagged. Policy versions come from the kept citations, and `no_relevant_policy` is
+   forced on when no grounded rule remains. It states rules only: eligibility and amounts
+   stay in code.
+3. `ToolLoop.results` keeps successful calls' arguments and typed outputs, in memory only,
+   so agents can ground claims. The content-free `trace` is still the only part to store.
+4. The policy agent uses the `small` tier by default (`POLICY_AGENT_TIER`): the large model
+   hit many rate limits in the live investigation. Quality is measured in M9.
+
+### Alternatives considered
+
+- A fixed default anchor date: stable, but eligibility uses the real clock, so scenarios
+  would silently stop matching the PRD.
+- A shared data file for the anchor: more moving parts than one environment variable.
+
+### Consequences
+
+- With the anchor unset, restart the shipping mock after the UTC date changes.
+- `reset_demo` deletes only what belongs to the seeded customers, plus audit events with
+  no run and the mock tables. LangGraph checkpoint tables (M7) will need adding then.

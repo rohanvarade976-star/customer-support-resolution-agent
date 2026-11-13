@@ -3,6 +3,7 @@
 Every other module reads config through `get_settings()`, never from `os.environ`.
 """
 
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -41,6 +42,9 @@ class Settings(BaseSettings):
     access_token_minutes: int = Field(default=60, ge=1, le=1440)
     # Password given to every seeded demo account. Only the seed script needs it.
     demo_password: SecretStr | None = None
+    # Pins the demo scenarios' "N days ago" to noon UTC on this date, for the database
+    # seed and the mock shipping provider alike (core/demo_anchor.py). Unset: "now".
+    demo_anchor_date: date | None = None
 
     # External providers (the mocks locally). Used only by `integrations/`.
     payments_base_url: str = "http://localhost:8001"
@@ -111,6 +115,12 @@ class Settings(BaseSettings):
     # model wants more, the run escalates instead of looping.
     investigator_max_tool_calls: int = Field(default=8, ge=1, le=20)
 
+    # The policy agent (agents/policy.py). Small by default: the large model hit many rate
+    # limits in the live investigation. Quality is measured in M9.
+    policy_agent_tier: Literal["small", "large"] = "small"
+    # The most searches it may make (PRD "Agent specifications": max 4).
+    policy_agent_max_searches: int = Field(default=4, ge=1, le=8)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
@@ -118,7 +128,9 @@ class Settings(BaseSettings):
             raise ValueError("provider base URLs must start with 'http://' or 'https://'")
         return value
 
-    @field_validator("groq_api_key", "gemini_api_key", "groq_reasoning_effort", mode="before")
+    @field_validator(
+        "groq_api_key", "gemini_api_key", "groq_reasoning_effort", "demo_anchor_date", mode="before"
+    )
     @classmethod
     def _blank_means_unset(cls, value: object) -> object:
         # `GEMINI_API_KEY=` (blank, as in .env.example) means "not configured".
