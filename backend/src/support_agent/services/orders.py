@@ -60,6 +60,11 @@ async def get_order_for_customer(
     return _to_response(order)
 
 
+async def customer_owns_order(session: AsyncSession, customer_id: UUID, order_number: str) -> bool:
+    """Used by the workflow to check an order number the classifier extracted (a hint)."""
+    return await orders.find_id_for_customer(session, customer_id, order_number) is not None
+
+
 async def get_my_order(
     session: AsyncSession, principal: Principal, order_number: str
 ) -> OrderResponse:

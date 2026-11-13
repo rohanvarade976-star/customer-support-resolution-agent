@@ -139,3 +139,21 @@ def test_registration_rules() -> None:
         registry.register(Tool("loose", "x", LooseIn, Out, double))
     with pytest.raises(ValueError, match="customer_id"):
         registry.register(Tool("who", "x", WithCustomerIn, Out, double))
+
+
+async def test_restricted_registry_holds_only_the_allowed_tools() -> None:
+    registry = registry_with(double)
+    registry.register(Tool("other", "Another tool.", In, Out, double))
+
+    subset = registry.restricted(["other"])
+
+    assert subset.names == ["other"]
+    assert [schema["name"] for schema in subset.export_schemas()] == ["other"]
+    excluded = await subset.execute("t", make_ctx(), {"value": 1})
+    assert isinstance(excluded, ToolError) and excluded.error_code == "UNKNOWN_TOOL"
+    assert registry.names == ["t", "other"]  # the original is unchanged
+
+
+def test_restricted_registry_rejects_unregistered_names() -> None:
+    with pytest.raises(ValueError, match="unregistered tools"):
+        registry_with(double).restricted(["t", "nope"])
