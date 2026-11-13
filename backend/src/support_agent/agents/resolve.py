@@ -41,6 +41,7 @@ from support_agent.domain.validation import (
     DraftClaim,
     ValidationCode,
     ValidationContext,
+    normalize_citation,
     validate_resolution,
 )
 from support_agent.integrations.shipping import Shipment
@@ -122,6 +123,21 @@ def build_context(
         no_relevant_policy=inputs.findings.no_relevant_policy,
         delivery_dates=_delivery_dates(results),
         delivery_tolerance=delivery_tolerance,
+        delay_facts=inputs.delay_facts,
+    )
+
+
+def normalize_draft(draft: ResolutionDraft) -> ResolutionDraft:
+    """Strip brackets, quotes and spaces a model wraps around citations and call ids.
+
+    Done before any validation, so formatting alone never fails a draft. The values must
+    still match a grounded citation or a real call exactly; nothing is guessed.
+    """
+    return draft.model_copy(
+        update={
+            "policy_citations": [normalize_citation(c) for c in draft.policy_citations],
+            "cited_call_ids": [normalize_citation(c) for c in draft.cited_call_ids],
+        }
     )
 
 
@@ -197,7 +213,7 @@ async def resolve(
     try:
         while True:
             failure = ResolutionFailure.RESOLUTION_OUTPUT_INVALID
-            draft = await draft_resolution(llm, messages)
+            draft = normalize_draft(await draft_resolution(llm, messages))
             codes = validate_resolution(to_claim(draft, inputs), ctx)
 
             if ESCALATE_IMMEDIATELY.intersection(codes):

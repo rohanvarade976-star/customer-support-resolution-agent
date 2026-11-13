@@ -4,6 +4,7 @@ version: v1
 title: Shipping Delays Policy
 effective_from: 2025-01-01
 effective_to: null
+investigation_threshold_days: 7
 ---
 # Shipping Delays Policy (v1)
 

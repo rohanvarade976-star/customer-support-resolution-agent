@@ -41,6 +41,10 @@ class PolicyDocument(UUIDPrimaryKey, CreatedAt, Base):
             "refund_window_days IS NULL OR refund_window_days > 0",
             name="refund_window_days_positive",
         ),
+        CheckConstraint(
+            "investigation_threshold_days IS NULL OR investigation_threshold_days > 0",
+            name="investigation_threshold_days_positive",
+        ),
     )
 
     policy_key: Mapped[str] = mapped_column(String(64))  # e.g. "refund_policy"
@@ -49,6 +53,7 @@ class PolicyDocument(UUIDPrimaryKey, CreatedAt, Base):
     effective_from: Mapped[date]
     effective_to: Mapped[date | None]  # last day in force (inclusive); NULL = still in force
     refund_window_days: Mapped[int | None]  # set only for refund_policy
+    investigation_threshold_days: Mapped[int | None]  # set only for shipping_delays
     source_uri: Mapped[str] = mapped_column(String(500))
 
 

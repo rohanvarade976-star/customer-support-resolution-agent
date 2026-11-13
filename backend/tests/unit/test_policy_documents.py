@@ -25,6 +25,7 @@ def policy_text(**overrides: object) -> str:
         "title": "Shipping Delays Policy",
         "effective_from": "2025-01-01",
         "effective_to": "null",
+        "investigation_threshold_days": 7,
     }
     fields.update(overrides)
     lines = [f"{key}: {value}" for key, value in fields.items() if value is not None]
@@ -54,6 +55,11 @@ def test_windows_line_endings_give_the_same_result() -> None:
         ({"version": "2"}, "version"),
         ({"effective_to": "2024-12-31"}, "effective_to must be after effective_from"),
         ({"refund_window_days": 30}, "only refund_policy"),
+        ({"investigation_threshold_days": None}, "shipping_delays needs"),
+        (
+            {"policy_key": "damaged_products"},
+            "only shipping_delays may set investigation_threshold_days",
+        ),
         ({"policy_key": "refund_policy"}, "refund_policy needs refund_window_days"),
         ({"owner": "someone"}, "owner"),  # unknown keys are rejected
     ],
@@ -121,3 +127,4 @@ def test_the_real_policy_folder_is_valid() -> None:
     assert v1.effective_to == date(2026, 6, 30)
     assert v2.effective_from == date(2026, 7, 1)  # starts the day after v1 ends
     assert v2.effective_to is None
+    assert policies["shipping_delays_v1"].investigation_threshold_days == 7

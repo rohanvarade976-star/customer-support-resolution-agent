@@ -4,7 +4,10 @@ Fake LLM only. The investigator's trace and results are built by hand, so no too
 """
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+
+import pytest
 
 from support_agent.agents.fake import critique_reply, draft_reply
 from support_agent.agents.investigator import Evidence, Fact
@@ -19,6 +22,7 @@ from support_agent.agents.resolve import (
 )
 from support_agent.domain.eligibility import EligibilityDecision, ReasonCode
 from support_agent.domain.enums import OrderStatus, ResolutionAction
+from support_agent.domain.shipping import compute_delay_facts
 from support_agent.domain.validation import ValidationCode
 from support_agent.integrations.shipping import Shipment
 from support_agent.llm.client import RetrySettings, RoutedLLMClient
@@ -392,3 +396,113 @@ async def test_an_unreadable_critic_answer_escalates_instead_of_approving() -> N
 
     assert outcome.action == ResolutionAction.ESCALATE
     assert outcome.failure == ResolutionFailure.CRITIC_OUTPUT_INVALID
+
+
+# ---------------------------------------------------------------- regression: live-run findings
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    [f"[{CITATION}]", f'"{CITATION}"', f"  {CITATION} "],
+)
+async def test_a_wrapped_citation_is_normalized_and_accepted(wrapped: str) -> None:
+    # Rahul's live run: the model wrote "[refund_policy_v2:section_3]" and was escalated.
+    script = [
+        draft_reply("refund", message=PROPOSED, citations=[wrapped]),
+        critique_reply("approve"),
+    ]
+
+    outcome, _ = await run(script)
+
+    assert outcome.action == ResolutionAction.REFUND
+    assert outcome.reason_codes == []
+    assert outcome.draft is not None and outcome.draft.policy_citations == [CITATION]
+
+
+async def test_a_wrapped_call_id_is_normalized_too() -> None:
+    script = [
+        draft_reply("refund", message=PROPOSED, citations=[CITATION], call_ids=["[call_1]"]),
+        critique_reply("approve"),
+    ]
+
+    outcome, _ = await run(script)
+
+    assert outcome.action == ResolutionAction.REFUND
+
+
+async def test_the_revision_feedback_names_the_exact_allowed_citations() -> None:
+    script = [
+        draft_reply("refund", message=PROPOSED, citations=["invented:section_1"]),
+        good_draft(),
+        critique_reply("approve"),
+    ]
+
+    outcome, fake = await run(script)
+
+    assert outcome.action == ResolutionAction.REFUND
+    feedback = fake.requests[1].messages[-1].content
+    assert "CITATION_NOT_GROUNDED" in feedback
+    assert f"- {CITATION}" in feedback
+    assert "exact" in feedback
+
+
+async def test_the_case_text_shows_citations_without_brackets() -> None:
+    _, fake = await run([good_draft(), critique_reply("approve")])
+
+    case = fake.requests[0].messages[1].content
+    assert f"citation: {CITATION}" in case
+    assert f"[{CITATION}]" not in case
+
+
+ARJUN_OVERCLAIM = (
+    "Your laptop is over 7 days past the expected delivery date. An investigation will be started."
+)
+ARJUN_HONEST = "Your laptop is 3 days past its expected delivery date and is still in transit."
+
+
+def arjun_case() -> ResolutionInputs:
+    facts = compute_delay_facts(
+        expected_delivery=date(2026, 11, 10),
+        delivered_at=None,
+        carrier_status="in_transit",
+        now=datetime(2026, 11, 13, 12, 0, tzinfo=UTC),
+        threshold_days=7,
+    )
+    return replace(inputs(eligible=False), delay_facts=facts)
+
+
+async def test_the_delay_facts_reach_the_drafter_as_system_computed_lines() -> None:
+    _, fake = await run(
+        [draft_reply("explain_status", message=ARJUN_HONEST), critique_reply()], case=arjun_case()
+    )
+
+    case = fake.requests[0].messages[1].content
+    assert "days past the expected delivery date: 3" in case
+    assert "no investigation applies" in case
+
+
+async def test_arjuns_false_delay_and_promised_investigation_are_corrected_on_revision() -> None:
+    script = [
+        draft_reply("explain_status", message=ARJUN_OVERCLAIM),
+        draft_reply("explain_status", message=ARJUN_HONEST),
+        critique_reply("approve"),
+    ]
+
+    outcome, _ = await run(script, case=arjun_case())
+
+    assert outcome.attempts[0].validation == [
+        ValidationCode.UNVERIFIED_CLAIM,
+        ValidationCode.UNSUPPORTED_PROMISE,
+    ]
+    assert outcome.action == ResolutionAction.EXPLAIN_STATUS
+    assert outcome.message == ARJUN_HONEST
+
+
+async def test_a_draft_that_keeps_the_false_claims_escalates() -> None:
+    bad = draft_reply("explain_status", message=ARJUN_OVERCLAIM)
+
+    outcome, _ = await run([bad, bad], case=arjun_case())
+
+    assert outcome.action == ResolutionAction.ESCALATE
+    assert outcome.message == ESCALATION_MESSAGE
+    assert ValidationCode.UNSUPPORTED_PROMISE.value in outcome.reason_codes

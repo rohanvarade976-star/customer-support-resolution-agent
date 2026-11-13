@@ -64,6 +64,7 @@ async def _upsert_document(
         "effective_from": meta.effective_from,
         "effective_to": meta.effective_to,
         "refund_window_days": meta.refund_window_days,
+        "investigation_threshold_days": meta.investigation_threshold_days,
         "source_uri": policy.source_uri,
     }
     document = await policy_repo.get_document(session, meta.policy_key, meta.version)

@@ -8,7 +8,8 @@ the draft passed. It checks:
 - every cited tool call exists and succeeded;
 - every policy citation is one the policy agent's grounded findings contain;
 - the structured tool outputs agree with each other (order vs carrier delivery time);
-- the customer message does not claim an outcome nobody has verified.
+- the customer message does not claim an outcome nobody has verified, and does not promise an
+  investigation, compensation or any other action that code-computed facts do not support.
 
 The message check is a best-effort keyword filter, not a proof: it catches the common ways
 of saying "the refund is done". The real protection is that no agent can move money, and
@@ -24,6 +25,7 @@ from enum import StrEnum
 
 from support_agent.domain.eligibility import EligibilityDecision
 from support_agent.domain.enums import ResolutionAction
+from support_agent.domain.shipping import ShippingDelayFacts
 
 OUTCOME_OK = "ok"  # a succeeded call's outcome in the tool trace (same value as the tool loop)
 
@@ -44,6 +46,7 @@ class ValidationCode(StrEnum):
     EVIDENCE_CONFLICT = "EVIDENCE_CONFLICT"
     UNVERIFIED_CLAIM = "UNVERIFIED_CLAIM"
     UNVERIFIED_AMOUNT = "UNVERIFIED_AMOUNT"
+    UNSUPPORTED_PROMISE = "UNSUPPORTED_PROMISE"  # promises an action no verified fact supports
     MESSAGE_EMPTY = "MESSAGE_EMPTY"
     REQUEST_INFO_NO_QUESTION = "REQUEST_INFO_NO_QUESTION"
 
@@ -84,6 +87,18 @@ class ValidationContext:
     # None when the order or the shipment was not looked up successfully: nothing to compare.
     delivery_dates: DeliveryDates | None
     delivery_tolerance: timedelta
+    # Code-computed delay facts; None when there is no shipment to compute them from.
+    delay_facts: ShippingDelayFacts | None = None
+
+
+def normalize_citation(citation: str) -> str:
+    """Strip the wrapping a model adds around a citation: whitespace, brackets, quotes.
+
+    "[refund_policy_v2:section_3]" and ' "refund_policy_v2:section_3" ' both become
+    "refund_policy_v2:section_3". Only the ends are touched, so a made-up citation stays
+    made-up and still fails the grounding check.
+    """
+    return citation.strip(" \t\r\n[](){}<>'\"`")
 
 
 def delivery_dates_conflict(dates: DeliveryDates, tolerance: timedelta) -> bool:
@@ -131,6 +146,80 @@ _OVERCLAIM_PATTERNS = [
 ]
 
 _MONEY_FIGURE = re.compile(r"(?:₹|\brs\.?|\binr)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.IGNORECASE)
+
+
+# --- promises and delay claims -------------------------------------------------------------
+# Checked one sentence at a time. A negated sentence ("we cannot offer compensation") is
+# information, not a promise, so it is skipped.
+
+_NEGATION = re.compile(r"\b(?:not|no|never|cannot|unable)\b|n't")
+_INVESTIGATION = re.compile(
+    r"\binvestigat(?:e|es|ed|ing|ion)\b|\b(?:open|start|launch|begin|begun|opened|started|launched)\w*"
+    r"\s+(?:a|an|the)\s+(?:\w+\s+)?(?:inquiry|enquiry|trace|search)\b"
+)
+# Money or goods the policy does not let support agents offer (shipping policy, section 4).
+_COMPENSATION = re.compile(
+    r"\b(?:compensat\w+|vouchers?|coupons?|goodwill|store\s+credit|partial\s+refund|"
+    r"discount|replacement|replace)\b"
+)
+_SPECIALIST = re.compile(
+    r"\b(?:specialists?|escalat\w+|supervisor|senior\s+\w+|"
+    r"member\s+of\s+(?:our\s+)?(?:support\s+)?team|colleague)\b"
+)
+# "will look into it", "have passed it on", "is being reviewed": the sentence commits us to act.
+_COMMITMENT = re.compile(
+    r"\b(?:will|shall|going\s+to|have|has|had|been|being|are\s+(?:passing|forwarding|sending|"
+    r"referring)|passed|forwarded|referred|looking\s+into)\b|'ll\b|'ve\b"
+)
+_DELAY_CLAIM = re.compile(
+    r"\b(?:(over|more\s+than|at\s+least|exceeding)\s+)?(\d+)\s+(?:calendar\s+|business\s+)?"
+    r"days?\s+(?:past|late|overdue|behind)\b"
+)
+
+
+def _sentences(message: str) -> list[str]:
+    text = " ".join(message.lower().split())
+    return [part for part in re.split(r"(?<=[.!?])\s+", text) if part]
+
+
+def promises_unsupported_action(
+    message: str, action: ResolutionAction, facts: ShippingDelayFacts | None
+) -> bool:
+    """True if the message promises an action that nothing in code's facts supports.
+
+    Allowed: an investigation or a specialist when the policy threshold applies (`facts`);
+    escalation or specialist wording when the action itself is escalate. Never allowed:
+    compensation, vouchers, replacements. Telling the customer they may *request* a review
+    is information (no commitment verb), so it is not flagged.
+    """
+    investigation_ok = facts is not None and facts.investigation_applies
+    specialist_ok = investigation_ok or action == ResolutionAction.ESCALATE
+    for sentence in _sentences(message):
+        if _NEGATION.search(sentence):
+            continue
+        if _COMPENSATION.search(sentence) and _COMMITMENT.search(sentence):
+            return True
+        if _INVESTIGATION.search(sentence) and not investigation_ok:
+            return True
+        if _SPECIALIST.search(sentence) and _COMMITMENT.search(sentence) and not specialist_ok:
+            return True
+    return False
+
+
+def states_unverified_delay(message: str, facts: ShippingDelayFacts | None) -> bool:
+    """True if the message gives a number of days late that code's facts do not support.
+
+    "N days late" must equal the computed days. "over N days late" (or "more than", "at
+    least") is fine only if N is below the computed days.
+    """
+    text = " ".join(message.lower().split())
+    for qualifier, number in _DELAY_CLAIM.findall(text):
+        days = int(number)
+        if facts is None:
+            return True
+        if days != facts.days_past_expected and not (qualifier and days < facts.days_past_expected):
+            return True
+    return False
 
 
 def claims_unverified_outcome(message: str) -> bool:
@@ -205,6 +294,10 @@ def _check_message(claim: DraftClaim, ctx: ValidationContext) -> list[Validation
     codes: list[ValidationCode] = []
     if claims_unverified_outcome(claim.message):
         codes.append(ValidationCode.UNVERIFIED_CLAIM)
+    if states_unverified_delay(claim.message, ctx.delay_facts):
+        codes.append(ValidationCode.UNVERIFIED_CLAIM)
+    if promises_unsupported_action(claim.message, claim.action, ctx.delay_facts):
+        codes.append(ValidationCode.UNSUPPORTED_PROMISE)
     # A rupee figure may only be the eligible refund amount, and only in a refund draft.
     is_refund = claim.action == ResolutionAction.REFUND
     allowed = {ctx.eligibility.refundable_amount_minor} if is_refund else set()

@@ -37,6 +37,7 @@ from sqlalchemy import select
 
 from support_agent.agents.investigator import investigate
 from support_agent.agents.policy import research_policy
+from support_agent.agents.required_evidence import build_delay_facts, ensure_required_evidence
 from support_agent.agents.resolution import ResolutionInputs
 from support_agent.agents.resolve import Attempt, ResolutionOutcome, resolve
 from support_agent.core.config import Settings, get_settings
@@ -44,12 +45,14 @@ from support_agent.core.logging import configure_logging
 from support_agent.db.models import Customer
 from support_agent.db.session import get_sessionmaker
 from support_agent.domain.eligibility import EligibilityDecision
+from support_agent.domain.enums import TicketCategory
+from support_agent.domain.shipping import ShippingDelayFacts
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import LLMClient
 from support_agent.llm.errors import LLMError
 from support_agent.llm.providers import build_llm_client
 from support_agent.rag.embeddings import get_embedder
-from support_agent.services import eligibility
+from support_agent.services import eligibility, order_status
 from support_agent.tools.base import ToolContext
 from support_agent.tools.read_tools import build_read_registry
 
@@ -118,6 +121,18 @@ def show_decision(decision: EligibilityDecision) -> None:
     print(f"  blocked by: {reasons}")
 
 
+def show_delay_facts(facts: ShippingDelayFacts | None) -> None:
+    print("\nSHIPPING FACTS (computed by code)")
+    if facts is None:
+        print("  no shipment record")
+        return
+    print(f"  delivered: {facts.delivered}   days past expected: {facts.days_past_expected}")
+    print(
+        f"  threshold: {facts.investigation_threshold_days}   "
+        f"investigation applies: {facts.investigation_applies}"
+    )
+
+
 def show_attempt(number: int, attempt: Attempt) -> None:
     draft = attempt.draft
     print(f"\n  DRAFT {number}: action={draft.action.value}")
@@ -176,6 +191,16 @@ async def run_scenario(
         if investigation.failure is not None or investigation.evidence is None:
             print(f"\nINVESTIGATION STOPPED: {investigation.failure} (the workflow would escalate)")
             return
+        # Code fetches get_order / get_shipment itself if the investigator skipped them.
+        investigation = await ensure_required_evidence(
+            registry,
+            ctx,
+            investigation,
+            category=TicketCategory(scenario.category),
+            order_number=scenario.order_number,
+        )
+        if investigation.evidence is None:  # unreachable: ensure_required_evidence keeps it
+            return
         print(f"\nINVESTIGATION: {len(investigation.evidence.facts)} grounded facts")
         for fact in investigation.evidence.facts:
             print(f"  [{fact.call_id}] {fact.statement}")
@@ -203,6 +228,12 @@ async def run_scenario(
         )
         show_decision(decision)
 
+        threshold = await order_status.get_investigation_threshold(
+            session, customer_id, scenario.order_number
+        )
+        delay_facts = build_delay_facts(investigation.results, ctx.clock(), threshold)
+        show_delay_facts(delay_facts)
+
         outcome = await resolve(
             llm,
             ResolutionInputs(
@@ -211,6 +242,7 @@ async def run_scenario(
                 evidence=investigation.evidence,
                 findings=policy.findings,
                 eligibility=decision,
+                delay_facts=delay_facts,
             ),
             trace=investigation.trace,
             results=investigation.results,
@@ -226,6 +258,8 @@ async def main() -> None:
     parser.add_argument("--only", choices=[s.name for s in SCENARIOS], help="run one scenario")
     args = parser.parse_args()
 
+    # Model text may hold characters the Windows console code page cannot print.
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
     configure_logging("WARNING")  # hide the per-call log lines; the output below shows them
     logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
