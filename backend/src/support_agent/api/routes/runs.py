@@ -1,4 +1,8 @@
-"""Workflow runs. Ownership and the workflow itself live in services/runs.py."""
+"""Workflow runs. Ownership and the workflow itself live in services/runs.py.
+
+Starting a run and replying to one only queue work: they answer 202 Accepted, and the
+background worker runs the workflow (worker/). GET /runs/{id} shows how far it has got.
+"""
 
 from uuid import UUID
 
@@ -6,9 +10,9 @@ from fastapi import APIRouter
 
 from support_agent.api.deps import (
     CustomerDep,
+    EnqueueEnvDep,
     PrincipalDep,
     SessionDep,
-    WorkflowEnvDep,
 )
 from support_agent.schemas.messages import CustomerMessageRequest
 from support_agent.schemas.runs import RunResponse
@@ -17,10 +21,9 @@ from support_agent.services import runs as runs_service
 router = APIRouter(tags=["runs"])
 
 
-# 202 per the PRD: today the segment finishes before we reply; from M7 Task 2 a worker runs it.
 @router.post("/tickets/{ticket_id}/runs", status_code=202)
 async def start_run(
-    ticket_id: UUID, principal: CustomerDep, session: SessionDep, env: WorkflowEnvDep
+    ticket_id: UUID, principal: CustomerDep, session: SessionDep, env: EnqueueEnvDep
 ) -> RunResponse:
     return await runs_service.start_run(session, principal, ticket_id, env)
 
@@ -37,6 +40,6 @@ async def post_message(
     body: CustomerMessageRequest,
     principal: CustomerDep,
     session: SessionDep,
-    env: WorkflowEnvDep,
+    env: EnqueueEnvDep,
 ) -> RunResponse:
     return await runs_service.post_customer_message(session, env, principal, run_id, body.text)

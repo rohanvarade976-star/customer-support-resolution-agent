@@ -4,13 +4,36 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import exists, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.db.models import WorkflowRun
 from support_agent.domain.enums import RunMode, RunStatus
 
-# A run in one of these states is over, so it gets a completed_at time.
+# A run in one of these states is over, so it gets a completed_at time. (The partial unique
+# index on workflow_runs, db/models/support.py, lists the same three in SQL.)
 FINISHED_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.ESCALATED, RunStatus.FAILED})
+# A run in one of these states is paused, waiting for a person.
+WAITING_STATUSES = frozenset({RunStatus.AWAITING_CUSTOMER, RunStatus.AWAITING_APPROVAL})
+
+_ONE_UNFINISHED_RUN_INDEX = "uq_workflow_runs_one_unfinished_per_ticket"
+
+
+class RunAlreadyActiveError(Exception):
+    """The ticket already has an unfinished run (the database's partial unique index)."""
+
+
+async def _insert(session: AsyncSession, run: WorkflowRun) -> WorkflowRun:
+    """Insert a run. The database allows one unfinished run per ticket; a second one, even
+    from a request racing this one, raises RunAlreadyActiveError (the caller rolls back)."""
+    session.add(run)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if _ONE_UNFINISHED_RUN_INDEX in str(exc.orig):
+            raise RunAlreadyActiveError(str(run.ticket_id)) from None
+        raise
+    return run
 
 
 async def create_manual(
@@ -26,9 +49,7 @@ async def create_manual(
         status=status,
         started_at=now,
     )
-    session.add(run)
-    await session.flush()
-    return run
+    return await _insert(session, run)
 
 
 async def create_agent_run(
@@ -44,9 +65,7 @@ async def create_agent_run(
         status=RunStatus.CREATED,
         started_at=now,
     )
-    session.add(run)
-    await session.flush()
-    return run
+    return await _insert(session, run)
 
 
 async def has_unfinished_run(session: AsyncSession, ticket_id: UUID) -> bool:

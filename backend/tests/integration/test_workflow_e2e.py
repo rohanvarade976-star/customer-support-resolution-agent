@@ -58,6 +58,7 @@ NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 PRIYA_AMOUNT = 249900
 REVIEWER = "anita@example.com"
 HeadersFor = Callable[[str], Awaitable[dict[str, str]]]
+Drain = Callable[[], Awaitable[int]]
 UseAgents = Callable[[dict[str, list[ScriptStep]]], AgentFake]
 
 
@@ -133,6 +134,7 @@ async def priya_scripts(session: AsyncSession, settings: Settings) -> dict[str, 
 
 async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     auth_headers: HeadersFor,
@@ -154,6 +156,7 @@ async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
     started = await client.post(f"/tickets/{ticket_id}/runs", headers=priya)
     assert started.status_code == 202
     run_id = started.json()["run_id"]
+    await drain_jobs()  # the background worker runs the agents
 
     run = await session.get(WorkflowRun, UUID(run_id), populate_existing=True)
     assert run is not None and run.status == RunStatus.AWAITING_APPROVAL
@@ -173,7 +176,8 @@ async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
     queue = (await client.get("/approvals", headers=reviewer)).json()["items"]
     assert [item["approval_id"] for item in queue] == [str(approval.id)]
     decided = await decide(client, reviewer, str(approval.id), "approve", "Looks right")
-    assert decided.status_code == 200
+    assert decided.status_code == 202  # stored; the worker resumes the run
+    await drain_jobs()
 
     # 3. Exactly one refund, in our table and at the provider, for the eligible amount.
     rows = await refunds_for(session, str(proposal.id))
@@ -195,6 +199,7 @@ async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
 
 async def test_a_rejected_proposal_from_a_run_moves_no_money(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     auth_headers: HeadersFor,
@@ -210,6 +215,7 @@ async def test_a_rejected_proposal_from_a_run_moves_no_money(
         headers=priya,
     )
     started = await client.post(f"/tickets/{created.json()['id']}/runs", headers=priya)
+    await drain_jobs()
     run = await session.get(WorkflowRun, UUID(started.json()["run_id"]), populate_existing=True)
     assert run is not None
     (proposal,) = (
@@ -220,7 +226,8 @@ async def test_a_rejected_proposal_from_a_run_moves_no_money(
     ).all()
 
     rejected = await decide(client, reviewer, str(approval.id), "reject", "Not this time")
+    await drain_jobs()
 
-    assert rejected.status_code == 200
+    assert rejected.status_code == 202
     assert await refunds_for(session, str(proposal.id)) == []
     assert await payments.refund_count() == 0

@@ -3,63 +3,83 @@
 A run is driven in segments (workflow/graph.py): start -> pause -> resume -> ... -> end.
 The checkpointer keeps the run's place between segments, keyed by `workflow_runs.thread_id`.
 
-start_run:
-1. Check the caller owns the ticket (anyone else's ticket is a 404, like a missing one).
-2. Refuse if the ticket already has an unfinished run (409). A paused run is unfinished.
-3. Create the run, record `run.created`, commit.
-4. Run the first segment (a background worker takes this over in M7 Task 2).
+Since M7 Task 2 the API never runs the graph itself. Each request does its checks, changes
+the run, and adds a job in the SAME transaction (worker/queue.py), so the run and its job are
+committed together or not at all. It answers 202; the background worker runs the segment.
 
-post_customer_message (POST /runs/{id}/messages) and resume_after_decision (called by the
-approval decision) both:
-1. Claim the run: one UPDATE moves it out of its waiting status, or matches nothing. Only
-   one request can win; every other (a double click, a second reviewer, a resume of a
-   finished run) gets 409 and changes nothing. `run.resumed` records who resumed it.
-2. Commit, then resume the graph. No database lock is held while the graph runs.
+API side (the request):
 
-After every segment, services/run_recording.py saves what it did and the result is
-committed. If anything unexpected breaks, the run is marked `failed` so it never stays open,
-and anything the segment wrote but did not commit is rolled back.
+- start_run (POST /tickets/{id}/runs): check the caller owns the ticket (anyone else's is a
+  404, like a missing one), create the run, record `run.created`, enqueue `start_run`. A
+  second unfinished run on the ticket is refused with 409, even when two requests race: the
+  database's partial unique index lets only one insert through.
+- post_customer_message (POST /runs/{id}/messages) and the approval decision
+  (services/approvals.py) claim the paused run: one UPDATE moves it out of its waiting
+  status, or matches nothing (409). Only one request can win. `run.resumed` records who
+  resumed it. The reply is stored in customer_messages; the job carries only its id, plus
+  the id of the checkpoint the run is paused at (see `advance_workflow`).
+
+Worker side (worker/handlers.py calls these):
+
+- run_start_job / run_reply_job / run_decision_job run one segment with `advance_workflow`,
+  which continues from the last checkpoint if an earlier attempt died part-way. A run that
+  is already paused or finished in our tables is left alone, so a repeated job does nothing.
+- After the segment, services/run_recording.py saves what it did and it is committed. If
+  anything breaks, the uncommitted work is rolled back and the exception goes to the worker,
+  which retries the job; when its attempts run out the run is escalated
+  (escalate_after_dead_job).
 
 The customer id given to the workflow is the ticket's owner, which was matched to the JWT.
 It never comes from the complaint text, a reply, or the model.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.agents.resolve import ESCALATION_MESSAGE
 from support_agent.core.config import Settings
-from support_agent.core.errors import AppError
-from support_agent.db.models import Ticket, WorkflowRun
-from support_agent.domain.enums import ApprovalDecision, Role, RunMode, RunStatus
+from support_agent.core.errors import AppError, PermanentJobError
+from support_agent.db.models import Job, Ticket, WorkflowRun
+from support_agent.domain.enums import (
+    ApprovalDecision,
+    JobStatus,
+    JobType,
+    Role,
+    RunMode,
+    RunStatus,
+    TicketStatus,
+)
 from support_agent.integrations.payments import PaymentClient
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import LLMClient
 from support_agent.llm.usage import metered
 from support_agent.rag.embeddings import Embedder
-from support_agent.repositories import audit, proposals, tickets, workflow_runs
+from support_agent.repositories import audit, customer_messages, proposals, tickets, workflow_runs
+from support_agent.repositories.tickets import TicketRecord
 from support_agent.schemas.auth import Principal
-from support_agent.schemas.runs import RunResponse
+from support_agent.schemas.runs import RunJob, RunResponse
 from support_agent.services import eligibility, order_status, refund_execution
 from support_agent.services import proposals as proposal_service
-from support_agent.services.case_updates import set_run_status
+from support_agent.services.case_updates import set_run_status, set_ticket_status
 from support_agent.services.orders import customer_owns_order
 from support_agent.services.run_recording import save_segment
 from support_agent.services.tickets import ticket_not_found
 from support_agent.tools.base import ToolContext
 from support_agent.tools.read_tools import build_read_registry
+from support_agent.worker import queue
 from support_agent.workflow.deps import BranchSessions, CaseFacts, RefundResult, WorkflowDeps
 from support_agent.workflow.graph import (
     Checkpointer,
     NotPausedError,
-    Segment,
+    advance_workflow,
     initial_state,
-    resume_workflow,
-    start_workflow,
+    latest_checkpoint_id,
 )
 from support_agent.workflow.state import WorkflowState
 
@@ -67,10 +87,20 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class WorkflowEnv:
-    """Everything a run needs from outside: clients, the clock, sessions, the checkpointer.
+class EnqueueEnv:
+    """What a request needs to queue work: settings, the clock, and the checkpointer (read
+    only, for the id of the checkpoint a paused run waits at). No model, no providers."""
 
-    Built per request by api/deps.py. The approval decision gets a disabled LLM client.
+    settings: Settings
+    clock: Callable[[], datetime]
+    checkpointer: Checkpointer
+
+
+@dataclass(frozen=True)
+class WorkflowEnv:
+    """Everything a segment needs from outside: clients, the clock, sessions, the checkpointer.
+
+    Built per job by the worker (worker/main.py). Decision jobs get a disabled LLM client.
     """
 
     settings: Settings
@@ -91,7 +121,11 @@ def not_paused() -> AppError:
     return AppError(409, "RUN_NOT_PAUSED", "This run is not waiting for this input.")
 
 
-def _to_response(run: WorkflowRun, ticket: Ticket) -> RunResponse:
+def _already_active() -> AppError:
+    return AppError(409, "RUN_ALREADY_ACTIVE", "This ticket already has a run in progress.")
+
+
+def _to_response(run: WorkflowRun, ticket: Ticket, job: Job | None) -> RunResponse:
     return RunResponse(
         run_id=run.id,
         ticket_id=ticket.id,
@@ -99,14 +133,27 @@ def _to_response(run: WorkflowRun, ticket: Ticket) -> RunResponse:
         category=ticket.category,
         started_at=run.started_at,
         completed_at=run.completed_at,
+        job=None if job is None else _job_view(job),
     )
+
+
+def _job_view(job: Job) -> RunJob:
+    return RunJob(
+        job_type=job.job_type,
+        status=job.status,
+        attempts=job.attempts,
+        next_attempt_at=job.available_at if job.status == JobStatus.QUEUED else None,
+    )
+
+
+# ---------------------------------------------------------------- API side: queue the work
 
 
 async def start_run(
     session: AsyncSession,
     principal: Principal,
     ticket_id: UUID,
-    env: WorkflowEnv,
+    env: EnqueueEnv,
     mode: RunMode = RunMode.MULTI_AGENT,
 ) -> RunResponse:
     record = await tickets.get_by_id(session, ticket_id)
@@ -114,11 +161,15 @@ async def start_run(
         raise ticket_not_found()
     ticket = record.ticket
     if await workflow_runs.has_unfinished_run(session, ticket.id):
-        raise AppError(409, "RUN_ALREADY_ACTIVE", "This ticket already has a run in progress.")
+        raise _already_active()  # the common case, answered without touching the index
 
-    run = await workflow_runs.create_agent_run(
-        session, ticket_id=ticket.id, mode=mode, now=env.clock()
-    )
+    try:
+        run = await workflow_runs.create_agent_run(
+            session, ticket_id=ticket.id, mode=mode, now=env.clock()
+        )
+    except workflow_runs.RunAlreadyActiveError:
+        await session.rollback()  # another request created one a moment ago
+        raise _already_active() from None
     await audit.record(
         session,
         run_id=run.id,
@@ -126,28 +177,20 @@ async def start_run(
         event_type="run.created",
         payload={"run_id": str(run.id), "ticket_id": str(ticket.id)},
     )
-    await session.commit()
-
-    state = initial_state(
-        run_id=run.id,
-        ticket_id=ticket.id,
-        customer_id=ticket.customer_id,
-        complaint_text=ticket.summary,
-        ticket_order_number=record.order_number,
-    )
-    deps = _build_deps(session, env, run, ticket)
-    await _run_segment(
+    job = await queue.enqueue(
         session,
-        env,
-        run,
-        ticket,
-        lambda: start_workflow(deps, env.checkpointer, run.thread_id, state),
+        JobType.START_RUN,
+        run_id=run.id,
+        payload={},
+        now=env.clock(),
+        max_attempts=env.settings.job_max_attempts,
     )
-    return _to_response(run, ticket)
+    await session.commit()  # the run and its job, together
+    return _to_response(run, ticket, job)
 
 
 async def post_customer_message(
-    session: AsyncSession, env: WorkflowEnv, principal: Principal, run_id: UUID, text: str
+    session: AsyncSession, env: EnqueueEnv, principal: Principal, run_id: UUID, text: str
 ) -> RunResponse:
     """The customer's reply to a run's question. Owner only; the text is untrusted data."""
     run = await workflow_runs.get(session, run_id)
@@ -164,17 +207,18 @@ async def post_customer_message(
         resumed_by="customer",
         actor_id=principal.id,
     )
-    await session.commit()
-
-    deps = _build_deps(session, env, run, ticket)
-    await _run_segment(
+    message = await customer_messages.create(
+        session, run_id=run.id, ticket_id=ticket.id, customer_id=principal.id, body=text
+    )
+    job = await enqueue_resume(
         session,
         env,
         run,
-        ticket,
-        lambda: resume_workflow(deps, env.checkpointer, run.thread_id, {"text": text}),
+        JobType.RESUME_AFTER_CUSTOMER_REPLY,
+        {"message_id": str(message.id)},
     )
-    return _to_response(run, ticket)
+    await session.commit()  # the claim, the message and the job, together
+    return _to_response(run, ticket, job)
 
 
 async def claim_paused_run(
@@ -184,9 +228,12 @@ async def claim_paused_run(
     waiting: RunStatus,
     resuming: RunStatus,
     resumed_by: str,
-    actor_id: UUID,
+    actor_id: UUID | None,
 ) -> None:
-    """Take the paused run, or refuse with 409. Not committed: the caller commits."""
+    """Take the paused run, or refuse with 409. Not committed: the caller commits.
+
+    `actor_id` is None when the system resumes it (an approval that expired).
+    """
     if run.mode == RunMode.MANUAL:  # manual (M3) runs have no graph to resume
         raise not_paused()
     if not await workflow_runs.claim(session, run, expected=waiting, new=resuming):
@@ -200,52 +247,171 @@ async def claim_paused_run(
             "run_id": str(run.id),
             "reason": waiting.value,
             "resumed_by": resumed_by,
-            "actor_id": str(actor_id),
+            "actor_id": None if actor_id is None else str(actor_id),
         },
     )
 
 
-async def resume_after_decision(
-    session: AsyncSession, env: WorkflowEnv, run: WorkflowRun, ticket: Ticket
-) -> WorkflowState:
-    """Continue a run the decision endpoint has already claimed and committed.
+async def enqueue_resume(
+    session: AsyncSession,
+    env: EnqueueEnv,
+    run: WorkflowRun,
+    job_type: JobType,
+    payload: dict[str, Any],
+) -> Job:
+    """Queue the resume of a run the caller has just claimed. Not committed.
 
-    The resume value carries nothing that decides: the graph reads the stored decision.
+    The job also carries the id of the checkpoint the run is paused at, so a retried job
+    can tell its own pause from a later one (workflow/graph.py `advance_workflow`).
     """
-    deps = _build_deps(session, env, run, ticket)
-    return await _run_segment(
+    checkpoint_id = await latest_checkpoint_id(env.checkpointer, run.thread_id)
+    return await queue.enqueue(
         session,
-        env,
-        run,
-        ticket,
-        lambda: resume_workflow(deps, env.checkpointer, run.thread_id, {"event": "decided"}),
+        job_type,
+        run_id=run.id,
+        payload={**payload, "checkpoint_id": checkpoint_id},
+        now=env.clock(),
+        max_attempts=env.settings.job_max_attempts,
     )
 
 
-async def _run_segment(
+# ---------------------------------------------------------------- worker side: run a segment
+
+
+async def _load_run(session: AsyncSession, run_id: UUID) -> tuple[WorkflowRun, TicketRecord]:
+    run = await workflow_runs.get(session, run_id)
+    record = None if run is None else await tickets.get_by_id(session, run.ticket_id)
+    if run is None or record is None:
+        raise PermanentJobError("RUN_NOT_FOUND")
+    await session.refresh(run)  # never act on a copy from before an earlier rollback
+    return run, record
+
+
+def _nothing_to_do(run: WorkflowRun) -> bool:
+    """Paused or finished in our tables: an earlier attempt of this job already saved it."""
+    done = run.status in workflow_runs.FINISHED_STATUSES | workflow_runs.WAITING_STATUSES
+    if done:
+        log.info("job_already_done", extra={"run_id": str(run.id), "status": run.status.value})
+    return done
+
+
+async def run_start_job(session: AsyncSession, env: WorkflowEnv, run_id: UUID) -> None:
+    run, record = await _load_run(session, run_id)
+    if _nothing_to_do(run):
+        return
+    ticket = record.ticket
+    state = initial_state(
+        run_id=run.id,
+        ticket_id=ticket.id,
+        customer_id=ticket.customer_id,
+        complaint_text=ticket.summary,
+        ticket_order_number=record.order_number,
+    )
+    await _advance(session, env, run, ticket, initial=state, resume=None)
+
+
+async def run_reply_job(
+    session: AsyncSession,
+    env: WorkflowEnv,
+    run_id: UUID,
+    message_id: UUID,
+    checkpoint_id: str | None,
+) -> None:
+    """Resume a run with the customer's stored reply, after checking it again.
+
+    The request already checked ownership. The job row is not trusted alone, so the message
+    must belong to this run, this ticket, and the ticket's owner; anything else can never
+    succeed and the job goes dead (the run is escalated).
+    """
+    run, record = await _load_run(session, run_id)
+    if _nothing_to_do(run):
+        return
+    ticket = record.ticket
+    message = await customer_messages.get(session, message_id)
+    owned = (
+        message is not None
+        and message.run_id == run.id
+        and message.ticket_id == ticket.id
+        and message.customer_id == ticket.customer_id
+    )
+    if message is None or not owned:
+        raise PermanentJobError("MESSAGE_NOT_OWNED")
+    await _advance(
+        session, env, run, ticket, initial=None, resume=(checkpoint_id, {"text": message.body})
+    )
+
+
+async def run_decision_job(
+    session: AsyncSession, env: WorkflowEnv, run_id: UUID, checkpoint_id: str | None
+) -> None:
+    """Resume a run after a reviewer's decision or an expiry.
+
+    The resume value carries nothing that decides: the graph reads the stored decision.
+    """
+    run, record = await _load_run(session, run_id)
+    if _nothing_to_do(run):
+        return
+    resume = (checkpoint_id, {"event": "decided"})
+    await _advance(session, env, run, record.ticket, initial=None, resume=resume)
+
+
+async def _advance(
     session: AsyncSession,
     env: WorkflowEnv,
     run: WorkflowRun,
     ticket: Ticket,
-    segment_call: Callable[[], Awaitable[Segment]],
-) -> WorkflowState:
-    """Run one segment, save what it did and commit; on any failure mark the run failed."""
+    *,
+    initial: WorkflowState | None,
+    resume: tuple[str | None, dict[str, str]] | None,
+) -> None:
+    """Run one segment from wherever the checkpoints say, save what it did, and commit.
+
+    On failure, roll back what the segment had not committed and re-raise: the worker
+    decides between retrying the job and giving up.
+    """
+    deps = _build_deps(session, env, run, ticket)
     try:
         with metered() as meter:
-            segment = await segment_call()
+            segment = await advance_workflow(
+                deps, env.checkpointer, run.thread_id, initial=initial, resume=resume
+            )
         await save_segment(session, env.settings, run, ticket, segment, meter, env.clock())
         await session.commit()
     except NotPausedError:
-        # Nothing ran. A finished run stays as it was; a claimed run with no checkpoint to
-        # resume would otherwise stay open forever, so it is marked failed.
-        if run.status not in workflow_runs.FINISHED_STATUSES:
-            await _mark_failed(session, run, env.clock())
-        raise not_paused() from None
-    except Exception:
-        await _mark_failed(session, run, env.clock())
+        await session.rollback()
+        raise PermanentJobError("RUN_NOT_RESUMABLE") from None  # no checkpoint to resume
+    except BaseException:
+        await session.rollback()
         raise
     log.info("run_segment_finished", extra={"run_id": str(run.id), "status": run.status.value})
-    return segment.state
+
+
+async def escalate_after_dead_job(
+    session: AsyncSession, run_id: UUID, *, job_type: JobType, code: str, now: datetime
+) -> None:
+    """A job for this run will never succeed: hand the case to a person. Not committed.
+
+    A run that has already finished is left as it is. A refund operation the run started
+    keeps its own status; reconciling unknown refund outcomes is M8's job.
+    """
+    run = await workflow_runs.get(session, run_id)
+    record = None if run is None else await tickets.get_by_id(session, run.ticket_id)
+    if run is None or record is None:
+        return
+    await session.refresh(run)
+    if run.status in workflow_runs.FINISHED_STATUSES:
+        return
+    ticket = record.ticket
+    await set_run_status(
+        session,
+        run,
+        RunStatus.ESCALATED,
+        now=now,
+        actor="system",
+        details={"reason": "JOB_DEAD", "job_type": job_type.value, "error_code": code},
+    )
+    await set_ticket_status(session, ticket, TicketStatus.ESCALATED, run_id=run.id, actor="system")
+    await tickets.set_reply(session, ticket, ESCALATION_MESSAGE)
 
 
 def _build_deps(
@@ -266,7 +432,7 @@ def _build_deps(
         return CaseFacts(decision, threshold)
 
     async def propose_refund(order_number: str, amount_minor: int) -> UUID:
-        return await proposal_service.create_proposal_for_run(
+        proposal_id = await proposal_service.create_proposal_for_run(
             session,
             ticket,
             run.id,
@@ -275,6 +441,11 @@ def _build_deps(
             now=clock(),
             settings=settings,
         )
+        # Committed now, before the checkpointer saves this step (ADR-012). Otherwise a
+        # worker dying in between would leave a checkpoint pointing at a proposal that was
+        # rolled back. A rerun of this step gets the same proposal back.
+        await session.commit()
+        return proposal_id
 
     async def load_approval_decision(proposal_id: UUID) -> ApprovalDecision | None:
         approval = await proposals.get_approval_for_proposal(session, proposal_id)
@@ -307,19 +478,7 @@ def _build_deps(
     )
 
 
-async def _mark_failed(session: AsyncSession, run: WorkflowRun, now: datetime) -> None:
-    """Record that the run crashed, in a fresh transaction, so it never stays open."""
-    await session.rollback()
-    await session.refresh(run)  # rollback expired it; reload before changing it
-    await set_run_status(
-        session,
-        run,
-        RunStatus.FAILED,
-        now=now,
-        actor="system",
-        details={"error_codes": ["INTERNAL_ERROR"]},
-    )
-    await session.commit()
+# ---------------------------------------------------------------- reading
 
 
 async def get_run(session: AsyncSession, principal: Principal, run_id: UUID) -> RunResponse:
@@ -331,4 +490,4 @@ async def get_run(session: AsyncSession, principal: Principal, run_id: UUID) -> 
     is_staff = principal.role in (Role.REVIEWER, Role.ADMIN)
     if not (owns_it or is_staff):
         raise run_not_found()  # same answer as "no such run"
-    return _to_response(run, record.ticket)
+    return _to_response(run, record.ticket, await queue.latest_for_run(session, run.id))

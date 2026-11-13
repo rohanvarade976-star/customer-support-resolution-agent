@@ -52,3 +52,11 @@ def test_settings_reject_absurd_token_lifetime(valid_env: pytest.MonkeyPatch) ->
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_settings_reject_a_heartbeat_too_slow_for_the_lease(valid_env: pytest.MonkeyPatch) -> None:
+    # The worker must renew a job's lease at least twice before it runs out.
+    valid_env.setenv("JOB_LEASE_SECONDS", "60")
+    valid_env.setenv("JOB_HEARTBEAT_SECONDS", "31")
+    with pytest.raises(ValidationError, match="JOB_HEARTBEAT_SECONDS"):
+        Settings(_env_file=None)

@@ -12,7 +12,12 @@ from support_agent.db.models.policies import PolicyChunk, PolicyDocument
 from support_agent.db.models.proposals import ActionProposal, Approval
 from support_agent.db.models.refunds import RefundOperation
 from support_agent.db.models.staff import StaffUser
-from support_agent.db.models.support import CustomerMemory, Ticket, WorkflowRun
+from support_agent.db.models.support import (
+    CustomerMemory,
+    CustomerMessage,
+    Ticket,
+    WorkflowRun,
+)
 
 __all__ = [
     "ActionProposal",
@@ -20,6 +25,7 @@ __all__ = [
     "AuditEvent",
     "Customer",
     "CustomerMemory",
+    "CustomerMessage",
     "Job",
     "Order",
     "OrderItem",

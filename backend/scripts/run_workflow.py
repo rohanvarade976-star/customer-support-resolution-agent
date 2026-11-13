@@ -23,6 +23,11 @@ The first run downloads the local embedding model (fastembed).
 A refund run stops paused, waiting for a reviewer (its checkpoint is kept in Postgres); this
 script never decides, so no money moves.
 
+Each run is queued exactly as the API queues it (a run plus a `start_run` job), and then this
+script does the worker's part itself, in-process, so the latency it prints is the run's own.
+No worker needs to be running; if one is, it finds the job's run already handled and simply
+marks the job done.
+
     uv run python scripts/run_workflow.py
     uv run python scripts/run_workflow.py --only meera --mode multi_agent
 
@@ -184,8 +189,10 @@ async def run_one(
             principal,
             CreateTicketRequest(message=scenario.complaint, order_number=scenario.order_number),
         )
+        enqueue_env = runs_service.EnqueueEnv(env.settings, env.clock, env.checkpointer)
+        response = await runs_service.start_run(session, principal, ticket.id, enqueue_env, mode)
         started = time.perf_counter()
-        response = await runs_service.start_run(session, principal, ticket.id, env, mode)
+        await runs_service.run_start_job(session, env, response.run_id)  # the worker's part
         latency = time.perf_counter() - started
     return await read_result(mode, response.run_id, latency)
 

@@ -11,12 +11,18 @@ Two kinds of run reach this endpoint:
   updates the run and ticket, and (on approval) calls the refund executor itself.
 - Workflow runs, paused in `wait_for_approval`. In one transaction, while the approval row
   is locked, this service claims the run (awaiting_approval -> executing; a second decision
-  or a finished run gets 409) and stores the decision. It commits, then resumes the graph.
-  After the resume everything is fixed code that reads the STORED decision: approve ->
-  revalidate and execute; reject -> reopen; expired or changed -> escalate. The graph gets a
+  or a finished run gets 409), stores the decision and queues a `resume_after_decision`
+  job. It commits and answers 202: the worker resumes the graph (M7 Task 2). After the
+  resume everything is fixed code that reads the STORED decision: approve -> revalidate and
+  execute; reject -> reopen; expired or changed -> escalate. The worker gives that job a
   disabled LLM client, so no model can run there.
+
+The worker also sweeps approvals that expired with no decision (`expire_overdue_approvals`):
+each is recorded as expired and its paused run is claimed and queued the same way, so the
+graph escalates it.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, NoReturn
 from uuid import UUID
@@ -27,6 +33,7 @@ from support_agent.core.errors import AppError
 from support_agent.db.models import ActionProposal, Approval, RefundOperation, Ticket, WorkflowRun
 from support_agent.domain.enums import (
     ApprovalDecision,
+    JobType,
     ProposalStatus,
     RunMode,
     RunStatus,
@@ -34,7 +41,7 @@ from support_agent.domain.enums import (
 )
 from support_agent.domain.proposals import payload_hash
 from support_agent.integrations.payments import PaymentClient
-from support_agent.repositories import audit, proposals, refunds
+from support_agent.repositories import audit, proposals
 from support_agent.schemas.approvals import (
     ApprovalListResponse,
     DecisionRequest,
@@ -49,6 +56,19 @@ from support_agent.services.case_updates import load_case, set_run_status, set_t
 
 ACTOR = "reviewer"
 REJECTED_MESSAGE = "The refund proposal was rejected. The ticket is open again for follow-up."
+# Workflow runs: the decision is stored, but its effects have not happened yet.
+APPROVED_QUEUED_MESSAGE = (
+    "The approval was recorded. The refund is being processed; the run shows the outcome."
+)
+REJECTED_QUEUED_MESSAGE = "The rejection was recorded. The case is being updated."
+
+
+@dataclass(frozen=True)
+class DecisionOutcome:
+    """The response, and whether its effects were queued (202) or already done (200)."""
+
+    response: DecisionResponse
+    queued: bool
 
 
 def _expired_error() -> AppError:
@@ -88,8 +108,9 @@ async def decide(
     reviewer: Principal,
     approval_id: UUID,
     body: DecisionRequest,
-    env: runs_service.WorkflowEnv,
-) -> DecisionResponse:
+    env: runs_service.EnqueueEnv,
+    payments: PaymentClient,
+) -> DecisionOutcome:
     now = env.clock()
     # Locked until the decision is committed, so two reviewers cannot both decide.
     approval = await proposals.lock_approval(session, approval_id)
@@ -103,24 +124,23 @@ async def decide(
         raise AppError(409, "PROPOSAL_NOT_PENDING", "This proposal is no longer awaiting review.")
 
     if run.mode == RunMode.MANUAL:
-        return await _decide_manual(
-            session, env.payments, approval, proposal, run, ticket, reviewer, body, now
+        response = await _decide_manual(
+            session, payments, approval, proposal, run, ticket, reviewer, body, now
         )
-    return await _decide_and_resume(
-        session, env, approval, proposal, run, ticket, reviewer, body, now
-    )
+        return DecisionOutcome(response, queued=False)
+    response = await _decide_and_queue(session, env, approval, proposal, run, reviewer, body, now)
+    return DecisionOutcome(response, queued=True)
 
 
 # ---------------------------------------------------------------- workflow runs
 
 
-async def _decide_and_resume(
+async def _decide_and_queue(
     session: AsyncSession,
-    env: runs_service.WorkflowEnv,
+    env: runs_service.EnqueueEnv,
     approval: Approval,
     proposal: ActionProposal,
     run: WorkflowRun,
-    ticket: Ticket,
     reviewer: Principal,
     body: DecisionRequest,
     now: datetime,
@@ -144,24 +164,62 @@ async def _decide_and_resume(
         await _record_rejected(session, approval, proposal, run.id, reviewer_id, body.note, now)
     else:
         await _record_approved(session, approval, proposal, run.id, reviewer_id, body.note, now)
-    await session.commit()  # decision stored, run claimed, approval lock released
-
-    await runs_service.resume_after_decision(session, env, run, ticket)
+    # Every outcome resumes the run: the graph escalates an expired or changed proposal.
+    await _queue_resume(session, env, run, approval)
+    await session.commit()  # decision, claim and job together; the approval lock is released
 
     if expired:
         raise _expired_error()
     if changed:
         raise _changed_error()
-    if body.decision == "reject":
-        return _rejected_response(approval, proposal)
-    operation = await refunds.get_for_proposal(session, proposal.id)
-    if operation is None:  # revalidation refused it; the run has escalated
-        raise AppError(
-            409,
-            "REVALIDATION_FAILED",
-            "The approved proposal no longer matches the order. A new proposal is needed.",
-        )
-    return _approved_response(approval, proposal, operation)
+    rejected = body.decision == "reject"
+    return DecisionResponse(
+        approval_id=approval.id,
+        proposal_id=proposal.id,
+        decision="rejected" if rejected else "approved",
+        proposal_status=proposal.status,
+        refund=None,  # the refund (if any) is the worker's; GET /runs/{id} shows the outcome
+        message=REJECTED_QUEUED_MESSAGE if rejected else APPROVED_QUEUED_MESSAGE,
+    )
+
+
+async def _queue_resume(
+    session: AsyncSession, env: runs_service.EnqueueEnv, run: WorkflowRun, approval: Approval
+) -> None:
+    await runs_service.enqueue_resume(
+        session, env, run, JobType.RESUME_AFTER_DECISION, {"approval_id": str(approval.id)}
+    )
+
+
+async def expire_overdue_approvals(session: AsyncSession, env: runs_service.EnqueueEnv) -> int:
+    """Expire every undecided approval past its time on a workflow run. Returns how many.
+
+    One approval per transaction: lock it (skipping any a reviewer holds right now), record
+    the expiry, claim its paused run and queue the resume, commit. The graph then reads the
+    stored "expired" decision and escalates. An expired approval is never selected again,
+    so the loop ends.
+    """
+    expired = 0
+    while True:
+        now = env.clock()
+        approval = await proposals.lock_next_expired_workflow_approval(session, now)
+        if approval is None:
+            await session.commit()
+            return expired
+        proposal, run, _ = await load_case(session, approval.proposal_id)
+        await _record_expired(session, approval, proposal, run.id, now)
+        if run.status == RunStatus.AWAITING_APPROVAL:
+            await runs_service.claim_paused_run(
+                session,
+                run,
+                waiting=RunStatus.AWAITING_APPROVAL,
+                resuming=RunStatus.EXECUTING,
+                resumed_by="system",
+                actor_id=None,
+            )
+            await _queue_resume(session, env, run, approval)
+        await session.commit()
+        expired += 1
 
 
 # ---------------------------------------------------------------- manual (M3) runs

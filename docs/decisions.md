@@ -710,3 +710,156 @@ and retention rules, is planned for the UI milestone (M10), where the conversati
   touches it; expiring idle approvals belongs with the worker.
 - Each new type stored in the state must be reachable from `WorkflowState`'s type hints (or
   be a tool output), or the allowlist test fails. That is intended.
+
+---
+
+## ADR-012: A Postgres job queue and a background worker, safe under at-least-once delivery
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Milestone:** M7
+
+### Context
+
+Until now each request ran its segment of the workflow (several LLM calls, sometimes tens of
+seconds) before answering. A server restart in the middle left the run stuck in `created`,
+`executing` or `investigating`, and nothing picked it up (ADR-011, Consequences). Approvals
+that expired with no reviewer action left their run paused forever. Two simultaneous
+"start a run" requests could also both pass the "no unfinished run" check (M5).
+
+Moving the work to a background process brings its own problem: a worker can die at any
+moment, so a job may run more than once (at-least-once delivery). Running a job twice must
+never create a second proposal, a second refund, or answer a question twice.
+
+### Decision
+
+1. **The queue is a Postgres table** (`jobs`; SQL in `worker/queue.py`). No broker: the
+   database we already run is enough at this scale, and a job can be inserted in the same
+   transaction as the change it belongs to. The API creates or claims the run **and** inserts
+   its job in one transaction, then answers 202. Either both are committed or neither is, so
+   there is never a run without its job or a job without its run. Job types: `start_run`,
+   `resume_after_customer_reply`, `resume_after_decision`, and the scheduled
+   `expire_approvals`. Payloads hold ids only. A customer's reply is stored in
+   `customer_messages` (a composite foreign key ties it to the ticket's owner), and the job
+   carries its id. The handler checks again that the message belongs to the run, the ticket
+   and the ticket's owner, and does not trust the job row alone.
+2. **Claiming: `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`, plus a lease.** A row another
+   worker is claiming is skipped, not waited for, so two workers never take the same job.
+   The claim sets `status = running`, adds one to `attempts`, sets `lease_expires_at`, and
+   commits at once, so the row lock lasts milliseconds and is never held during model or
+   provider calls (CLAUDE.md rule 7). While it works, the worker renews the lease with a
+   heartbeat on its own session. `claim` also takes a `running` job whose lease has run out:
+   that is how a crashed worker's job comes back.
+3. **The attempt number is a fencing token.** A worker that stalls (a long pause, a lost
+   network) can outlive its lease and come back after another worker has claimed the job,
+   which raised `attempts`. Every write after a claim (heartbeat, complete, retry,
+   mark dead, release) is an `UPDATE ... WHERE id = ? AND status = 'running' AND attempts = <my
+   attempt>`. The stale worker's write matches no row and changes nothing, so it can never
+   mark the job done or failed on the new holder's behalf. (Fencing protects the job row. The
+   run's data is protected by the idempotency rules in item 5.)
+4. **Retries, then dead.** An exception from a handler requeues the job with
+   `available_at = now + backoff`. The backoff ceiling doubles per attempt
+   (`JOB_BACKOFF_BASE_SECONDS * 2^(attempt-1)`, capped at `JOB_BACKOFF_MAX_SECONDS`), and the
+   wait is a random point in the top half of the ceiling ("equal jitter"), so jobs that failed
+   together do not all retry together. After `JOB_MAX_ATTEMPTS` the job is `dead`, and in the
+   same transaction its run is escalated (`run.escalated` with `reason: JOB_DEAD`, the job
+   type, and the last error code; the ticket gets the fixed escalation reply). Some failures
+   can never succeed (a missing run, a message that is not the run's, a run with no
+   checkpoint to resume). These raise `PermanentJobError` and go dead at once. Only codes
+   are stored (`last_error_code`), never exception messages, which can hold customer text.
+   LLM outages do not reach the queue: the graph already turns them into escalations.
+5. **Handlers are idempotent.**
+   - A run that our tables already show as paused or finished is left alone: an earlier
+     attempt finished the job but died before marking it done.
+   - Otherwise `advance_workflow` (workflow/graph.py) continues from the last checkpoint.
+     With no checkpoint, it starts. Stopped between steps, it continues with no input, so
+     finished steps (and their LLM calls) are not repeated. Paused, it resumes only if the
+     pause is the one the job was created for. The job's payload records that pause's
+     checkpoint id, read when the request claimed the run. A different pause means the
+     resume already ran and the run has since paused again (for example a second clarifying
+     question), so the run is saved as paused and nothing is resumed. Without this check, a
+     retried reply job would answer the new question with the old reply.
+   - The money path keeps its own nets: one open proposal per order, one refund operation
+     per proposal (unique constraint), the executor's early return, and the compare-and-set
+     run claim made before the job was queued.
+6. **The proposal commit gap is closed.** The checkpointer commits after every step on its
+   own connection, but our tables were committed only when the segment ended. A worker dying
+   between the two would leave a checkpoint saying "proposal X is waiting for approval" while
+   proposal X had been rolled back: the rerun would pause on an approval that does not exist.
+   Now the workflow's `propose_refund` dependency **commits the proposal, its approval and
+   `proposal.created` before returning**, so before the checkpoint can mention it. The
+   opposite gap (proposal committed, step not checkpointed) is handled by rerunning the step:
+   `create_proposal_for_run` returns **this run's** existing open proposal instead of refusing.
+   Either way there is exactly one proposal.
+7. **At most one unfinished run per ticket** is enforced by a partial unique index,
+   `uq_workflow_runs_one_unfinished_per_ticket ON workflow_runs (ticket_id) WHERE status NOT IN
+   ('completed', 'escalated', 'failed')`. The service's check stays as the friendly first
+   answer; when two requests race past it, the second insert fails on the index and gets the
+   same 409. Manual (M3) runs count too.
+8. **Approval expiry is a scheduled job.** Every `APPROVAL_EXPIRY_CHECK_SECONDS` each worker
+   inserts an `expire_approvals` job with `ON CONFLICT DO NOTHING`. A partial unique index
+   allows only one queued or running sweep, however many workers there are. The sweep locks
+   one overdue, undecided approval at a time (`SKIP LOCKED`, so one a reviewer is deciding
+   right now is skipped), records it as expired, claims its paused run as `system`, and
+   queues `resume_after_decision`; the graph reads the stored "expired" and escalates. Manual
+   (M3) approvals keep their path: they expire when a reviewer tries to decide.
+9. **The worker process** (`python -m support_agent.worker`) starts on the selector event
+   loop like the scripts (ADR-011). Ctrl+C, SIGTERM or Ctrl+Break stops it gracefully: it
+   claims no new job, gives the current one `WORKER_SHUTDOWN_GRACE_SECONDS`, then cancels it
+   and **releases** it (queued again at once, the attempt not counted). Steps finished
+   before that are in the checkpoint, so the next worker continues from there. A second
+   Ctrl+C stops at once, and the lease covers that case.
+
+### Alternatives considered
+
+- A broker (Redis with RQ, Celery, a cloud queue): another service to run and pay for, and
+  the run and its job could no longer be committed atomically. We would need an outbox table
+  anyway.
+- Keep running segments in the request and add a startup sweep for stuck runs: requests
+  stay slow, and a sweep cannot tell a stuck run from one another server is still running.
+  Leases can.
+- `pg_advisory_lock` per job instead of a lease: the lock dies with its connection, which is
+  convenient, but a connection would have to stay open (and pooled connections pinned) for a
+  job's whole runtime, and connection poolers in transaction mode (Supabase) do not keep
+  session-level locks.
+- Fencing by a random lease token instead of the attempt number: equivalent, but the attempt
+  number already exists and is needed anyway for the retry limit.
+- Retrying refund creation inside the job: never. ADR-004 still holds; the executor makes one
+  provider call per proposal, and an unknown outcome waits for reconciliation (M8).
+- Putting the reply text in the job payload: simpler, but the jobs table would then hold
+  untrusted customer text and need the same care as a messages table, without being one.
+
+### Consequences
+
+- **Known gap: events after a crash.** Audit events are recorded from what a segment wrote
+  during the attempt that saved it. If a worker dies after some steps finished but before the
+  segment was saved, the next attempt continues after those steps (correctly, without
+  repeating them). It cannot see what they wrote, so their audit events (for example
+  `run.classified`, `tool.called`, `resolution.completed`) are missing for that run. The
+  outcome is still correct, and so are the run's status, the ticket's status and reply, and
+  the events the services commit themselves (`proposal.created`, `approval.requested`, refund
+  events). Usage counters for the lost attempt are missing too. Rebuilding those events from
+  the checkpoint history is possible and is left for later.
+- **The decision endpoint answers 202 for workflow runs**, with `refund: null`. Whether money
+  moved is shown by `GET /runs/{id}` and the refund tables once the worker has run, so the
+  reviewer never sees a refund status that has not been verified. A refusal at revalidation
+  (proposal no longer matches the order) used to be a 409 from the endpoint; it is now the
+  run's escalation. Expired and changed proposals still answer 409 straight away. Manual (M3)
+  decisions are unchanged (200, executed in the request).
+- `GET /runs/{id}` includes the run's newest job (type, status, attempts, next attempt time),
+  never its error code.
+- The API no longer needs the LLM client or the provider clients for these routes. The worker
+  needs them all, and builds one payment and one shipping client per job.
+- `services/` imports `worker/queue.py` to enqueue in the caller's transaction. `queue.py` is
+  the jobs table's repository and imports no service, so there is no cycle.
+- Integration tests use the real handlers through `drain_jobs()` on the rolled-back test
+  session. The session now turns the code's commit and rollback into savepoints, so a failed
+  job undoes only its own work. Claims across connections and the race between two POSTs are
+  tested with real commits on separate connections (`committed_sessions`), cleaned up
+  afterwards.
+- A dead job's run escalates even if the job died while executing a refund. The refund
+  operation keeps its own status (`reserved`, `submitted` or `pending_reconciliation`), and
+  M8's reconciliation settles it. The customer is told only that a person will look.
+- Times in the queue come from the worker's clock, so workers on different machines need
+  reasonably synchronised clocks for leases (seconds of skew are harmless at a 120 s lease).
+

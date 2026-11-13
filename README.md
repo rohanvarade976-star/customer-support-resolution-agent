@@ -79,6 +79,51 @@ Invoke-RestMethod -Uri http://localhost:8000/me -Headers @{ Authorization = "Bea
 
 Every error has the same shape: `{"success": false, "error_code": "...", "message": "..."}`.
 
+## Run the background worker (from `backend/`, next to the API)
+
+The API never runs the agent workflow inside a request. Starting a run, a customer's reply
+and a reviewer's decision on a workflow run each store a job in the `jobs` table and answer
+`202 Accepted`. The worker picks the jobs up and runs the workflow (ADR-012). Without a
+worker, runs stay `created` and their job stays `queued`.
+
+Use two PowerShell windows, both in `backend/`:
+
+```powershell
+# Window 1: the API
+uv run uvicorn support_agent.main:create_app --factory --port 8000 `
+    --loop support_agent.core.event_loop:selector_loop_factory
+
+# Window 2: the worker (it handles the Windows event loop itself)
+uv run python -m support_agent.worker
+```
+
+Ctrl+C in the worker's window stops it gracefully: it takes no new job, lets the current
+one finish (up to `WORKER_SHUTDOWN_GRACE_SECONDS`), or else puts it back in the queue. A
+second Ctrl+C stops it at once; the job's lease then runs out and the next worker takes
+it over, continuing from the last saved step. You can run several workers at once.
+
+The worker also expires approvals nobody decided in time (every
+`APPROVAL_EXPIRY_CHECK_SECONDS`): the paused run is escalated to a person.
+
+Follow a run while the worker runs it:
+
+```powershell
+$h = @{ Authorization = "Bearer $($login.access_token)" }
+$ticket = Invoke-RestMethod -Method Post http://localhost:8000/tickets -Headers $h `
+  -ContentType "application/json" `
+  -Body '{"message": "Where is my refund?", "order_number": "ORD-1001"}'
+$run = Invoke-RestMethod -Method Post "http://localhost:8000/tickets/$($ticket.id)/runs" -Headers $h
+$run.status            # created: queued, not run yet
+Invoke-RestMethod "http://localhost:8000/runs/$($run.run_id)" -Headers $h   # status and job
+```
+
+The jobs themselves:
+
+```powershell
+docker compose exec postgres psql -U support -d support_agent -c `
+  "SELECT job_type, status, attempts, available_at, last_error_code FROM jobs ORDER BY created_at DESC LIMIT 10;"
+```
+
 ### Orders and tickets
 
 Customers see only their own orders and tickets. Asking for someone else's order or ticket

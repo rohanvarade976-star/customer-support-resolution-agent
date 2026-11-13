@@ -112,12 +112,25 @@ class RefundOperationStatus(StrEnum):
 
 
 class JobStatus(StrEnum):
-    """Background job queue. A retry puts a job back to QUEUED with a later available_at."""
+    """Background job queue (worker/queue.py).
+
+    A retry puts a job back to QUEUED with a later available_at. A job that has used all its
+    attempts is DEAD: it is never tried again, and its run is escalated to a person.
+    """
 
     QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
-    FAILED = "failed"
+    DEAD = "dead"
+
+
+class JobType(StrEnum):
+    """What a background job does (worker/handlers.py has one handler per type)."""
+
+    START_RUN = "start_run"
+    RESUME_AFTER_DECISION = "resume_after_decision"
+    RESUME_AFTER_CUSTOMER_REPLY = "resume_after_customer_reply"
+    EXPIRE_APPROVALS = "expire_approvals"  # scheduled; the only type with no run
 
 
 class StaffRole(StrEnum):

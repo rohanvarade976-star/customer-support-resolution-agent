@@ -6,11 +6,12 @@ and every rule lives in the services.
 
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from support_agent.api.deps import (
     ClockDep,
-    DecisionEnvDep,
+    EnqueueEnvDep,
+    PaymentClientDep,
     ReviewerDep,
     SessionDep,
     SettingsDep,
@@ -48,13 +49,19 @@ async def list_approvals(
     return await approvals_service.list_pending(session, clock())
 
 
-# For a workflow run this also resumes the paused run (fixed code only, no model).
+# Manual (M3) runs: decided and executed here, 200. Workflow runs: the decision is stored and
+# the worker resumes the run (fixed code only, no model), so the answer is 202.
 @router.post("/approvals/{approval_id}/decision")
 async def decide_approval(
     approval_id: UUID,
     body: DecisionRequest,
     reviewer: ReviewerDep,
     session: SessionDep,
-    env: DecisionEnvDep,
+    env: EnqueueEnvDep,
+    payments: PaymentClientDep,
+    response: Response,
 ) -> DecisionResponse:
-    return await approvals_service.decide(session, reviewer, approval_id, body, env)
+    outcome = await approvals_service.decide(session, reviewer, approval_id, body, env, payments)
+    if outcome.queued:
+        response.status_code = 202
+    return outcome.response

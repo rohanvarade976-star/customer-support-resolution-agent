@@ -2,7 +2,12 @@
 
 These tests use TEST_DATABASE_URL, never DATABASE_URL, because they wipe the schema.
 Each test runs inside a transaction that is rolled back afterwards, so tests
-never see each other's rows.
+never see each other's rows. The code under test may still commit and roll back: the test
+session turns those into savepoints inside that outer transaction.
+
+The API only queues work since M7 Task 2. `drain_jobs()` plays the background worker: it runs
+every due job with the real handlers, on the test session, using the app's dependencies (so
+the fake LLM, mock providers and test clock that a test installs apply to the worker too).
 
 The event loop: the checkpointer's driver (psycopg) cannot run on Windows' default Proactor
 loop, so these tests run on a selector loop, as the app does (core/event_loop.py). On Linux
@@ -10,13 +15,16 @@ that is already the default, so CI is unaffected.
 """
 
 import asyncio
+import inspect
 import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -24,8 +32,8 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from pytest_asyncio.plugin import LoopFactory
-from sqlalchemy import make_url, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy import delete, make_url, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from mock_providers.payments.testing import InMemoryPayments, in_memory_payments
@@ -35,21 +43,28 @@ from support_agent.agents.fake import AgentFake
 from support_agent.api.deps import (
     get_branch_sessions,
     get_checkpointer,
+    get_clock,
     get_embedder,
     get_llm_client,
+    get_payment_client,
     get_session,
     get_shipping_client,
 )
-from support_agent.core.config import get_settings
+from support_agent.core.config import Settings, get_settings
 from support_agent.core.security import hash_password
+from support_agent.db.models import AuditEvent, Customer, Job, Ticket, WorkflowRun
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import RetrySettings, RoutedLLMClient
+from support_agent.llm.disabled import DisabledLLMClient
 from support_agent.llm.fake import FakeProvider, ScriptStep
 from support_agent.main import create_app
 from support_agent.rag.documents import load_policy_directory
 from support_agent.rag.embeddings import FakeEmbedder
 from support_agent.rag.ingest import ingest_policies
+from support_agent.services.runs import WorkflowEnv
 from support_agent.tools.read_tools import build_read_registry
+from support_agent.worker import runner
+from support_agent.worker.handlers import WorkerDeps
 from support_agent.workflow.checkpointer import open_checkpointer
 from support_agent.workflow.deps import BranchSessions
 from support_agent.workflow.graph import Checkpointer
@@ -142,7 +157,11 @@ async def session(migrated_database: str) -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     async with engine.connect() as conn:
         outer = await conn.begin()
-        db = AsyncSession(bind=conn, expire_on_commit=False)
+        # create_savepoint: the code's commit() and rollback() act on savepoints, so a
+        # rollback (a failed job) undoes only its own work, never the test's seed rows.
+        db = AsyncSession(
+            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
         try:
             yield db
         finally:
@@ -312,3 +331,131 @@ def auth_headers(
         return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
     return headers_for
+
+
+# ---------------------------------------------------------------- the worker, in tests
+
+
+def _dependency(
+    app: FastAPI, dependency: Callable[..., Any], settings: Settings | None = None
+) -> Any:
+    """Call an app dependency the way FastAPI would, honouring the test's override.
+
+    Overrides take no arguments; the real ones here take at most the settings.
+    """
+    fn = app.dependency_overrides.get(dependency, dependency)
+    return fn(settings) if inspect.signature(fn).parameters else fn()
+
+
+def _client(
+    app: FastAPI, dependency: Callable[..., Any], settings: Settings
+) -> AbstractAsyncContextManager[Any]:
+    """A provider-client dependency (an async generator) as an async context manager."""
+    fn = app.dependency_overrides.get(dependency, dependency)
+    factory = asynccontextmanager(fn)
+    return factory(settings) if inspect.signature(fn).parameters else factory()
+
+
+@pytest.fixture
+def worker_deps(app: FastAPI, session: AsyncSession) -> Callable[[], WorkerDeps]:
+    """worker_deps(): what the worker gets in production, built from the app's dependencies.
+
+    Built on each call, so overrides a test installs later (the fake LLM, a moved clock,
+    the mock payment provider) are used. Every session is the test session.
+    """
+
+    @asynccontextmanager
+    async def sessions() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    def build() -> WorkerDeps:
+        settings: Settings = _dependency(app, get_settings)
+        clock = _dependency(app, get_clock, settings)
+        checkpointer: Checkpointer = _dependency(app, get_checkpointer, settings)
+
+        @asynccontextmanager
+        async def workflow_env(*, llm_enabled: bool) -> AsyncIterator[WorkflowEnv]:
+            async with (
+                _client(app, get_payment_client, settings) as payments,
+                _client(app, get_shipping_client, settings) as shipping,
+            ):
+                llm = _dependency(app, get_llm_client, settings) if llm_enabled else None
+                yield WorkflowEnv(
+                    settings=settings,
+                    llm=llm or DisabledLLMClient(),
+                    shipping_client=shipping,
+                    payments=payments,
+                    embedder=_dependency(app, get_embedder, settings),
+                    clock=clock,
+                    branch_sessions=_dependency(app, get_branch_sessions, settings),
+                    checkpointer=checkpointer,
+                )
+
+        return WorkerDeps(
+            settings=settings,
+            clock=clock,
+            checkpointer=checkpointer,
+            sessions=sessions,
+            workflow_env=workflow_env,
+        )
+
+    return build
+
+
+@pytest.fixture
+def drain_jobs(worker_deps: Callable[[], WorkerDeps]) -> Callable[[], Awaitable[int]]:
+    """drain_jobs(): run every job that is due now, as the worker would. Returns how many."""
+
+    async def drain() -> int:
+        return await runner.drain(worker_deps())
+
+    return drain
+
+
+# ---------------------------------------------------------------- committed rows, two connections
+
+
+@pytest.fixture
+async def committed_sessions(
+    migrated_database: str,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Sessions whose commits are real, each on its own connection.
+
+    The usual `session` fixture lives inside one rolled-back transaction, which another
+    connection cannot see. SKIP LOCKED and the one-unfinished-run index only show their
+    effect between separate connections, so those tests use these (with `committed_ticket`).
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+@pytest.fixture
+async def committed_ticket(
+    committed_sessions: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[tuple[UUID, UUID]]:
+    """(customer_id, ticket_id), committed; deleted with everything hung on them afterwards."""
+    marker = uuid4().hex[:12]
+    async with committed_sessions() as db:
+        customer = Customer(
+            external_auth_subject=f"committed-{marker}",
+            name="Committed Test",
+            email=f"committed-{marker}@example.com",
+        )
+        db.add(customer)
+        await db.flush()
+        ticket = Ticket(customer_id=customer.id, summary="committed test ticket")
+        db.add(ticket)
+        await db.commit()
+        customer_id, ticket_id = customer.id, ticket.id
+    try:
+        yield customer_id, ticket_id
+    finally:
+        async with committed_sessions() as db:
+            runs = select(WorkflowRun.id).where(WorkflowRun.ticket_id == ticket_id)
+            await db.execute(delete(Job).where(Job.run_id.in_(runs)))
+            await db.execute(delete(AuditEvent).where(AuditEvent.run_id.in_(runs)))
+            await db.execute(delete(WorkflowRun).where(WorkflowRun.ticket_id == ticket_id))
+            await db.execute(delete(Ticket).where(Ticket.id == ticket_id))
+            await db.execute(delete(Customer).where(Customer.id == customer_id))
+            await db.commit()

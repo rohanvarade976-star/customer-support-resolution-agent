@@ -31,8 +31,9 @@ Dependencies (the LLM client, services and sessions) come in through `WorkflowDe
 bound to the nodes here, so no node builds its own and tests can pass fakes.
 
 Each call runs one segment: from the start (or a resume) to the next pause or the end.
-`start_workflow` and `resume_workflow` return what the segment did, so the caller can record
-exactly that part (services/run_recording.py).
+`start_workflow`, `resume_workflow` and `advance_workflow` (the worker's entry point, which
+also picks up after a crash) return what the segment did, so the caller can record exactly
+that part (services/run_recording.py).
 """
 
 from collections.abc import Awaitable, Callable, Hashable
@@ -67,8 +68,10 @@ __all__ = [
     "NotPausedError",
     "Segment",
     "WorkflowDeps",
+    "advance_workflow",
     "build_graph",
     "initial_state",
+    "latest_checkpoint_id",
     "resume_workflow",
     "start_workflow",
 ]
@@ -322,6 +325,73 @@ async def resume_workflow(
     if not snapshot.interrupts:
         raise NotPausedError(thread_id)
     return await _run_segment(graph, Command(resume=value), thread_id)
+
+
+async def latest_checkpoint_id(checkpointer: Checkpointer, thread_id: str) -> str | None:
+    """The id of the thread's newest checkpoint, or None if it has none.
+
+    While a run is paused nothing writes to its thread, so this id names the pause. A resume
+    job carries it, so a retried job can tell "my pause, not yet resumed" from "a later
+    pause, reached after my resume already ran" (`advance_workflow`).
+    """
+    saved = await checkpointer.aget_tuple(thread_config(thread_id))
+    if saved is None:
+        return None
+    checkpoint_id: str = saved.config["configurable"]["checkpoint_id"]
+    return checkpoint_id
+
+
+async def advance_workflow(
+    deps: WorkflowDeps,
+    checkpointer: Checkpointer,
+    thread_id: str,
+    *,
+    initial: WorkflowState | None,
+    resume: tuple[str | None, dict[str, str]] | None,
+) -> Segment:
+    """Run the next segment from wherever the thread's checkpoints say it is (ADR-012).
+
+    Built for at-least-once delivery: a job may run again after its worker died half-way,
+    so it must never start over or answer a pause twice.
+
+    - No checkpoint: start from `initial` (a start job only).
+    - Paused at the checkpoint the job was created for (`resume[0]`): resume with `resume[1]`.
+    - Paused anywhere else: an earlier attempt already reached this pause but died before
+      it was saved in our tables. Report the pause; nothing runs.
+    - Stopped between steps (the worker died mid-segment): continue with no input. Steps
+      already checkpointed are not run again.
+    - Finished, but not saved in our tables: report the end; nothing runs.
+
+    The two "nothing runs" cases cannot know what the dead attempt wrote, so their segment
+    carries only where the run ended up (`_recovered`): its events are lost (ADR-012).
+    """
+    graph = build_graph(deps, checkpointer)
+    config = thread_config(thread_id)
+    snapshot = await graph.aget_state(config)
+    if not snapshot.values:
+        if initial is None:
+            raise NotPausedError(thread_id)  # a resume for a thread that never started
+        return await _run_segment(graph, initial, thread_id)
+    if snapshot.interrupts:
+        current = snapshot.config["configurable"]["checkpoint_id"]
+        if resume is not None and resume[0] == current:
+            return await _run_segment(graph, Command(resume=resume[1]), thread_id)
+        return _recovered(snapshot.values, paused=True)
+    if snapshot.next:
+        return await _run_segment(graph, None, thread_id)
+    return _recovered(snapshot.values, paused=False)
+
+
+# What the customer and the ticket must show once a segment ends. The state always holds the
+# latest value of each, so a recovered segment can take them from there.
+_OUTCOME_KEYS = ("customer_reply", "ticket_status")
+
+
+def _recovered(values: dict[str, Any], *, paused: bool) -> Segment:
+    """A segment an earlier attempt ran to its end but never saved in our tables."""
+    state = restore_enums(values)
+    outcome = {key: state[key] for key in _OUTCOME_KEYS if key in state}  # type: ignore[literal-required]
+    return Segment(state=state, written=cast(WorkflowState, outcome), paused=paused)
 
 
 _REDUCER_KEYS = ("errors", "customer_replies")

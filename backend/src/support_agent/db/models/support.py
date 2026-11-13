@@ -1,4 +1,4 @@
-"""Tickets, workflow runs and long-term customer memory."""
+"""Tickets, workflow runs, customers' replies to runs, and long-term customer memory."""
 
 import uuid
 from datetime import datetime
@@ -7,16 +7,22 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from support_agent.db.base import Base
 from support_agent.db.models._columns import CreatedAt, UpdatedAt, UUIDPrimaryKey, str_enum
 from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, TicketStatus
+
+# A run in one of these states is over. Kept as SQL here because the partial index below
+# needs it; repositories/workflow_runs.py has the same set as Python values.
+_FINISHED_RUN_SQL = "status NOT IN ('completed', 'escalated', 'failed')"
 
 
 class Ticket(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
@@ -54,6 +60,14 @@ class WorkflowRun(UUIDPrimaryKey, UpdatedAt, Base):
             "llm_calls >= 0 AND input_tokens >= 0 AND output_tokens >= 0",
             name="usage_non_negative",
         ),
+        # At most one unfinished run per ticket. Two "start a run" requests at the same
+        # moment both pass the service's check; the database refuses the second insert.
+        Index(
+            "uq_workflow_runs_one_unfinished_per_ticket",
+            "ticket_id",
+            unique=True,
+            postgresql_where=text(_FINISHED_RUN_SQL),
+        ),
     )
 
     ticket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tickets.id"), index=True)
@@ -75,6 +89,26 @@ class WorkflowRun(UUIDPrimaryKey, UpdatedAt, Base):
     llm_calls: Mapped[int] = mapped_column(default=0, server_default="0")
     input_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
     output_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
+
+
+class CustomerMessage(UUIDPrimaryKey, CreatedAt, Base):
+    """A customer's reply to a run's question (POST /runs/{id}/messages).
+
+    Stored so the background job can carry only the message id. The body is untrusted
+    customer text: it is never copied into jobs, audit events or logs. The composite foreign
+    key ties the message to the ticket's owner, so it can never be filed under another
+    customer's ticket.
+    """
+
+    __tablename__ = "customer_messages"
+    __table_args__ = (
+        ForeignKeyConstraint(["ticket_id", "customer_id"], ["tickets.id", "tickets.customer_id"]),
+    )
+
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    ticket_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), index=True)
+    body: Mapped[str] = mapped_column(Text)
 
 
 class CustomerMemory(UUIDPrimaryKey, CreatedAt, Base):

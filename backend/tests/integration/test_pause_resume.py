@@ -3,6 +3,8 @@
     customer starts a run -> it pauses (awaiting approval / awaiting the customer)
     reviewer decides, or the customer replies -> the SAME run resumes from its checkpoint
 
+Each request only queues work (202); `drain` plays the background worker after it.
+
 The LLM is the scripted `AgentFake`. Everything else is real: the checkpointer (on the test
 database), the tools, eligibility, the approval endpoint, the refund executor and the mock
 payment provider. Money is checked by counting rows in refund_operations and at the
@@ -32,12 +34,12 @@ from support_agent.agents.fake import (
 )
 from support_agent.api.deps import get_checkpointer, get_clock, get_payment_client
 from support_agent.core.config import Settings, get_settings
-from support_agent.core.errors import AppError
 from support_agent.db.models import (
     ActionProposal,
     Approval,
     AuditEvent,
     Customer,
+    Job,
     RefundOperation,
     StaffUser,
     Ticket,
@@ -46,21 +48,19 @@ from support_agent.db.models import (
 from support_agent.db.seed import load_scenarios, seed
 from support_agent.domain.enums import (
     ApprovalDecision,
+    JobStatus,
+    JobType,
     ProposalStatus,
     RunStatus,
     TicketStatus,
 )
 from support_agent.integrations.payments import PaymentClient
-from support_agent.integrations.shipping import ShippingClient
-from support_agent.llm.disabled import DisabledLLMClient
 from support_agent.llm.fake import ScriptStep, tool_reply
 from support_agent.rag.embeddings import FakeEmbedder
 from support_agent.services import policy_search
-from support_agent.services import runs as runs_service
 from support_agent.tools.read_tools import build_read_registry
+from support_agent.worker import queue
 from support_agent.workflow.checkpointer import open_checkpointer
-from support_agent.workflow.deps import BranchSessions
-from support_agent.workflow.graph import Checkpointer
 from support_agent.workflow.nodes.approval import DECLINED_MESSAGE
 
 # Must equal the instant the mock shipping provider runs at (conftest.py).
@@ -69,6 +69,7 @@ PRIYA_AMOUNT = 249900
 REVIEWER = "anita@example.com"
 HeadersFor = Callable[[str], Awaitable[dict[str, str]]]
 UseAgents = Callable[[dict[str, list[ScriptStep]]], AgentFake]
+Drain = Callable[[], Awaitable[int]]
 
 
 class MovableClock:
@@ -145,7 +146,11 @@ def arjun_explain_scripts(classifier: list[ScriptStep]) -> dict[str, list[Script
 
 
 async def start_run(
-    client: httpx.AsyncClient, headers: dict[str, str], message: str, order: str | None
+    client: httpx.AsyncClient,
+    drain: Drain,
+    headers: dict[str, str],
+    message: str,
+    order: str | None,
 ) -> tuple[str, str]:
     body: dict[str, str] = {"message": message}
     if order is not None:
@@ -155,20 +160,31 @@ async def start_run(
     ticket_id = str(created.json()["id"])
     started = await client.post(f"/tickets/{ticket_id}/runs", headers=headers)
     assert started.status_code == 202
+    await drain()
     return ticket_id, str(started.json()["run_id"])
 
 
 async def reply(
-    client: httpx.AsyncClient, headers: dict[str, str], run_id: str, message: str
+    client: httpx.AsyncClient, drain: Drain, headers: dict[str, str], run_id: str, message: str
 ) -> httpx.Response:
-    return await client.post(f"/runs/{run_id}/messages", json={"text": message}, headers=headers)
+    response = await client.post(
+        f"/runs/{run_id}/messages", json={"text": message}, headers=headers
+    )
+    await drain()
+    return response
 
 
 async def decide(
-    client: httpx.AsyncClient, headers: dict[str, str], approval_id: UUID, decision: str
+    client: httpx.AsyncClient,
+    drain: Drain,
+    headers: dict[str, str],
+    approval_id: UUID,
+    decision: str,
 ) -> httpx.Response:
     body: dict[str, Any] = {"decision": decision, "note": "checked"}
-    return await client.post(f"/approvals/{approval_id}/decision", json=body, headers=headers)
+    response = await client.post(f"/approvals/{approval_id}/decision", json=body, headers=headers)
+    await drain()
+    return response
 
 
 async def reload[M](session: AsyncSession, model: type[M], row_id: str | UUID) -> M:
@@ -214,6 +230,7 @@ async def all_payload_text(session: AsyncSession, run_id: str) -> str:
 
 async def paused_priya_refund(
     client: httpx.AsyncClient,
+    drain: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -221,7 +238,7 @@ async def paused_priya_refund(
 ) -> tuple[str, str]:
     use_agents(await priya_refund_scripts(session, settings))
     priya = await auth_headers("priya@example.com")
-    ticket_id, run_id = await start_run(client, priya, "Where is my refund?", "ORD-1001")
+    ticket_id, run_id = await start_run(client, drain, priya, "Where is my refund?", "ORD-1001")
     run = await reload(session, WorkflowRun, run_id)
     assert run.status == RunStatus.AWAITING_APPROVAL
     return ticket_id, run_id
@@ -232,6 +249,7 @@ async def paused_priya_refund(
 
 async def test_approval_pause_then_approve_executes_exactly_one_refund(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     auth_headers: HeadersFor,
@@ -239,7 +257,7 @@ async def test_approval_pause_then_approve_executes_exactly_one_refund(
     wire_app: Settings,
 ) -> None:
     ticket_id, run_id = await paused_priya_refund(
-        client, session, auth_headers, use_agents, wire_app
+        client, drain_jobs, session, auth_headers, use_agents, wire_app
     )
     assert await refund_rows(session, run_id) == 0
     assert await events(session, run_id, "run.paused") == [
@@ -247,9 +265,10 @@ async def test_approval_pause_then_approve_executes_exactly_one_refund(
     ]
     proposal, approval = await approval_for_run(session, run_id)
 
-    decided = await decide(client, await auth_headers(REVIEWER), approval.id, "approve")
+    decided = await decide(client, drain_jobs, await auth_headers(REVIEWER), approval.id, "approve")
 
-    assert decided.status_code == 200
+    assert decided.status_code == 202
+    assert decided.json()["refund"] is None  # the worker executes it, after the answer
     (operation,) = (
         await session.scalars(
             select(RefundOperation).where(RefundOperation.proposal_id == proposal.id)
@@ -278,6 +297,7 @@ async def test_approval_pause_then_approve_executes_exactly_one_refund(
 
 async def test_reject_reopens_the_ticket_and_moves_no_money(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     auth_headers: HeadersFor,
@@ -285,13 +305,13 @@ async def test_reject_reopens_the_ticket_and_moves_no_money(
     wire_app: Settings,
 ) -> None:
     ticket_id, run_id = await paused_priya_refund(
-        client, session, auth_headers, use_agents, wire_app
+        client, drain_jobs, session, auth_headers, use_agents, wire_app
     )
     _, approval = await approval_for_run(session, run_id)
 
-    decided = await decide(client, await auth_headers(REVIEWER), approval.id, "reject")
+    decided = await decide(client, drain_jobs, await auth_headers(REVIEWER), approval.id, "reject")
 
-    assert decided.status_code == 200
+    assert decided.status_code == 202
     assert await refund_rows(session, run_id) == 0
     assert await payments.refund_count() == 0
     run = await reload(session, WorkflowRun, run_id)
@@ -303,6 +323,7 @@ async def test_reject_reopens_the_ticket_and_moves_no_money(
 
 async def test_an_expired_approval_escalates_and_never_executes(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     clock: MovableClock,
@@ -311,12 +332,12 @@ async def test_an_expired_approval_escalates_and_never_executes(
     wire_app: Settings,
 ) -> None:
     ticket_id, run_id = await paused_priya_refund(
-        client, session, auth_headers, use_agents, wire_app
+        client, drain_jobs, session, auth_headers, use_agents, wire_app
     )
     proposal, approval = await approval_for_run(session, run_id)
     clock.now = NOW + timedelta(minutes=wire_app.approval_ttl_minutes + 1)
 
-    decided = await decide(client, await auth_headers(REVIEWER), approval.id, "approve")
+    decided = await decide(client, drain_jobs, await auth_headers(REVIEWER), approval.id, "approve")
 
     assert decided.status_code == 409
     assert decided.json()["error_code"] == "APPROVAL_EXPIRED"
@@ -330,13 +351,16 @@ async def test_an_expired_approval_escalates_and_never_executes(
 
 async def test_a_changed_proposal_never_executes(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
     wire_app: Settings,
 ) -> None:
-    _, run_id = await paused_priya_refund(client, session, auth_headers, use_agents, wire_app)
+    _, run_id = await paused_priya_refund(
+        client, drain_jobs, session, auth_headers, use_agents, wire_app
+    )
     proposal, approval = await approval_for_run(session, run_id)
     # Someone edits the stored payload behind the API's back.
     await session.execute(
@@ -347,7 +371,7 @@ async def test_a_changed_proposal_never_executes(
         {"id": proposal.id},
     )
 
-    decided = await decide(client, await auth_headers(REVIEWER), approval.id, "approve")
+    decided = await decide(client, drain_jobs, await auth_headers(REVIEWER), approval.id, "approve")
 
     assert decided.status_code == 409
     assert decided.json()["error_code"] == "PROPOSAL_CHANGED"
@@ -359,6 +383,7 @@ async def test_a_changed_proposal_never_executes(
 async def test_resume_after_a_restart_continues_from_the_checkpoint(
     app: FastAPI,
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     migrated_database: str,
@@ -366,16 +391,20 @@ async def test_resume_after_a_restart_continues_from_the_checkpoint(
     use_agents: UseAgents,
     wire_app: Settings,
 ) -> None:
-    _, run_id = await paused_priya_refund(client, session, auth_headers, use_agents, wire_app)
+    _, run_id = await paused_priya_refund(
+        client, drain_jobs, session, auth_headers, use_agents, wire_app
+    )
     _, approval = await approval_for_run(session, run_id)
 
     # A "restart": a brand-new checkpointer instance with its own pool and nothing in memory.
     # Every request already builds a fresh graph, so only the saved checkpoint carries over.
     async with open_checkpointer(migrated_database, build_read_registry()) as fresh:
         app.dependency_overrides[get_checkpointer] = lambda: fresh
-        decided = await decide(client, await auth_headers(REVIEWER), approval.id, "approve")
+        decided = await decide(
+            client, drain_jobs, await auth_headers(REVIEWER), approval.id, "approve"
+        )
 
-    assert decided.status_code == 200
+    assert decided.status_code == 202
     assert await refund_rows(session, run_id) == 1
     assert await payments.refund_count() == 1
     assert (await reload(session, WorkflowRun, run_id)).status == RunStatus.COMPLETED
@@ -383,50 +412,52 @@ async def test_resume_after_a_restart_continues_from_the_checkpoint(
 
 async def test_a_double_resume_is_refused_and_moves_no_extra_money(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     payments: InMemoryPayments,
     clock: MovableClock,
-    checkpointer: Checkpointer,
-    branch_sessions: BranchSessions,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
     wire_app: Settings,
 ) -> None:
-    ticket_id, run_id = await paused_priya_refund(
-        client, session, auth_headers, use_agents, wire_app
+    _, run_id = await paused_priya_refund(
+        client, drain_jobs, session, auth_headers, use_agents, wire_app
     )
     _, approval = await approval_for_run(session, run_id)
     reviewer = await auth_headers(REVIEWER)
-    assert (await decide(client, reviewer, approval.id, "approve")).status_code == 200
+    assert (await decide(client, drain_jobs, reviewer, approval.id, "approve")).status_code == 202
 
     # A second decision through the API.
-    again = await decide(client, reviewer, approval.id, "approve")
+    again = await decide(client, drain_jobs, reviewer, approval.id, "approve")
     assert again.status_code == 409
-    # A second resume straight into the service, skipping the API's checks.
-    run = await reload(session, WorkflowRun, run_id)
-    ticket = await reload(session, Ticket, ticket_id)
-    async with payments.client() as payment_client, ShippingClient(wire_app) as shipping:
-        env = runs_service.WorkflowEnv(
-            settings=wire_app,
-            llm=DisabledLLMClient(),
-            shipping_client=shipping,  # never called
-            payments=payment_client,
-            embedder=FakeEmbedder(),
-            clock=clock,
-            branch_sessions=branch_sessions,
-            checkpointer=checkpointer,
+    # The same resume job delivered twice (at-least-once delivery): the copy finds the run
+    # finished and does nothing.
+    (first,) = (
+        await session.scalars(
+            select(Job).where(
+                Job.run_id == UUID(run_id), Job.job_type == JobType.RESUME_AFTER_DECISION
+            )
         )
-        with pytest.raises(AppError) as refused:
-            await runs_service.resume_after_decision(session, env, run, ticket)
-    assert refused.value.error_code == "RUN_NOT_PAUSED"
+    ).all()
+    await queue.enqueue(
+        session,
+        JobType.RESUME_AFTER_DECISION,
+        run_id=UUID(run_id),
+        payload=dict(first.payload),
+        now=clock(),
+        max_attempts=1,
+    )
+    assert await drain_jobs() == 1
     # The customer cannot resume it either.
     priya = await auth_headers("priya@example.com")
-    assert (await reply(client, priya, run_id, "hello?")).status_code == 409
+    assert (await reply(client, drain_jobs, priya, run_id, "hello?")).status_code == 409
 
     assert await refund_rows(session, run_id) == 1
     assert await payments.refund_count() == 1
     assert (await reload(session, WorkflowRun, run_id)).status == RunStatus.COMPLETED
     assert len(await events(session, run_id, "run.resumed")) == 1
+    jobs = (await session.scalars(select(Job).where(Job.run_id == UUID(run_id)))).all()
+    assert {job.status for job in jobs} == {JobStatus.SUCCEEDED}
 
 
 # ---------------------------------------------------------------- customer pause
@@ -434,21 +465,22 @@ async def test_a_double_resume_is_refused_and_moves_no_extra_money(
 
 async def test_a_customer_reply_resumes_the_run_and_completes_it(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
 ) -> None:
     use_agents(arjun_explain_scripts([classified("order_status", 0.3), classified("order_status")]))
     arjun = await auth_headers("arjun@example.com")
-    ticket_id, run_id = await start_run(client, arjun, "Laptop?", "ORD-1002")
+    ticket_id, run_id = await start_run(client, drain_jobs, arjun, "Laptop?", "ORD-1002")
     assert (await reload(session, WorkflowRun, run_id)).status == RunStatus.AWAITING_CUSTOMER
     assert (await reload(session, Ticket, ticket_id)).status == TicketStatus.AWAITING_CUSTOMER
 
     customer_words = "REPLY-TEXT where is my laptop, it has not arrived"
-    resumed = await reply(client, arjun, run_id, customer_words)
+    resumed = await reply(client, drain_jobs, arjun, run_id, customer_words)
 
     assert resumed.status_code == 202
-    assert resumed.json()["status"] == "completed"
+    assert resumed.json()["status"] == "investigating"  # claimed; the worker did the rest
     run = await reload(session, WorkflowRun, run_id)
     ticket = await reload(session, Ticket, ticket_id)
     assert run.status == RunStatus.COMPLETED
@@ -461,20 +493,33 @@ async def test_a_customer_reply_resumes_the_run_and_completes_it(
     assert len(await events(session, run_id, "run.classified")) == 2
     assert len(await events(session, run_id, "investigation.started")) == 1
     assert "REPLY-TEXT" not in await all_payload_text(session, run_id)
+    # The job carries the message's id, never its text.
+    (reply_job,) = (
+        await session.scalars(
+            select(Job).where(
+                Job.run_id == UUID(run_id), Job.job_type == JobType.RESUME_AFTER_CUSTOMER_REPLY
+            )
+        )
+    ).all()
+    assert set(reply_job.payload) == {"message_id", "checkpoint_id"}
+    assert "REPLY-TEXT" not in json.dumps(reply_job.payload)
 
 
 async def test_only_the_owner_can_reply(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
 ) -> None:
     use_agents(arjun_explain_scripts([classified("unclear")]))
     arjun = await auth_headers("arjun@example.com")
-    _, run_id = await start_run(client, arjun, "Hmm", "ORD-1002")
+    _, run_id = await start_run(client, drain_jobs, arjun, "Hmm", "ORD-1002")
 
-    other = await reply(client, await auth_headers("priya@example.com"), run_id, "mine now")
-    staff = await reply(client, await auth_headers(REVIEWER), run_id, "hello")
+    other = await reply(
+        client, drain_jobs, await auth_headers("priya@example.com"), run_id, "mine now"
+    )
+    staff = await reply(client, drain_jobs, await auth_headers(REVIEWER), run_id, "hello")
 
     assert other.status_code == 404  # looks exactly like a missing run
     assert staff.status_code == 403
@@ -483,6 +528,7 @@ async def test_only_the_owner_can_reply(
 
 async def test_the_clarification_limit_escalates(
     client: httpx.AsyncClient,
+    drain_jobs: Drain,
     session: AsyncSession,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
@@ -491,10 +537,10 @@ async def test_the_clarification_limit_escalates(
     rounds = wire_app.max_clarification_rounds
     use_agents({"classifier": [classified("unclear")] * (rounds + 1)})
     arjun = await auth_headers("arjun@example.com")
-    ticket_id, run_id = await start_run(client, arjun, "Hmm", "ORD-1002")
+    ticket_id, run_id = await start_run(client, drain_jobs, arjun, "Hmm", "ORD-1002")
 
     for n in range(rounds):
-        response = await reply(client, arjun, run_id, f"answer {n}")
+        response = await reply(client, drain_jobs, arjun, run_id, f"answer {n}")
         assert response.status_code == 202
 
     run = await reload(session, WorkflowRun, run_id)
@@ -502,5 +548,5 @@ async def test_the_clarification_limit_escalates(
     assert (await reload(session, Ticket, ticket_id)).status == TicketStatus.ESCALATED
     assert len(await events(session, run_id, "run.paused")) == rounds
     # Finished: one more reply is refused and changes nothing.
-    assert (await reply(client, arjun, run_id, "one more")).status_code == 409
+    assert (await reply(client, drain_jobs, arjun, run_id, "one more")).status_code == 409
     assert (await reload(session, WorkflowRun, run_id)).status == RunStatus.ESCALATED

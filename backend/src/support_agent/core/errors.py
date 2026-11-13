@@ -26,6 +26,18 @@ class ErrorBody(BaseModel):
     details: dict[str, Any] | None = None
 
 
+class PermanentJobError(Exception):
+    """A background job that can never succeed, however often it is retried.
+
+    The worker marks the job dead at once (no retries) and escalates its run. `code` is
+    stored on the job and in the audit event, so it must be a fixed code, never a message.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class AppError(Exception):
     """An expected failure with an HTTP status and a stable machine-readable code."""
 
