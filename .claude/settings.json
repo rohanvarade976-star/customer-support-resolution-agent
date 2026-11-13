@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.production)",
+      "Read(./.env.*.local)",
+      "Read(./backend/.env)",
+      "Read(./backend/.env.local)",
+      "Read(**/secrets/**)",
+      "Bash(cat .env)",
+      "Bash(cat ./.env)",
+      "Bash(cat *.env)",
+      "Bash(type .env)",
+      "Bash(Get-Content .env)",
+      "Bash(grep * .env)",
+      "PowerShell(Get-Content *.env)",
+      "PowerShell(Get-Content .env)",
+      "PowerShell(type .env)",
+      "PowerShell(cat .env)",
+      "PowerShell(Select-String * .env)"
+    ]
+  }
+}
