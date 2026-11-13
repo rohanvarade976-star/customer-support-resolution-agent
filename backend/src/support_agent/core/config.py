@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     # Order and carrier delivery times that differ by more than this are a conflict, and the
     # case escalates (domain/validation.py).
     delivery_date_tolerance_hours: int = Field(default=24, ge=0, le=168)
+    # How many questions a run may ask the customer (clarification, order number, more
+    # information) before it escalates to a person instead of asking again (M7).
+    max_clarification_rounds: int = Field(default=2, ge=0, le=5)
 
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod

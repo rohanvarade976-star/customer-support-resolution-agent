@@ -52,6 +52,7 @@ from support_agent.domain.enums import (
     TicketCategory,
     TicketStatus,
 )
+from support_agent.integrations.payments import PaymentClient
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.fake import ScriptStep, text_reply, tool_reply, transient
 from support_agent.rag.embeddings import FakeEmbedder
@@ -60,6 +61,7 @@ from support_agent.services import policy_search
 from support_agent.services import runs as runs_service
 from support_agent.workflow.deps import BranchSessions
 from support_agent.workflow.fake import scripted_client
+from support_agent.workflow.graph import Checkpointer
 
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 PRIYA_AMOUNT = 249900
@@ -329,6 +331,7 @@ async def test_baseline_mode_creates_the_same_pending_approval_with_one_agent(
     session: AsyncSession,
     auth_headers: HeadersFor,
     branch_sessions: BranchSessions,
+    checkpointer: Checkpointer,
     permissive_policy_search: Settings,
 ) -> None:
     citation = await policy_citation(
@@ -358,20 +361,24 @@ async def test_baseline_mode_creates_the_same_pending_approval_with_one_agent(
     )
     shipping_mock = create_shipping_app(ShippingSettings(app_env="test"), clock=lambda: NOW)
 
-    async with ShippingClient(
-        permissive_policy_search, transport=httpx.ASGITransport(app=shipping_mock)
-    ) as shipping:
-        response = await runs_service.start_run(
-            session,
-            principal,
-            ticket_id,
-            llm=scripted_client(fake),
+    async with (
+        ShippingClient(
+            permissive_policy_search, transport=httpx.ASGITransport(app=shipping_mock)
+        ) as shipping,
+        PaymentClient(permissive_policy_search) as payments,  # never called: no approval here
+    ):
+        env = runs_service.WorkflowEnv(
             settings=permissive_policy_search,
+            llm=scripted_client(fake),
             shipping_client=shipping,
+            payments=payments,
             embedder=FakeEmbedder(),
             clock=lambda: NOW,
             branch_sessions=branch_sessions,
-            mode=RunMode.BASELINE,
+            checkpointer=checkpointer,
+        )
+        response = await runs_service.start_run(
+            session, principal, ticket_id, env, mode=RunMode.BASELINE
         )
 
     run = await reload(session, WorkflowRun, str(response.run_id))

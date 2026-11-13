@@ -1,19 +1,20 @@
 """FastAPI dependencies: the database session, "who is calling", the clock, the
-payment and shipping provider clients, the embedder and the LLM client.
+payment and shipping provider clients, the embedder, the LLM client, the checkpointer, and
+the `WorkflowEnv` bundles that hand all of them to a run.
 
 Every protected route depends on one of these, so identity always comes from the
 verified token and never from the request body. Tests override the clock, the
 payment and shipping clients, the embedder and the LLM client (fixed time, in-memory
-mock providers, fake embedder, fake LLM).
+mock providers, fake embedder, fake LLM) and the checkpointer (the test database).
 """
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, cast
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,11 +25,14 @@ from support_agent.domain.enums import Role
 from support_agent.integrations.payments import PaymentClient
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import LLMClient
+from support_agent.llm.disabled import DisabledLLMClient
 from support_agent.llm.providers import build_llm_client
 from support_agent.rag import embeddings
 from support_agent.schemas.auth import Principal
 from support_agent.services import auth as auth_service
+from support_agent.services.runs import WorkflowEnv
 from support_agent.workflow.deps import BranchSessions
+from support_agent.workflow.graph import Checkpointer
 
 # auto_error=False so a missing header goes through our own error format.
 _bearer = HTTPBearer(auto_error=False)
@@ -103,6 +107,56 @@ def get_llm_client() -> LLMClient:
 
 
 LLMClientDep = Annotated[LLMClient, Depends(get_llm_client)]
+
+
+def get_checkpointer(request: Request) -> Checkpointer:
+    """The process-wide checkpointer, opened (and set up) by the app's lifespan in main.py."""
+    return cast(Checkpointer, request.app.state.checkpointer)
+
+
+CheckpointerDep = Annotated[Checkpointer, Depends(get_checkpointer)]
+
+
+def get_workflow_env(
+    settings: SettingsDep,
+    llm: LLMClientDep,
+    shipping_client: ShippingClientDep,
+    payments: PaymentClientDep,
+    embedder: EmbedderDep,
+    clock: ClockDep,
+    branch_sessions: BranchSessionsDep,
+    checkpointer: CheckpointerDep,
+) -> WorkflowEnv:
+    """For starting a run and for customer replies: the agents may call the model."""
+    return WorkflowEnv(
+        settings, llm, shipping_client, payments, embedder, clock, branch_sessions, checkpointer
+    )
+
+
+def get_decision_env(
+    settings: SettingsDep,
+    shipping_client: ShippingClientDep,
+    payments: PaymentClientDep,
+    embedder: EmbedderDep,
+    clock: ClockDep,
+    branch_sessions: BranchSessionsDep,
+    checkpointer: CheckpointerDep,
+) -> WorkflowEnv:
+    """For the reviewer's decision: what follows is fixed code, so the model is disabled."""
+    return WorkflowEnv(
+        settings,
+        DisabledLLMClient(),
+        shipping_client,
+        payments,
+        embedder,
+        clock,
+        branch_sessions,
+        checkpointer,
+    )
+
+
+WorkflowEnvDep = Annotated[WorkflowEnv, Depends(get_workflow_env)]
+DecisionEnvDep = Annotated[WorkflowEnv, Depends(get_decision_env)]
 
 
 async def get_current_principal(

@@ -28,7 +28,7 @@ from support_agent.agents.investigator import investigate as run_investigator
 from support_agent.agents.policy import PolicyOutcome, research_policy
 from support_agent.tools.base import ToolContext
 from support_agent.workflow.deps import WorkflowDeps
-from support_agent.workflow.state import WorkflowError, WorkflowState
+from support_agent.workflow.state import WorkflowError, WorkflowState, customer_text
 
 
 def _branch_context(state: WorkflowState, deps: WorkflowDeps, session: AsyncSession) -> ToolContext:
@@ -49,7 +49,7 @@ async def _investigate(
             deps.llm,
             deps.registry,
             _branch_context(state, deps, session),
-            complaint_text=state["complaint_text"],
+            complaint_text=customer_text(state),
             order_number=order_number,
             max_tool_calls=deps.max_tool_calls,
             focus=focus or None,
@@ -99,7 +99,7 @@ async def policy(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str, objec
             deps.llm,
             deps.registry,
             _branch_context(state, deps, session),
-            complaint_text=state["complaint_text"],
+            complaint_text=customer_text(state),
             category=classification.category,
             order_number=order_number,
             max_searches=settings.policy_agent_max_searches,
@@ -124,7 +124,7 @@ async def baseline_agent(state: WorkflowState, *, deps: WorkflowDeps) -> dict[st
         deps.llm,
         deps.registry,
         replace(deps.tool_context, customer_id=state["customer_id"]),
-        complaint_text=state["complaint_text"],
+        complaint_text=customer_text(state),
         category=classification.category,
         order_number=order_number,
         max_tool_calls=deps.max_tool_calls + settings.policy_agent_max_searches,

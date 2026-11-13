@@ -10,7 +10,6 @@ refund_operations table and in mock_payments.refunds, never response text.
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -18,13 +17,10 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi import FastAPI
-from pydantic import SecretStr
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from mock_providers.payments.app import create_app as create_payments_app
-from mock_providers.payments.config import PaymentsSettings
+from mock_providers.payments.testing import InMemoryPayments
 from support_agent.agents.fake import (
     AgentFake,
     critique_reply,
@@ -65,45 +61,12 @@ HeadersFor = Callable[[str], Awaitable[dict[str, str]]]
 UseAgents = Callable[[dict[str, list[ScriptStep]]], AgentFake]
 
 
-@dataclass
-class Payments:
-    """The in-memory mock payment provider and a way to count the refunds it holds."""
-
-    app: FastAPI
-    engine: AsyncEngine
-
-    def client(self) -> PaymentClient:
-        settings = Settings(
-            _env_file=None,
-            database_url=SecretStr("postgresql+asyncpg://user:pw@localhost:5432/unused"),
-            jwt_secret=SecretStr("x" * 32),
-            payments_base_url="http://payments.mock",
-        )
-        return PaymentClient(settings, httpx.ASGITransport(app=self.app))
-
-    async def refund_count(self) -> int:
-        async with self.engine.connect() as conn:
-            return int(await conn.scalar(text("SELECT count(*) FROM mock_payments.refunds")) or 0)
-
-
 class FixedClock:
     def __init__(self, now: datetime) -> None:
         self.now = now
 
     def __call__(self) -> datetime:
         return self.now
-
-
-@pytest.fixture
-async def payments(test_database_url: str) -> AsyncIterator[Payments]:
-    settings = PaymentsSettings(app_env="test", database_url=SecretStr(test_database_url))
-    app = create_payments_app(settings)
-    engine = create_async_engine(test_database_url, poolclass=NullPool)
-    async with app.router.lifespan_context(app):  # ASGITransport does not run lifespan
-        async with engine.begin() as conn:
-            await conn.execute(text("TRUNCATE mock_payments.refunds"))
-        yield Payments(app, engine)
-    await engine.dispose()
 
 
 async def decide(
@@ -128,7 +91,7 @@ def clock() -> FixedClock:
 
 
 @pytest.fixture(autouse=True)
-def wire_app(app: FastAPI, payments: Payments, clock: FixedClock) -> Settings:
+def wire_app(app: FastAPI, payments: InMemoryPayments, clock: FixedClock) -> Settings:
     """The app's clock, the mock payment provider, and a policy search the fake embedder passes."""
     app.dependency_overrides[get_clock] = lambda: clock
 
@@ -171,7 +134,7 @@ async def priya_scripts(session: AsyncSession, settings: Settings) -> dict[str, 
 async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
     client: httpx.AsyncClient,
     session: AsyncSession,
-    payments: Payments,
+    payments: InMemoryPayments,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
     wire_app: Settings,
@@ -233,7 +196,7 @@ async def test_priya_run_then_reviewer_approval_executes_exactly_one_refund(
 async def test_a_rejected_proposal_from_a_run_moves_no_money(
     client: httpx.AsyncClient,
     session: AsyncSession,
-    payments: Payments,
+    payments: InMemoryPayments,
     auth_headers: HeadersFor,
     use_agents: UseAgents,
     wire_app: Settings,

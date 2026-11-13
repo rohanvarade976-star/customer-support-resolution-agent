@@ -18,7 +18,7 @@ from support_agent.agents.resolution import ResolutionInputs
 from support_agent.agents.resolve import resolve
 from support_agent.domain.enums import RunMode
 from support_agent.workflow.deps import WorkflowDeps
-from support_agent.workflow.state import WorkflowError, WorkflowState
+from support_agent.workflow.state import WorkflowError, WorkflowState, customer_text
 
 # Used when the policy agent did not run: nothing grounded, so nothing can be cited.
 NO_FINDINGS = PolicyFindings(
@@ -46,7 +46,7 @@ async def resolve_case(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str,
 
     policy = state.get("policy")
     inputs = ResolutionInputs(
-        complaint_text=state["complaint_text"],
+        complaint_text=customer_text(state),
         order_number=order_number,
         evidence=investigation.evidence,
         findings=NO_FINDINGS if policy is None or policy.findings is None else policy.findings,

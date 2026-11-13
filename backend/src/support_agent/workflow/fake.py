@@ -1,8 +1,12 @@
 """A fake "world" for testing the workflow without a database, a network or a real model.
 
-`FakeWorld` holds canned typed records, a registry whose tools return them, and the two
-functions the workflow is given for the database (`load_case_facts`) and for storing a refund
-proposal (`propose_refund`). Everything it was asked to do is kept for assertions.
+`FakeWorld` holds canned typed records, a registry whose tools return them, and the
+functions the workflow is given for the database (`load_case_facts`), for storing a refund
+proposal (`propose_refund`), and for what follows a reviewer's decision
+(`load_approval_decision`, `execute_refund`). Everything it was asked to do is kept for
+assertions.
+
+`run_workflow` runs a graph to its first pause (or the end) with an in-memory checkpointer.
 
 The tools yield to the event loop (`asyncio.sleep(0)`), as real database and network calls
 do. Without that, the two parallel branches would run one after the other and a test could
@@ -18,6 +22,7 @@ from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
+from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.agents.fake import (
@@ -29,7 +34,12 @@ from support_agent.agents.fake import (
 )
 from support_agent.core.errors import AppError
 from support_agent.domain.eligibility import EligibilityDecision
-from support_agent.domain.enums import OrderStatus, RunMode
+from support_agent.domain.enums import (
+    ApprovalDecision,
+    OrderStatus,
+    RefundOperationStatus,
+    RunMode,
+)
 from support_agent.integrations.shipping import Shipment
 from support_agent.llm.client import ChatProvider, LLMClient, RetrySettings, RoutedLLMClient
 from support_agent.llm.fake import ScriptStep, tool_reply
@@ -39,8 +49,11 @@ from support_agent.tools.base import Tool, ToolContext, ToolFailureError, ToolRe
 from support_agent.tools.fake import FakeRecord, fake_tool_context
 from support_agent.tools.policy_tools import SearchPolicyInput
 from support_agent.tools.read_tools import OrderInput
-from support_agent.workflow.deps import CaseFacts, WorkflowDeps
+from support_agent.workflow.checkpointer import checkpoint_serializer
+from support_agent.workflow.deps import CaseFacts, RefundResult, WorkflowDeps
+from support_agent.workflow.graph import Checkpointer, start_workflow
 from support_agent.workflow.nodes.classify import OwnsOrder
+from support_agent.workflow.state import WorkflowState
 
 CITATION = "refund_policy_v2:section_3"
 DELIVERED_AT = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
@@ -129,6 +142,11 @@ class FakeWorld:
         self.fail_counts: dict[str, int] = {}  # tool -> how many of its next calls fail
         self.refuse_proposal_with: str | None = None
         self.proposals: list[tuple[str, int]] = []
+        self.proposal_ids: list[UUID] = []
+        # What the "database" says the reviewer decided. Tests set it before resuming.
+        self.approval_decision: ApprovalDecision | None = ApprovalDecision.PENDING
+        self.refuse_refund_with: str | None = None
+        self.executed: list[UUID] = []  # proposal ids the refund executor was called for
         self.sessions = BranchSessions()
         self.registry = self._build_registry()
 
@@ -143,7 +161,17 @@ class FakeWorld:
         if self.refuse_proposal_with is not None:
             raise AppError(409, self.refuse_proposal_with, "Refused.")
         self.proposals.append((order_number, amount_minor))
-        return uuid4()
+        self.proposal_ids.append(uuid4())
+        return self.proposal_ids[-1]
+
+    async def load_approval_decision(self, proposal_id: UUID) -> ApprovalDecision | None:
+        return self.approval_decision
+
+    async def execute_refund(self, proposal_id: UUID) -> RefundResult:
+        if self.refuse_refund_with is not None:
+            raise AppError(409, self.refuse_refund_with, "Refused.")
+        self.executed.append(proposal_id)
+        return RefundResult(RefundOperationStatus.SUBMITTED, "The payment service accepted it.")
 
     # -- tools --
 
@@ -229,6 +257,7 @@ def fake_deps(
     max_tool_calls: int = 3,
     customer_id: UUID | None = None,
     owns_order: OwnsOrder = owns_everything,
+    max_clarification_rounds: int = 2,
 ) -> WorkflowDeps:
     return WorkflowDeps(
         llm=llm,
@@ -241,8 +270,28 @@ def fake_deps(
         branch_sessions=world.sessions,
         load_case_facts=world.load_case_facts,
         propose_refund=world.propose_refund,
+        load_approval_decision=world.load_approval_decision,
+        execute_refund=world.execute_refund,
+        max_clarification_rounds=max_clarification_rounds,
         mode=mode,
     )
+
+
+def memory_checkpointer(deps: WorkflowDeps) -> InMemorySaver:
+    """An in-memory checkpointer with the same strict type allowlist as the real one."""
+    return InMemorySaver(serde=checkpoint_serializer(deps.registry))
+
+
+def thread_for(state: WorkflowState) -> str:
+    return f"run-{state['run_id']}"
+
+
+async def run_workflow(
+    deps: WorkflowDeps, state: WorkflowState, checkpointer: Checkpointer | None = None
+) -> WorkflowState:
+    """Run a new graph to its first pause (or the end) and return the state there."""
+    saver = checkpointer if checkpointer is not None else memory_checkpointer(deps)
+    return (await start_workflow(deps, saver, thread_for(state), state)).state
 
 
 def refund_scripts(

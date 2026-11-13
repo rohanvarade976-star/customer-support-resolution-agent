@@ -612,3 +612,101 @@ is only useful if we say what it does and does not measure.
   separate sessions is tested with fakes in `tests/unit/test_workflow_multi_agent.py`.
 - M9's comparison report must state the caveat in item 3 next to any multi-agent versus
   baseline number.
+
+---
+
+## ADR-011: Durable pause and resume with the LangGraph Postgres checkpointer
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Milestone:** M7
+
+### Context
+
+A refund run must wait for a reviewer, and a run that needs more detail must wait for the
+customer (PRD FR-14, "Workflow and state model"). Those waits can last minutes or days, and
+the server may restart in between. Until M6 the graph ran start to finish in one call, so a
+"waiting" run could never continue. Resuming also creates new risks: a double click, two
+reviewers, or a retried request could resume the same run twice, and anything that moved
+money before a pause could run again when the paused node is replayed.
+
+### Decision
+
+1. **LangGraph's official Postgres checkpointer** (`langgraph-checkpoint-postgres`) saves the
+   run's state after every step, keyed by `workflow_runs.thread_id`. It needs psycopg 3 (plus
+   `psycopg-pool`, and `psycopg[binary]` because Windows has no system libpq), a second
+   Postgres driver. Only the checkpointer uses it, through its own small pool; the app stays
+   on SQLAlchemy + asyncpg. Both use the same `DATABASE_URL`, with the driver prefix swapped.
+2. **Setup at startup, under an advisory lock.** The app's lifespan runs the checkpointer's
+   own idempotent `setup()` (it creates and migrates its tables) while holding
+   `pg_advisory_lock`, so two processes starting together cannot race. Alembic ignores those
+   tables (`CHECKPOINT_TABLES` in `db/base.py`, `include_object` in `migrations/env.py`).
+   The pool uses `autocommit` (setup's `CREATE INDEX CONCURRENTLY` needs it) and
+   `prepare_threshold=0` (Supabase's transaction pooler cannot keep prepared statements).
+3. **A strict type allowlist for reading checkpoints.** The serializer revives only our state's
+   classes and the registered tools' output classes, found by walking the type hints. Any
+   other class in a checkpoint stays plain data and is never imported. A unit test fails if a
+   full run would need a type outside the list. Checkpoints store a `StrEnum` as a plain
+   string, so `restore_enums` types the top-level enum fields again after each read.
+4. **Pause nodes have nothing before `interrupt()`.** `wait_for_approval` and
+   `wait_for_customer` start with the `interrupt` call, because resuming replays the node from
+   its first line. Side effects live in other nodes (`propose_refund` before the pause,
+   `execute_refund` after it), whose results are checkpointed and never replayed.
+5. **After a decision, the stored row decides, not the resume value.** The decision endpoint
+   stores the decision first; `check_approval` reads it back. Approve goes to
+   `execute_refund`, the only node that can move money, which calls the existing refund
+   executor (revalidate, short locked reservation, one provider call with a stable
+   idempotency key). Reject reopens the ticket; expired, changed or missing goes to
+   escalation. The graph is given a `DisabledLLMClient` on this path, so no model call is
+   possible after a decision. Manual (M3) runs keep their old path.
+6. **A compare-and-set claim before every resume.** One `UPDATE ... WHERE status = <waiting>`
+   moves the run out of its waiting state; exactly one request can match it. For a reviewer's
+   decision (approve, reject or expiry) the run moves to `executing`, then ends as
+   `completed`, `escalated` or `failed`. For a customer reply it moves to `investigating`. The
+   claim and `run.resumed` (who resumed it: role and id, no content) are committed before the
+   graph runs, so no lock is held during model or provider calls. A loser gets 409. The
+   one-refund-per-proposal constraint and the executor's early return stay as a second net.
+7. **Clarification is bounded.** `MAX_CLARIFICATION_ROUNDS` (default 2) questions; the next
+   one escalates instead. After an unclear category or a missing order the run classifies
+   again (an order number in the reply is still only a hint, checked for ownership); after
+   the resolution's own question it gathers again, with the previous pass's evidence reset
+   (so that pass may have its own one extra investigation round, ADR-010).
+8. **Events are recorded per segment.** Each call runs one segment (start or resume, to the
+   next pause or the end). Events come from what nodes wrote in that segment only, so a
+   resumed run never repeats earlier events, and usage is added, not overwritten.
+9. **Windows needs the selector event loop.** psycopg's async mode cannot run on Windows'
+   default Proactor loop. The API runs with
+   `--loop support_agent.core.event_loop:selector_loop_factory`, scripts use
+   `core.event_loop.run`, and the integration tests use pytest-asyncio's loop-factory hook.
+   Linux (CI, production) already uses a selector loop.
+
+**Checkpoints are not a system of record.** They are the run's working memory: they hold the
+complaint, the customer's replies and model output so a run can continue, and may be pruned.
+Money, decisions, statuses and the audit trail live only in our own tables. Customer replies
+are kept only in the checkpoint for now; a proper customer messages table, with ownership
+and retention rules, is planned for the UI milestone (M10), where the conversation is shown.
+
+### Alternatives considered
+
+- Our own state table instead of a checkpointer: more code to resume mid-graph correctly,
+  and it would duplicate what LangGraph already does.
+- A checkpointer on asyncpg (community package): not official, and less maintained than the
+  driver the official package is tested with.
+- Trusting the resume value (`{"decision": "approve"}`): the value travels through code we
+  do not control as tightly as a committed row; a stored, locked, hashed approval is the
+  only thing allowed to authorise money.
+- Locking the run row for the whole resume: simpler, but it would hold a database lock
+  during LLM and provider calls (CLAUDE.md rule 7).
+- LangGraph's permissive default serializer: it imports any class named in a checkpoint and
+  warns that this will be blocked in a future version.
+
+### Consequences
+
+- The app needs the checkpointer at startup; setup runs on every start (cheap when nothing
+  changed).
+- A run that crashes after its claim but before its segment is saved stays claimed (or is
+  marked failed). The background worker (M7 Task 2) and reconciliation (M8) pick these up.
+- An approval that expires with no reviewer action leaves its run paused until a reviewer
+  touches it; expiring idle approvals belongs with the worker.
+- Each new type stored in the state must be reachable from `WorkflowState`'s type hints (or
+  be a tool output), or the allowlist test fails. That is intended.

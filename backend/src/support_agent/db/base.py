@@ -22,6 +22,13 @@ NAMING_CONVENTION = {
 }
 
 
+# Tables owned by LangGraph's Postgres checkpointer (workflow/checkpointer.py). It creates and
+# migrates them itself, so Alembic must never compare, create or drop them.
+CHECKPOINT_TABLES = frozenset(
+    {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"}
+)
+
+
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 

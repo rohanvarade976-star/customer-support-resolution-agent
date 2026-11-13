@@ -28,9 +28,10 @@ from support_agent.workflow.fake import (
     classified,
     fake_deps,
     refund_scripts,
+    run_workflow,
     scripted_client,
 )
-from support_agent.workflow.graph import initial_state, run_workflow
+from support_agent.workflow.graph import initial_state
 from support_agent.workflow.state import WorkflowError, WorkflowState
 
 CUSTOMER = uuid4()
@@ -117,6 +118,7 @@ async def test_both_specialists_run_at_the_same_time_each_with_its_own_session()
     assert final.get("investigation") is not None and final.get("policy") is not None
     investigation = final["investigation"]
     policy = final["policy"]
+    assert investigation is not None and policy is not None
     assert investigation.evidence is not None and policy.findings is not None
     assert [r.tool for r in policy.trace] == ["search_policy"]
     assert "search_policy" not in {r.tool for r in investigation.trace}
@@ -169,6 +171,7 @@ async def test_code_fetches_the_required_records_and_computes_the_facts() -> Non
     final, _, world = await run(refund_scripts())
 
     investigation = final["investigation"]
+    assert investigation is not None
     assert "required_get_shipment" in [r.call_id for r in investigation.trace]
     assert world.called("get_shipment") == 1
     assert final.get("eligibility") == world.decision
@@ -211,7 +214,9 @@ async def test_a_missing_required_record_triggers_exactly_one_extra_round() -> N
 
     assert len(fake.requests_by_agent["investigator"]) == 8  # two rounds of four calls
     assert "investigation_retry" in final
-    trace_ids = [r.call_id for r in final["investigation"].trace]
+    merged = final["investigation"]
+    assert merged is not None
+    trace_ids = [r.call_id for r in merged.trace]
     assert "call_1" in trace_ids and "r2_call_1" in trace_ids  # ids never clash
     assert final["status"] == RunStatus.AWAITING_APPROVAL
     assert world.proposals == [("ORD-1001", PRIYA_AMOUNT)]

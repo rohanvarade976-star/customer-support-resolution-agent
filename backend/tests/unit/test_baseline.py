@@ -18,9 +18,10 @@ from support_agent.workflow.fake import (
     FakeWorld,
     classified,
     fake_deps,
+    run_workflow,
     scripted_client,
 )
-from support_agent.workflow.graph import initial_state, run_workflow
+from support_agent.workflow.graph import initial_state
 from support_agent.workflow.state import WorkflowError, WorkflowState
 
 CUSTOMER = uuid4()
@@ -83,6 +84,7 @@ async def test_baseline_gets_the_same_required_evidence_and_computed_facts() -> 
 
     assert world.called("get_shipment") == 1
     investigation = final["investigation"]
+    assert investigation is not None
     assert "required_get_shipment" in [r.call_id for r in investigation.trace]
     assert final.get("eligibility") == world.decision
     delay = final.get("delay_facts")

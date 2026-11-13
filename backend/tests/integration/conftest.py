@@ -3,12 +3,16 @@
 These tests use TEST_DATABASE_URL, never DATABASE_URL, because they wipe the schema.
 Each test runs inside a transaction that is rolled back afterwards, so tests
 never see each other's rows.
+
+The event loop: the checkpointer's driver (psycopg) cannot run on Windows' default Proactor
+loop, so these tests run on a selector loop, as the app does (core/event_loop.py). On Linux
+that is already the default, so CI is unaffected.
 """
 
 import asyncio
 import os
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -19,15 +23,18 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
+from pytest_asyncio.plugin import LoopFactory
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from mock_providers.payments.testing import InMemoryPayments, in_memory_payments
 from mock_providers.shipping.app import create_app as create_shipping_app
 from mock_providers.shipping.config import ShippingSettings
 from support_agent.agents.fake import AgentFake
 from support_agent.api.deps import (
     get_branch_sessions,
+    get_checkpointer,
     get_embedder,
     get_llm_client,
     get_session,
@@ -42,12 +49,21 @@ from support_agent.main import create_app
 from support_agent.rag.documents import load_policy_directory
 from support_agent.rag.embeddings import FakeEmbedder
 from support_agent.rag.ingest import ingest_policies
+from support_agent.tools.read_tools import build_read_registry
+from support_agent.workflow.checkpointer import open_checkpointer
 from support_agent.workflow.deps import BranchSessions
+from support_agent.workflow.graph import Checkpointer
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 POLICY_DIR = BACKEND_DIR / "data" / "policies"
 # The instant the tests seed the database and run the mock shipping provider at.
 SEED_NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+
+
+def pytest_asyncio_loop_factories(
+    config: pytest.Config, item: pytest.Item
+) -> Mapping[str, LoopFactory]:
+    return {"selector": asyncio.SelectorEventLoop}
 
 
 def _in_thread[T](fn: Callable[..., T], *args: object) -> T:
@@ -166,10 +182,31 @@ def branch_sessions(session: AsyncSession) -> BranchSessions:
 
 
 @pytest.fixture
-def app(session: AsyncSession, branch_sessions: BranchSessions) -> FastAPI:
+async def checkpointer(migrated_database: str) -> AsyncIterator[Checkpointer]:
+    """The real Postgres checkpointer on the test database, set up as at app startup.
+
+    It uses its own psycopg connections, so its rows are committed (not rolled back with
+    the test session). Every run has a fresh thread id, so tests never see each other's.
+    """
+    async with open_checkpointer(migrated_database, build_read_registry()) as saver:
+        yield saver
+
+
+@pytest.fixture
+async def payments(test_database_url: str) -> AsyncIterator[InMemoryPayments]:
+    """The mock payment provider in memory, with no refunds (tests wire it into the app)."""
+    async with in_memory_payments(test_database_url) as provider:
+        yield provider
+
+
+@pytest.fixture
+def app(
+    session: AsyncSession, branch_sessions: BranchSessions, checkpointer: Checkpointer
+) -> FastAPI:
     """The real app, using the rolled-back test session instead of the real database.
 
-    The shipping provider is the in-memory mock (no network) and the embedder is the fake.
+    The shipping provider is the in-memory mock (no network), the embedder is the fake, and
+    the checkpointer is the real one on the test database.
     """
     application = create_app()
 
@@ -186,6 +223,7 @@ def app(session: AsyncSession, branch_sessions: BranchSessions) -> FastAPI:
     application.dependency_overrides[get_shipping_client] = test_shipping_client
     application.dependency_overrides[get_embedder] = lambda: FakeEmbedder()
     application.dependency_overrides[get_branch_sessions] = lambda: branch_sessions
+    application.dependency_overrides[get_checkpointer] = lambda: checkpointer
     return application
 
 

@@ -10,7 +10,7 @@ from fastapi import APIRouter
 
 from support_agent.api.deps import (
     ClockDep,
-    PaymentClientDep,
+    DecisionEnvDep,
     ReviewerDep,
     SessionDep,
     SettingsDep,
@@ -48,15 +48,13 @@ async def list_approvals(
     return await approvals_service.list_pending(session, clock())
 
 
+# For a workflow run this also resumes the paused run (fixed code only, no model).
 @router.post("/approvals/{approval_id}/decision")
 async def decide_approval(
     approval_id: UUID,
     body: DecisionRequest,
     reviewer: ReviewerDep,
     session: SessionDep,
-    clock: ClockDep,
-    payments: PaymentClientDep,
+    env: DecisionEnvDep,
 ) -> DecisionResponse:
-    return await approvals_service.decide(
-        session, payments, reviewer, approval_id, body, now=clock()
-    )
+    return await approvals_service.decide(session, reviewer, approval_id, body, env)

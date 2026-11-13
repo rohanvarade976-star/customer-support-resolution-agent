@@ -57,8 +57,12 @@ drifts, but refund eligibility uses the real clock, so scenarios slowly stop mat
 ## Run the API (from `backend/`)
 
 ```powershell
-uv run uvicorn support_agent.main:create_app --factory --port 8000
+uv run uvicorn support_agent.main:create_app --factory --port 8000 `
+    --loop support_agent.core.event_loop:selector_loop_factory
 ```
+
+The `--loop` option is needed on Windows: the workflow checkpointer's database driver
+(psycopg) cannot use Windows' default event loop (ADR-011). It is harmless elsewhere.
 
 Open <http://localhost:8000/docs> for the interactive API docs, and check
 <http://localhost:8000/health> (it reports whether the database answers).

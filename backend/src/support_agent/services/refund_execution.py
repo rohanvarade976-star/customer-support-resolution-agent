@@ -34,6 +34,7 @@ from support_agent.domain.enums import (
 )
 from support_agent.domain.money import refund_totals, refundable_balance
 from support_agent.domain.proposals import RefundProposalPayload, payload_hash
+from support_agent.domain.refund_outcomes import ACCEPTED_STATUSES, statuses_after_refund
 from support_agent.integrations.errors import (
     OutcomeUnknownError,
     ProviderRejectedError,
@@ -46,15 +47,6 @@ from support_agent.services import eligibility
 from support_agent.services.case_updates import load_case, set_run_status, set_ticket_status
 
 ACTOR = "system"
-
-# The provider took the refund on. Only SUCCEEDED means the money has arrived.
-ACCEPTED_STATUSES = frozenset(
-    {
-        RefundOperationStatus.SUBMITTED,
-        RefundOperationStatus.PROCESSING,
-        RefundOperationStatus.SUCCEEDED,
-    }
-)
 
 _EVENT_FOR_STATUS = {
     RefundOperationStatus.SUBMITTED: "refund.submitted",
@@ -295,18 +287,8 @@ async def _record_outcome(
 
     if outcome.status in ACCEPTED_STATUSES:
         await proposals.set_proposal_status(session, case.proposal, ProposalStatus.EXECUTED)
-        await set_run_status(session, case.run, RunStatus.COMPLETED, now=now, actor=ACTOR)
-        # Resolved only once the money has verifiably arrived.
-        ticket_status = (
-            TicketStatus.RESOLVED
-            if outcome.status == RefundOperationStatus.SUCCEEDED
-            else TicketStatus.IN_PROGRESS
-        )
-    elif outcome.status == RefundOperationStatus.FAILED:
-        await set_run_status(session, case.run, RunStatus.FAILED, now=now, actor=ACTOR)
-        ticket_status = TicketStatus.ESCALATED
-    else:  # pending_reconciliation: the run stays "executing" until the outcome is known
-        ticket_status = TicketStatus.IN_PROGRESS
-
+    # Resolved only once the money has verifiably arrived; "executing" while unknown.
+    run_status, ticket_status = statuses_after_refund(outcome.status)
+    await set_run_status(session, case.run, run_status, now=now, actor=ACTOR)
     await set_ticket_status(session, case.ticket, ticket_status, run_id=case.run.id, actor=ACTOR)
     await session.commit()

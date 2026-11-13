@@ -118,4 +118,4 @@ From the repo root: `docker compose up -d` starts Postgres.
 
 ## Current milestone
 
-M6 — Multi-agent system. See the master plan and PRD section "Milestones".
+M7 — Human-in-the-loop and memory. See the master plan and PRD section "Milestones".

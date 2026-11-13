@@ -1,7 +1,8 @@
 """The FastAPI app factory.
 
-Run locally (from backend/):
-    uv run uvicorn support_agent.main:create_app --factory --port 8000
+Run locally (from backend/). On Windows the --loop option is required (core/event_loop.py):
+    uv run uvicorn support_agent.main:create_app --factory --port 8000 `
+        --loop support_agent.core.event_loop:selector_loop_factory
 """
 
 import logging
@@ -15,13 +16,20 @@ from support_agent.core.config import get_settings
 from support_agent.core.errors import register_error_handlers
 from support_agent.core.logging import configure_logging
 from support_agent.db.session import get_engine
+from support_agent.tools.read_tools import build_read_registry
+from support_agent.workflow.checkpointer import open_checkpointer
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    configure_logging(get_settings().log_level)
-    logging.getLogger(__name__).info("api started")
-    yield
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    # The checkpointer's tables are created or migrated here, under a lock (ADR-011).
+    database_url = settings.database_url.get_secret_value()
+    async with open_checkpointer(database_url, build_read_registry()) as checkpointer:
+        app.state.checkpointer = checkpointer
+        logging.getLogger(__name__).info("api started")
+        yield
     await get_engine().dispose()  # close pooled database connections cleanly
 
 

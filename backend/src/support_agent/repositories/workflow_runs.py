@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.db.models import WorkflowRun
@@ -73,10 +73,32 @@ async def set_status(
     await session.flush()
 
 
-async def set_usage(
+async def claim(
+    session: AsyncSession, run: WorkflowRun, *, expected: RunStatus, new: RunStatus
+) -> bool:
+    """Move the run from `expected` to `new` in one statement; False if it was not `expected`.
+
+    Compare-and-set: of two requests resuming the same paused run, exactly one sees its
+    UPDATE match a row. The other gets False and must refuse. No lock is held afterwards
+    beyond the row's own write lock, released at the caller's commit.
+    """
+    stmt = (
+        update(WorkflowRun)
+        .where(WorkflowRun.id == run.id, WorkflowRun.status == expected)
+        .values(status=new)
+        .returning(WorkflowRun.id)
+        .execution_options(synchronize_session=False)
+    )
+    claimed = (await session.execute(stmt)).scalar_one_or_none() is not None
+    await session.refresh(run)  # the in-memory object now shows what the database holds
+    return claimed
+
+
+async def add_usage(
     session: AsyncSession, run: WorkflowRun, *, calls: int, input_tokens: int, output_tokens: int
 ) -> None:
-    run.llm_calls = calls
-    run.input_tokens = input_tokens
-    run.output_tokens = output_tokens
+    """Add one segment's LLM usage to the run's totals (a paused run has several segments)."""
+    run.llm_calls += calls
+    run.input_tokens += input_tokens
+    run.output_tokens += output_tokens
     await session.flush()
