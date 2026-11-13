@@ -73,3 +73,8 @@ async def set_category(session: AsyncSession, ticket: Ticket, category: TicketCa
 async def set_status(session: AsyncSession, ticket: Ticket, status: TicketStatus) -> None:
     ticket.status = status
     await session.flush()
+
+
+async def set_reply(session: AsyncSession, ticket: Ticket, reply: str) -> None:
+    ticket.customer_reply = reply
+    await session.flush()

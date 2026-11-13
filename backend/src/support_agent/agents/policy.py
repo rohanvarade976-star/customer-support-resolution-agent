@@ -162,13 +162,18 @@ def ground_rules(draft: PolicyFindingsDraft, results: list[ToolResult]) -> Polic
     )
 
 
-def _case_message(complaint_text: str, category: str, order_number: str) -> ChatMessage:
+def _case_message(
+    complaint_text: str, category: str, order_number: str, focus: str | None
+) -> ChatMessage:
     # The order number and category were checked by code before this agent runs. The
-    # complaint is untrusted text.
-    return user_message(
+    # complaint and the supervisor's hint are untrusted text.
+    text = (
         f"Order number for this case: {order_number}\nComplaint category: {category}\n\n"
         + wrap_untrusted("customer_complaint", complaint_text)
     )
+    if focus:
+        text += "\n\n" + wrap_untrusted("supervisor_hint", focus)
+    return user_message(text)
 
 
 async def research_policy(
@@ -182,12 +187,16 @@ async def research_policy(
     max_searches: int,
     search_tier: ModelTier,
     findings_tier: ModelTier,
+    focus: str | None = None,
 ) -> PolicyOutcome:
     """Run search loop -> findings. `registry` is cut down to POLICY_TOOLS here."""
     loop = ToolLoop(
         llm, registry.restricted(POLICY_TOOLS), ctx, max_calls=max_searches, tier=search_tier
     )
-    base = [system_message(load_prompt()), _case_message(complaint_text, category, order_number)]
+    base = [
+        system_message(load_prompt()),
+        _case_message(complaint_text, category, order_number, focus),
+    ]
 
     def outcome(findings: PolicyFindings | None, failure: PolicyFailure | None) -> PolicyOutcome:
         return PolicyOutcome(list(loop.trace), _summarise(loop.results), findings, failure)

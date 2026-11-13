@@ -79,6 +79,22 @@ async def _fetch(
     return record, ToolResult(call_id, tool, args, output)
 
 
+def _was_delivered(order: OrderResponse | None) -> bool:
+    return order is not None and (
+        order.delivered_at is not None or order.status == OrderStatus.DELIVERED
+    )
+
+
+def missing_required_tools(results: list[ToolResult], category: TicketCategory) -> list[str]:
+    """Required lookups that still have no successful result (after the code fetch)."""
+    order = latest_output(results, OrderResponse)
+    missing = [] if order is not None else ["get_order"]
+    needs_shipment = category in SHIPMENT_REQUIRED_CATEGORIES or _was_delivered(order)
+    if needs_shipment and latest_output(results, Shipment) is None:
+        missing.append("get_shipment")
+    return missing
+
+
 async def ensure_required_evidence(
     registry: ToolRegistry,
     ctx: ToolContext,
@@ -113,10 +129,7 @@ async def ensure_required_evidence(
 
     await ensure("get_order", OrderResponse)
     order = latest_output(results, OrderResponse)
-    delivered = order is not None and (
-        order.delivered_at is not None or order.status == OrderStatus.DELIVERED
-    )
-    if category in SHIPMENT_REQUIRED_CATEGORIES or delivered:
+    if category in SHIPMENT_REQUIRED_CATEGORIES or _was_delivered(order):
         await ensure("get_shipment", Shipment)
 
     evidence: Evidence = investigation.evidence.model_copy(

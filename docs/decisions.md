@@ -553,3 +553,62 @@ time once either the cap or the key names were changed. Five tries is a small sa
 
 - Each policy run makes one large-tier call (findings) per run, not zero. The cost is small.
 - The investigator's structured steps are unchanged.
+
+
+## ADR-010: Parallel branches, the extra investigation round, and what the baseline comparison shows
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Milestone:** M6
+
+### Context
+
+The multi-agent workflow runs the investigator and the policy agent at the same time
+(PRD FR-8). Both read the database through tools. The supervisor may also leave a required
+record missing, and the PRD asks for at most one extra investigation round. Separately, the
+single-agent baseline (FR-23) exists so the two designs can be compared, and the comparison
+is only useful if we say what it does and does not measure.
+
+### Decision
+
+1. **One short-lived database session per parallel branch.** A SQLAlchemy `AsyncSession` is
+   not safe for concurrent use, so two branches must not share one. Each branch opens its
+   own session from `WorkflowDeps.branch_sessions` and closes it when the branch ends. Each
+   branch writes only its own state key (`investigation`, `policy`); `errors` is the one
+   shared key and has an append reducer, so the merge is safe. Everything after the join
+   (required evidence, eligibility, the proposal) uses the main session.
+2. **The extra investigation round is triggered by code, at most once.** After the join, if
+   a required lookup (`get_order`, and `get_shipment` where it applies) still has no
+   successful result after code has fetched it itself, the graph runs the investigator one
+   more time, told which records are missing. The supervisor and the model do not decide
+   this, and a second extra round is impossible (the round is skipped once
+   `investigation_retry` exists; baseline mode never has one). The second round's call ids
+   are prefixed `r2_` before the two rounds are merged, because providers (and the test
+   fakes) can reuse ids such as `call_1`, and the validator looks calls up by id.
+3. **The baseline comparison has a caveat.** Baseline mode has no supervisor, no separate
+   specialists, no critic and no revision. It shares everything that decides: required
+   evidence, code-computed eligibility and delay facts, the validator, and the rule that
+   only code sets the amount. So a difference in outcome, calls, tokens or latency between
+   `multi_agent` and `baseline` reflects specialization (separate investigator and policy
+   agent, supervisor hints) **and** the critic and revision loop together. It cannot say
+   which of the two caused it. Isolating them needs a third configuration, for example
+   multi-agent with the critic off, or baseline with one revision.
+
+### Alternatives considered
+
+- Share one session and serialise the branches: safe, but the two LLM-heavy branches would
+  no longer overlap, which removes the point of FR-8.
+- Let the supervisor ask for more rounds, or let the model say when evidence is missing:
+  unbounded cost and a model deciding what counts as enough. Code decides, once.
+- Give the baseline a critic so the comparison is like for like: then it is no longer the
+  simple single-agent reference the PRD describes.
+
+### Consequences
+
+- Each parallel run holds two connections for its gathering step. Reads only: no locks, but
+  a connection is open while the model is called.
+- Integration tests cannot use two real sessions (one rolled-back transaction on one
+  connection), so they hand every branch the test session one at a time. Real overlap with
+  separate sessions is tested with fakes in `tests/unit/test_workflow_multi_agent.py`.
+- M9's comparison report must state the caveat in item 3 next to any multi-agent versus
+  baseline number.

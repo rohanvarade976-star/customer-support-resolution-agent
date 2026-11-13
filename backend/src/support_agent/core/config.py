@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     resolution_max_revisions: int = Field(default=1, ge=0, le=2)
     # The critic's tier. It reviews text and cannot change amounts or override the validator.
     critic_tier: Literal["small", "large"] = "large"
+    # The supervisor's tier (agents/supervisor.py). It only picks which specialists gather
+    # information and what each should focus on; it decides nothing about the outcome.
+    supervisor_tier: Literal["small", "large"] = "small"
     # Order and carrier delivery times that differ by more than this are a conflict, and the
     # case escalates (domain/validation.py).
     delivery_date_tolerance_hours: int = Field(default=24, ge=0, le=168)

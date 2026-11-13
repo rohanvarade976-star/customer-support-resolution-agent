@@ -153,7 +153,7 @@ def to_claim(draft: ResolutionDraft, inputs: ResolutionInputs) -> DraftClaim:
     )
 
 
-def _escalate(
+def escalation_outcome(
     reasons: list[str], attempts: list[Attempt], failure: ResolutionFailure | None = None
 ) -> ResolutionOutcome:
     log.info(
@@ -171,7 +171,7 @@ def _escalate(
     )
 
 
-def _final_outcome(
+def final_outcome(
     draft: ResolutionDraft,
     inputs: ResolutionInputs,
     ctx: ValidationContext,
@@ -181,7 +181,7 @@ def _final_outcome(
     claim = to_claim(draft, inputs)
     failed = validate_resolution(claim, ctx)
     if failed:
-        return _escalate([code.value for code in failed], attempts)
+        return escalation_outcome([code.value for code in failed], attempts)
     escalating = draft.action == ResolutionAction.ESCALATE
     log.info("resolution_accepted", extra={"action": draft.action.value, "attempts": len(attempts)})
     return ResolutionOutcome(
@@ -219,7 +219,7 @@ async def resolve(
             if ESCALATE_IMMEDIATELY.intersection(codes):
                 # The data disagrees with itself: no rewording fixes that. A person decides.
                 attempts.append(Attempt(draft, codes, None))
-                return _escalate([code.value for code in codes], attempts)
+                return escalation_outcome([code.value for code in codes], attempts)
 
             verdict: CriticVerdict | None = None
             if not codes and draft.action != ResolutionAction.ESCALATE:
@@ -229,20 +229,20 @@ async def resolve(
 
             objected = verdict is not None and verdict.verdict == "revise"
             if not codes and not objected:
-                return _final_outcome(draft, inputs, ctx, attempts)
+                return final_outcome(draft, inputs, ctx, attempts)
 
             if revisions >= max_revisions:
                 reasons = [code.value for code in codes]
                 if objected:
                     reasons.append(EscalationReason.CRITIC_OBJECTED.value)
                 reasons.append(EscalationReason.REVISIONS_EXHAUSTED.value)
-                return _escalate(reasons, attempts)
+                return escalation_outcome(reasons, attempts)
 
             revisions += 1
             issues = verdict.issues if verdict is not None else []
             messages = revision_messages(inputs, draft, codes, issues)
     except LLMUnavailableError:
         unavailable = ResolutionFailure.LLM_UNAVAILABLE
-        return _escalate([unavailable.value], attempts, failure=unavailable)
+        return escalation_outcome([unavailable.value], attempts, failure=unavailable)
     except StructuredOutputError:
-        return _escalate([failure.value], attempts, failure=failure)
+        return escalation_outcome([failure.value], attempts, failure=failure)

@@ -8,6 +8,7 @@ mock providers, fake embedder, fake LLM).
 """
 
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated
@@ -27,6 +28,7 @@ from support_agent.llm.providers import build_llm_client
 from support_agent.rag import embeddings
 from support_agent.schemas.auth import Principal
 from support_agent.services import auth as auth_service
+from support_agent.workflow.deps import BranchSessions
 
 # auto_error=False so a missing header goes through our own error format.
 _bearer = HTTPBearer(auto_error=False)
@@ -37,7 +39,23 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+@asynccontextmanager
+async def _new_session() -> AsyncIterator[AsyncSession]:
+    async with get_sessionmaker()() as session:
+        yield session
+
+
+def get_branch_sessions() -> BranchSessions:
+    """Opens a separate short-lived session for each parallel workflow branch.
+
+    One AsyncSession must not be used by two tasks at once. Tests override this with a
+    function that hands every branch the rolled-back test session, one branch at a time.
+    """
+    return _new_session
+
+
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+BranchSessionsDep = Annotated[BranchSessions, Depends(get_branch_sessions)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 Clock = Callable[[], datetime]

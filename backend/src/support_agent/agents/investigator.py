@@ -135,13 +135,15 @@ def ground_facts(summary: EvidenceSummary, trace: list[ToolCallRecord]) -> Evide
     )
 
 
-def _case_message(complaint_text: str, order_number: str) -> ChatMessage:
+def _case_message(complaint_text: str, order_number: str, focus: str | None) -> ChatMessage:
     # The order number is verified by code before the investigator runs (classify node).
-    # The complaint is untrusted text.
-    return user_message(
-        f"Order number for this case: {order_number}\n\n"
-        + wrap_untrusted("customer_complaint", complaint_text)
+    # The complaint and the supervisor's hint are untrusted text.
+    text = f"Order number for this case: {order_number}\n\n" + wrap_untrusted(
+        "customer_complaint", complaint_text
     )
+    if focus:
+        text += "\n\n" + wrap_untrusted("supervisor_hint", focus)
+    return user_message(text)
 
 
 def _plan_text(plan: InvestigationPlan) -> str:
@@ -157,12 +159,13 @@ async def investigate(
     complaint_text: str,
     order_number: str,
     max_tool_calls: int,
+    focus: str | None = None,
 ) -> InvestigationOutcome:
     """Run plan -> tool loop -> evidence. `registry` is cut down to INVESTIGATOR_TOOLS here."""
     loop = ToolLoop(
         llm, registry.restricted(INVESTIGATOR_TOOLS), ctx, max_calls=max_tool_calls, tier="large"
     )
-    base = [system_message(load_prompt()), _case_message(complaint_text, order_number)]
+    base = [system_message(load_prompt()), _case_message(complaint_text, order_number, focus)]
     plan: InvestigationPlan | None = None
     try:
         plan = await llm.structured(

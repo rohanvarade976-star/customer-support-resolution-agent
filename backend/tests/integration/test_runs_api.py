@@ -14,7 +14,6 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from support_agent.agents.fake import simple_investigation
 from support_agent.db.models import AuditEvent, Ticket, WorkflowRun
 from support_agent.db.seed import load_scenarios, seed
 from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, TicketStatus
@@ -66,7 +65,9 @@ async def run_count(session: AsyncSession, ticket_id: str) -> int:
 async def test_confident_run_is_classified_and_saved(
     client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
 ) -> None:
-    use_llm([answer("refund", 0.95), *simple_investigation("ORD-1001")])
+    # A confident label, then the supervisor fails: the label is kept, the run escalates.
+    # (The full multi-agent paths are in test_workflow_outcomes.py.)
+    use_llm([answer("refund", 0.95), transient()])
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "Where is my refund?", order="ORD-1001")
 
@@ -74,28 +75,25 @@ async def test_confident_run_is_classified_and_saved(
 
     assert response.status_code == 202
     body = response.json()
-    assert (body["status"], body["category"]) == ("investigating", "refund")
+    assert (body["status"], body["category"]) == ("escalated", "refund")
 
     run = await session.get(WorkflowRun, UUID(body["run_id"]))
     ticket = await session.get(Ticket, UUID(ticket_id))
     assert run is not None and ticket is not None
-    assert (run.status, run.mode, run.completed_at) == (
-        RunStatus.INVESTIGATING,
-        RunMode.MULTI_AGENT,
-        None,
-    )
+    assert (run.status, run.mode) == (RunStatus.ESCALATED, RunMode.MULTI_AGENT)
+    assert run.completed_at is not None
     assert run.thread_id == f"run-{run.id}"
-    assert (ticket.category, ticket.status) == (TicketCategory.REFUND, TicketStatus.IN_PROGRESS)
+    assert (ticket.category, ticket.status) == (TicketCategory.REFUND, TicketStatus.ESCALATED)
 
     recorded = await events(session, body["run_id"])
     assert set(recorded) == {
         "run.created",
         "run.classified",
+        "run.escalated",
         "ticket.updated",
-        "investigation.started",
-        "tool.called",
-        "investigation.completed",
+        "run.usage",
     }
+    assert recorded["run.escalated"]["error_codes"] == ["LLM_UNAVAILABLE"]
     assert recorded["run.classified"] == {
         "category": "refund",
         "confidence": 0.95,
@@ -203,7 +201,7 @@ async def test_start_run_without_a_token_is_401(client: httpx.AsyncClient) -> No
 async def test_second_run_while_one_is_unfinished_is_409(
     client: httpx.AsyncClient, session: AsyncSession, auth_headers: HeadersFor, use_llm: UseLLM
 ) -> None:
-    use_llm([answer("refund", 0.95), *simple_investigation("ORD-1001")])
+    use_llm([answer("refund", 0.4)])  # a run waiting for the customer is unfinished
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "Where is my refund?", order="ORD-1001")
     await client.post(f"/tickets/{ticket_id}/runs", headers=priya)
@@ -221,7 +219,7 @@ async def test_second_run_while_one_is_unfinished_is_409(
 async def test_owner_and_reviewer_can_read_a_run_others_get_404(
     client: httpx.AsyncClient, auth_headers: HeadersFor, use_llm: UseLLM
 ) -> None:
-    use_llm([answer("damaged_item", 0.9), *simple_investigation("ORD-1001")])
+    use_llm([answer("damaged_item", 0.9), transient()])
     priya = await auth_headers("priya@example.com")
     ticket_id = await create_ticket(client, priya, "It arrived broken", order="ORD-1001")
     run_id = (await client.post(f"/tickets/{ticket_id}/runs", headers=priya)).json()["run_id"]

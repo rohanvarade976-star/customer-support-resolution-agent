@@ -10,6 +10,7 @@ import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,7 +25,14 @@ from sqlalchemy.pool import NullPool
 
 from mock_providers.shipping.app import create_app as create_shipping_app
 from mock_providers.shipping.config import ShippingSettings
-from support_agent.api.deps import get_embedder, get_llm_client, get_session, get_shipping_client
+from support_agent.agents.fake import AgentFake
+from support_agent.api.deps import (
+    get_branch_sessions,
+    get_embedder,
+    get_llm_client,
+    get_session,
+    get_shipping_client,
+)
 from support_agent.core.config import get_settings
 from support_agent.core.security import hash_password
 from support_agent.integrations.shipping import ShippingClient
@@ -34,6 +42,7 @@ from support_agent.main import create_app
 from support_agent.rag.documents import load_policy_directory
 from support_agent.rag.embeddings import FakeEmbedder
 from support_agent.rag.ingest import ingest_policies
+from support_agent.workflow.deps import BranchSessions
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 POLICY_DIR = BACKEND_DIR / "data" / "policies"
@@ -137,7 +146,27 @@ async def ingested_policies(session: AsyncSession) -> None:
 
 
 @pytest.fixture
-def app(session: AsyncSession) -> FastAPI:
+def branch_sessions(session: AsyncSession) -> BranchSessions:
+    """Every parallel branch gets the test session, one branch at a time.
+
+    The test session is bound to one connection inside a transaction that is rolled back at
+    the end (so the seeded rows are visible, and nothing is left behind). A second session
+    could not see those rows, and two tasks cannot share one connection at the same moment,
+    so the lock makes the branches take turns. The real concurrency (separate sessions that
+    overlap) is tested in tests/unit/test_workflow_multi_agent.py.
+    """
+    lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def branch() -> AsyncIterator[AsyncSession]:
+        async with lock:
+            yield session
+
+    return branch
+
+
+@pytest.fixture
+def app(session: AsyncSession, branch_sessions: BranchSessions) -> FastAPI:
     """The real app, using the rolled-back test session instead of the real database.
 
     The shipping provider is the in-memory mock (no network) and the embedder is the fake.
@@ -156,6 +185,7 @@ def app(session: AsyncSession) -> FastAPI:
     application.dependency_overrides[get_session] = test_session
     application.dependency_overrides[get_shipping_client] = test_shipping_client
     application.dependency_overrides[get_embedder] = lambda: FakeEmbedder()
+    application.dependency_overrides[get_branch_sessions] = lambda: branch_sessions
     return application
 
 
@@ -165,6 +195,28 @@ def use_llm(app: FastAPI) -> Callable[[list[ScriptStep]], FakeProvider]:
 
     def install(script: list[ScriptStep]) -> FakeProvider:
         fake = FakeProvider(script)
+        client = RoutedLLMClient(
+            [fake],
+            RetrySettings(max_attempts=1, backoff_base_seconds=0, backoff_max_seconds=0),
+            default_temperature=0.0,
+            default_max_tokens=256,
+        )
+        app.dependency_overrides[get_llm_client] = lambda: client
+        return fake
+
+    return install
+
+
+@pytest.fixture
+def use_agents(app: FastAPI) -> Callable[[dict[str, list[ScriptStep]]], AgentFake]:
+    """use_agents(scripts): the app's LLM is an AgentFake with one script per agent.
+
+    Needed once agents run in parallel: they reach the model in no fixed order, so each gets
+    its own script (see agents/fake.py).
+    """
+
+    def install(scripts: dict[str, list[ScriptStep]]) -> AgentFake:
+        fake = AgentFake(scripts)
         client = RoutedLLMClient(
             [fake],
             RetrySettings(max_attempts=1, backoff_base_seconds=0, backoff_max_seconds=0),

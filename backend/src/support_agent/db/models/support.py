@@ -39,6 +39,9 @@ class Ticket(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
         server_default=TicketStatus.OPEN.value,
     )
     summary: Mapped[str] = mapped_column(Text)
+    # The latest message shown to the customer by a run (an explanation, a question, or a
+    # fixed "awaiting approval" / "passed to our team" line). NULL until a run sets one.
+    customer_reply: Mapped[str | None] = mapped_column(Text)
 
 
 class WorkflowRun(UUIDPrimaryKey, UpdatedAt, Base):
@@ -46,6 +49,10 @@ class WorkflowRun(UUIDPrimaryKey, UpdatedAt, Base):
     __table_args__ = (
         CheckConstraint(
             "completed_at IS NULL OR completed_at >= started_at", name="completed_after_started"
+        ),
+        CheckConstraint(
+            "llm_calls >= 0 AND input_tokens >= 0 AND output_tokens >= 0",
+            name="usage_non_negative",
         ),
     )
 
@@ -64,6 +71,10 @@ class WorkflowRun(UUIDPrimaryKey, UpdatedAt, Base):
     )
     started_at: Mapped[datetime] = mapped_column(server_default=func.now())
     completed_at: Mapped[datetime | None]
+    # What the run's LLM calls cost: successful calls and their tokens (llm/usage.py).
+    llm_calls: Mapped[int] = mapped_column(default=0, server_default="0")
+    input_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
 
 
 class CustomerMemory(UUIDPrimaryKey, CreatedAt, Base):

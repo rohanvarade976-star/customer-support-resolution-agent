@@ -71,3 +71,12 @@ async def set_status(
     if status in FINISHED_STATUSES:
         run.completed_at = now
     await session.flush()
+
+
+async def set_usage(
+    session: AsyncSession, run: WorkflowRun, *, calls: int, input_tokens: int, output_tokens: int
+) -> None:
+    run.llm_calls = calls
+    run.input_tokens = input_tokens
+    run.output_tokens = output_tokens
+    await session.flush()
