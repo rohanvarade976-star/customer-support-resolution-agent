@@ -8,6 +8,9 @@ no SQL and unit tests can pass fakes:
   agent each open their own. Everything after the join uses the main session in
   `tool_context`.
 - `load_case_facts`: eligibility and the shipping threshold, computed by code.
+- `load_memory`: the customer's recent long-term memory, rendered by code from structured
+  fields (services/memory.py). Background for the agents only: nothing that decides
+  eligibility, amounts or validation is given it.
 - `propose_refund`: store the refund proposal and its pending approval (services/proposals).
 - `load_approval_decision`: the reviewer's decision as stored in the database. After a pause
   for approval, this (not the value the run was resumed with) decides what happens next.
@@ -43,6 +46,8 @@ class CaseFacts:
 
 # (customer_id, order_number, now) -> facts. Raises AppError if the order is not found.
 LoadCaseFacts = Callable[[UUID, str, datetime], Awaitable[CaseFacts]]
+# customer_id -> the customer's recent memory as plain lines ("" when there is none).
+LoadMemory = Callable[[UUID], Awaitable[str]]
 # (order_number, amount_minor) -> proposal id. Raises AppError if code refuses the proposal.
 ProposeRefund = Callable[[str, int], Awaitable[UUID]]
 # proposal id -> the stored approval's decision (None: no approval row).
@@ -70,6 +75,7 @@ class WorkflowDeps:
     max_tool_calls: int
     branch_sessions: BranchSessions
     load_case_facts: LoadCaseFacts
+    load_memory: LoadMemory
     propose_refund: ProposeRefund
     load_approval_decision: LoadApprovalDecision
     execute_refund: ExecuteRefund

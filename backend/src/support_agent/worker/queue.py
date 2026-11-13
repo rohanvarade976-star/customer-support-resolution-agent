@@ -34,13 +34,14 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.core.errors import AppError
 from support_agent.db.models import Job
-from support_agent.domain.enums import JobStatus, JobType
+from support_agent.db.models.jobs import OPEN_SWEEP_SQL
+from support_agent.domain.enums import SWEEP_JOB_TYPES, JobStatus, JobType
 
 
 @dataclass(frozen=True)
@@ -77,28 +78,27 @@ async def enqueue(
     return job
 
 
-async def schedule_expiry_sweep(session: AsyncSession, *, now: datetime, max_attempts: int) -> bool:
-    """Queue an approval-expiry sweep unless one is already queued or running. Commits.
+async def schedule_sweep(
+    session: AsyncSession, job_type: JobType, *, now: datetime, max_attempts: int
+) -> bool:
+    """Queue a scheduled sweep unless one of its type is already queued or running. Commits.
 
     Several workers may call this at the same moment; the partial unique index
-    `uq_jobs_one_open_expiry_sweep` lets exactly one insert through and the others do nothing.
+    `uq_jobs_one_open_sweep_per_type` lets exactly one insert through and the others do
+    nothing.
     """
+    if job_type not in SWEEP_JOB_TYPES:
+        raise ValueError(f"{job_type} is not a scheduled sweep")
     stmt = (
         insert(Job)
         .values(
-            job_type=JobType.EXPIRE_APPROVALS,
+            job_type=job_type,
             run_id=None,
             payload={},
             max_attempts=max_attempts,
             available_at=now,
         )
-        .on_conflict_do_nothing(
-            index_elements=[Job.job_type],
-            index_where=and_(
-                Job.job_type == JobType.EXPIRE_APPROVALS,
-                Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
-            ),
-        )
+        .on_conflict_do_nothing(index_elements=[Job.job_type], index_where=text(OPEN_SWEEP_SQL))
         .returning(Job.id)
     )
     inserted = (await session.execute(stmt)).scalar_one_or_none() is not None

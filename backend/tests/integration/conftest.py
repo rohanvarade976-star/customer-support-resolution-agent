@@ -52,7 +52,7 @@ from support_agent.api.deps import (
 )
 from support_agent.core.config import Settings, get_settings
 from support_agent.core.security import hash_password
-from support_agent.db.models import AuditEvent, Customer, Job, Ticket, WorkflowRun
+from support_agent.db.models import AuditEvent, Customer, CustomerMemory, Job, Ticket, WorkflowRun
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import RetrySettings, RoutedLLMClient
 from support_agent.llm.disabled import DisabledLLMClient
@@ -455,6 +455,7 @@ async def committed_ticket(
             runs = select(WorkflowRun.id).where(WorkflowRun.ticket_id == ticket_id)
             await db.execute(delete(Job).where(Job.run_id.in_(runs)))
             await db.execute(delete(AuditEvent).where(AuditEvent.run_id.in_(runs)))
+            await db.execute(delete(CustomerMemory).where(CustomerMemory.ticket_id == ticket_id))
             await db.execute(delete(WorkflowRun).where(WorkflowRun.ticket_id == ticket_id))
             await db.execute(delete(Ticket).where(Ticket.id == ticket_id))
             await db.execute(delete(Customer).where(Customer.id == customer_id))

@@ -12,6 +12,7 @@ done, and then the job runs again. Every handler is therefore safe to run twice:
   waiting state before the job was queued.
 - expire_approvals only picks approvals that are still undecided, so a rerun finds nothing
   new to do.
+- purge_expired_memory deletes rows whose expiry has passed; a rerun deletes nothing more.
 
 Payloads hold ids only. A handler raises to ask for a retry, or PermanentJobError when
 retrying cannot help (the job then goes dead at once and its run is escalated).
@@ -30,6 +31,7 @@ from support_agent.core.config import Settings
 from support_agent.core.errors import PermanentJobError
 from support_agent.domain.enums import JobType
 from support_agent.services import approvals as approvals_service
+from support_agent.services import memory as memory_service
 from support_agent.services import runs as runs_service
 from support_agent.worker.queue import ClaimedJob
 from support_agent.workflow.graph import Checkpointer
@@ -107,19 +109,24 @@ async def expire_approvals(session: AsyncSession, job: ClaimedJob, deps: WorkerD
     await approvals_service.expire_overdue_approvals(session, deps.enqueue_env())
 
 
+async def purge_expired_memory(session: AsyncSession, job: ClaimedJob, deps: WorkerDeps) -> None:
+    await memory_service.purge_expired(session, now=deps.clock())
+
+
 HANDLERS: dict[JobType, Handler] = {
     JobType.START_RUN: start_run,
     JobType.RESUME_AFTER_CUSTOMER_REPLY: resume_after_customer_reply,
     JobType.RESUME_AFTER_DECISION: resume_after_decision,
     JobType.EXPIRE_APPROVALS: expire_approvals,
+    JobType.PURGE_EXPIRED_MEMORY: purge_expired_memory,
 }
 
 
 async def escalate_dead_job(
-    session: AsyncSession, job: ClaimedJob, code: str, now: datetime
+    session: AsyncSession, job: ClaimedJob, code: str, deps: WorkerDeps
 ) -> None:
     """A dead job's run goes to a person, with the reason code. Not committed."""
     if job.run_id is not None:
         await runs_service.escalate_after_dead_job(
-            session, job.run_id, job_type=job.job_type, code=code, now=now
+            session, deps.settings, job.run_id, job_type=job.job_type, code=code, now=deps.clock()
         )

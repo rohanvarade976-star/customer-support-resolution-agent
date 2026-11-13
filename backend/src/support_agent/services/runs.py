@@ -50,6 +50,8 @@ from support_agent.domain.enums import (
     ApprovalDecision,
     JobStatus,
     JobType,
+    MemoryKind,
+    MemoryOutcome,
     Role,
     RunMode,
     RunStatus,
@@ -64,7 +66,7 @@ from support_agent.repositories import audit, customer_messages, proposals, tick
 from support_agent.repositories.tickets import TicketRecord
 from support_agent.schemas.auth import Principal
 from support_agent.schemas.runs import RunJob, RunResponse
-from support_agent.services import eligibility, order_status, refund_execution
+from support_agent.services import eligibility, memory, order_status, refund_execution
 from support_agent.services import proposals as proposal_service
 from support_agent.services.case_updates import set_run_status, set_ticket_status
 from support_agent.services.orders import customer_owns_order
@@ -387,7 +389,13 @@ async def _advance(
 
 
 async def escalate_after_dead_job(
-    session: AsyncSession, run_id: UUID, *, job_type: JobType, code: str, now: datetime
+    session: AsyncSession,
+    settings: Settings,
+    run_id: UUID,
+    *,
+    job_type: JobType,
+    code: str,
+    now: datetime,
 ) -> None:
     """A job for this run will never succeed: hand the case to a person. Not committed.
 
@@ -412,6 +420,16 @@ async def escalate_after_dead_job(
     )
     await set_ticket_status(session, ticket, TicketStatus.ESCALATED, run_id=run.id, actor="system")
     await tickets.set_reply(session, ticket, ESCALATION_MESSAGE)
+    await memory.record_run_outcome(
+        session,
+        settings,
+        run=run,
+        ticket=ticket,
+        kind=MemoryKind.CASE_ESCALATED,
+        outcome=MemoryOutcome.ESCALATED,
+        order_number=None,  # no state to read a verified hint from: the ticket's order only
+        now=now,
+    )
 
 
 def _build_deps(
@@ -430,6 +448,9 @@ def _build_deps(
             session, customer_id, order_number
         )
         return CaseFacts(decision, threshold)
+
+    async def load_memory(customer_id: UUID) -> str:
+        return await memory.load_for_run(session, settings, customer_id, now=clock())
 
     async def propose_refund(order_number: str, amount_minor: int) -> UUID:
         proposal_id = await proposal_service.create_proposal_for_run(
@@ -470,6 +491,7 @@ def _build_deps(
         max_tool_calls=settings.investigator_max_tool_calls,
         branch_sessions=env.branch_sessions,
         load_case_facts=load_case_facts,
+        load_memory=load_memory,
         propose_refund=propose_refund,
         load_approval_decision=load_approval_decision,
         execute_refund=execute_refund,

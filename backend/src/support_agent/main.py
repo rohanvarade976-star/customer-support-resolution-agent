@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from support_agent.api.routes import approvals, auth, health, orders, runs, tickets
+from support_agent.api.routes import approvals, auth, health, memory, orders, runs, tickets
 from support_agent.core.config import get_settings
 from support_agent.core.errors import register_error_handlers
 from support_agent.core.logging import configure_logging
@@ -39,6 +39,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(orders.router)
+    app.include_router(memory.router)
     app.include_router(tickets.router)
     app.include_router(runs.router)
     app.include_router(approvals.router)

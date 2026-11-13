@@ -196,7 +196,7 @@ def build_graph(
         return route_after_customer(state, gathering_entry)
 
     graph = StateGraph(WorkflowState)
-    graph.add_node("intake", intake)
+    graph.add_node("intake", bind(intake))
     graph.add_node("classify", classify_node)
     graph.add_node("needs_clarification", needs_clarification)
     graph.add_node("ask_for_order", ask_for_order)

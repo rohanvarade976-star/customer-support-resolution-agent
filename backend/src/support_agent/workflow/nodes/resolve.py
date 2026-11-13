@@ -52,6 +52,7 @@ async def resolve_case(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str,
         findings=NO_FINDINGS if policy is None or policy.findings is None else policy.findings,
         eligibility=eligibility,
         delay_facts=state.get("delay_facts"),
+        customer_memory=state.get("customer_memory", ""),
     )
     settings = deps.tool_context.settings
     tolerance = timedelta(hours=settings.delivery_date_tolerance_hours)

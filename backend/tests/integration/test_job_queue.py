@@ -189,7 +189,9 @@ async def test_retry_waits_for_its_backoff_and_release_does_not_count(
 
 
 async def test_only_one_expiry_sweep_is_queued_at_a_time(session: AsyncSession) -> None:
-    assert await queue.schedule_expiry_sweep(session, now=NOW, max_attempts=3)
-    assert not await queue.schedule_expiry_sweep(session, now=NOW, max_attempts=3)
+    assert await queue.schedule_sweep(session, JobType.EXPIRE_APPROVALS, now=NOW, max_attempts=3)
+    assert not await queue.schedule_sweep(
+        session, JobType.EXPIRE_APPROVALS, now=NOW, max_attempts=3
+    )
     sweeps = await session.scalars(select(Job).where(Job.job_type == JobType.EXPIRE_APPROVALS))
     assert len(sweeps.all()) == 1

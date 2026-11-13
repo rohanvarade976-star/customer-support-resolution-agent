@@ -9,6 +9,11 @@ from support_agent.db.base import Base
 from support_agent.db.models._columns import CreatedAt, UpdatedAt, UUIDPrimaryKey, str_enum
 from support_agent.domain.enums import JobStatus, JobType
 
+# Kept as SQL because the constraint and the partial index need it. Same set as
+# domain/enums.py SWEEP_JOB_TYPES; worker/queue.py uses OPEN_SWEEP_SQL for ON CONFLICT.
+SWEEP_TYPES_SQL = "job_type IN ('expire_approvals', 'purge_expired_memory')"
+OPEN_SWEEP_SQL = f"{SWEEP_TYPES_SQL} AND status IN ('queued', 'running')"
+
 
 class Job(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
     """A unit of background work for the Postgres job queue (worker/queue.py, ADR-012).
@@ -22,19 +27,17 @@ class Job(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
     __table_args__ = (
         CheckConstraint("attempts >= 0", name="attempts_non_negative"),
         CheckConstraint("max_attempts >= 1", name="max_attempts_positive"),
-        # Every job works on one run, except the scheduled approval-expiry sweep.
-        CheckConstraint("run_id IS NOT NULL OR job_type = 'expire_approvals'", name="run_required"),
+        # Every job works on one run, except the scheduled sweeps.
+        CheckConstraint(f"run_id IS NOT NULL OR {SWEEP_TYPES_SQL}", name="run_required"),
         # Serves the worker's query: "queued jobs whose available_at has passed".
         Index("ix_jobs_status_available_at", "status", "available_at"),
-        # At most one approval-expiry sweep waiting or running, however many workers
-        # schedule one at the same moment.
+        # At most one sweep of each type waiting or running, however many workers schedule
+        # one at the same moment.
         Index(
-            "uq_jobs_one_open_expiry_sweep",
+            "uq_jobs_one_open_sweep_per_type",
             "job_type",
             unique=True,
-            postgresql_where=text(
-                "job_type = 'expire_approvals' AND status IN ('queued', 'running')"
-            ),
+            postgresql_where=text(OPEN_SWEEP_SQL),
         ),
     )
 

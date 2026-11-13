@@ -3,7 +3,8 @@
 `FakeWorld` holds canned typed records, a registry whose tools return them, and the
 functions the workflow is given for the database (`load_case_facts`), for storing a refund
 proposal (`propose_refund`), and for what follows a reviewer's decision
-(`load_approval_decision`, `execute_refund`). Everything it was asked to do is kept for
+(`load_approval_decision`, `execute_refund`), plus the customer's long-term memory
+(`load_memory`). Everything it was asked to do is kept for
 assertions.
 
 `run_workflow` runs a graph to its first pause (or the end) with an in-memory checkpointer.
@@ -147,6 +148,9 @@ class FakeWorld:
         self.approval_decision: ApprovalDecision | None = ApprovalDecision.PENDING
         self.refuse_refund_with: str | None = None
         self.executed: list[UUID] = []  # proposal ids the refund executor was called for
+        # The customer's rendered long-term memory ("" = none), and whose memory was asked for.
+        self.memory = ""
+        self.memory_loaded_for: list[UUID] = []
         self.sessions = BranchSessions()
         self.registry = self._build_registry()
 
@@ -156,6 +160,10 @@ class FakeWorld:
         self, customer_id: UUID, order_number: str, now: datetime
     ) -> CaseFacts:
         return CaseFacts(self.decision, investigation_threshold_days=None)
+
+    async def load_memory(self, customer_id: UUID) -> str:
+        self.memory_loaded_for.append(customer_id)
+        return self.memory
 
     async def propose_refund(self, order_number: str, amount_minor: int) -> UUID:
         if self.refuse_proposal_with is not None:
@@ -269,6 +277,7 @@ def fake_deps(
         max_tool_calls=max_tool_calls,
         branch_sessions=world.sessions,
         load_case_facts=world.load_case_facts,
+        load_memory=world.load_memory,
         propose_refund=world.propose_refund,
         load_approval_decision=world.load_approval_decision,
         execute_refund=world.execute_refund,

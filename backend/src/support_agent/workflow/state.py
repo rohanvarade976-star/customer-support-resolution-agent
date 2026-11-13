@@ -92,6 +92,10 @@ class WorkflowState(TypedDict):
 
     # --- Filled in by nodes ---
     status: RunStatus
+    # The customer's recent long-term memory, rendered by code from structured fields at
+    # intake (services/memory.py, ADR-013). Background for the supervisor and the resolution
+    # agent, always sent wrapped as untrusted data. Never read by eligibility or validation.
+    customer_memory: NotRequired[str]
     classification: NotRequired[Classification | None]  # None if the LLM call failed
     # The order the rest of the run works on: the ticket's, or a verified hint.
     order_number: NotRequired[str | None]

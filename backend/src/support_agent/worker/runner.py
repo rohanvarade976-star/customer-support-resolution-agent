@@ -1,7 +1,8 @@
 """The worker loop: claim a job, run its handler while renewing the lease, record the result.
 
     loop:
-        every approval_expiry_check_seconds: queue an expiry sweep (if none is waiting)
+        every approval_expiry_check_seconds: queue an approval-expiry sweep (if none is open)
+        every memory_purge_check_seconds: queue a memory purge sweep (if none is open)
         claim the next due job (or sleep for the poll interval)
         run its handler, with a heartbeat task renewing the lease
         success           -> complete
@@ -27,6 +28,7 @@ from datetime import timedelta
 
 from support_agent.core.errors import PermanentJobError
 from support_agent.core.logging import run_id_var
+from support_agent.domain.enums import JobType
 from support_agent.worker import queue
 from support_agent.worker.handlers import HANDLERS, WorkerDeps, escalate_dead_job
 from support_agent.worker.queue import ClaimedJob
@@ -107,7 +109,7 @@ async def _bury(job: ClaimedJob, deps: WorkerDeps, code: str) -> None:
     """Mark the job dead and escalate its run, in one transaction."""
     async with deps.sessions() as session:
         if await queue.mark_dead(session, job, code=code):
-            await escalate_dead_job(session, job, code, deps.clock())
+            await escalate_dead_job(session, job, code, deps)
         await session.commit()
     log.error("job_dead", extra={**_fields(job), "error_code": code})
 
@@ -153,11 +155,16 @@ async def drain(deps: WorkerDeps) -> int:
 async def run_forever(deps: WorkerDeps, stop: asyncio.Event) -> None:
     """The worker process's main loop, until `stop` is set."""
     settings = deps.settings
-    next_sweep = deps.clock()
+    intervals = {
+        JobType.EXPIRE_APPROVALS: settings.approval_expiry_check_seconds,
+        JobType.PURGE_EXPIRED_MEMORY: settings.memory_purge_check_seconds,
+    }
+    next_sweep = dict.fromkeys(intervals, deps.clock())
     while not stop.is_set():
-        if deps.clock() >= next_sweep:
-            await _schedule_sweep(deps)
-            next_sweep = deps.clock() + timedelta(seconds=settings.approval_expiry_check_seconds)
+        for job_type, seconds in intervals.items():
+            if deps.clock() >= next_sweep[job_type]:
+                await _schedule_sweep(deps, job_type)
+                next_sweep[job_type] = deps.clock() + timedelta(seconds=seconds)
         try:
             worked = await _run_next(deps, stop)
         except Exception as exc:  # e.g. the database is down; keep the worker alive
@@ -168,14 +175,17 @@ async def run_forever(deps: WorkerDeps, stop: asyncio.Event) -> None:
                 await asyncio.wait_for(stop.wait(), settings.worker_poll_interval_seconds)
 
 
-async def _schedule_sweep(deps: WorkerDeps) -> None:
+async def _schedule_sweep(deps: WorkerDeps, job_type: JobType) -> None:
     try:
         async with deps.sessions() as session:
-            await queue.schedule_expiry_sweep(
-                session, now=deps.clock(), max_attempts=deps.settings.job_max_attempts
+            await queue.schedule_sweep(
+                session, job_type, now=deps.clock(), max_attempts=deps.settings.job_max_attempts
             )
     except Exception as exc:
-        log.warning("sweep_schedule_failed", extra={"error_code": type(exc).__name__})
+        log.warning(
+            "sweep_schedule_failed",
+            extra={"job_type": job_type.value, "error_code": type(exc).__name__},
+        )
 
 
 async def _run_next(deps: WorkerDeps, stop: asyncio.Event) -> bool:

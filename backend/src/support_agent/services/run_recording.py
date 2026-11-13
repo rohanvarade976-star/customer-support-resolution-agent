@@ -14,6 +14,9 @@ per call, `investigation.completed`, `policy.completed`, `resolution.completed`,
 `run.paused`, the run's end event, and `run.usage`. Refund events come from the refund
 executor itself.
 
+When the run has finished, its verified outcome is also remembered for the customer
+(services/memory.py, ADR-013): fixed codes derived from statuses, never text.
+
 Nothing is committed here; the caller commits.
 """
 
@@ -25,9 +28,11 @@ from support_agent.agents.classifier import Classification
 from support_agent.core.config import Settings
 from support_agent.db.models import Ticket, WorkflowRun
 from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, TicketStatus
+from support_agent.domain.memory import memory_outcome
 from support_agent.llm.tool_loop import OUTCOME_OK, ToolCallRecord
 from support_agent.llm.usage import UsageMeter
 from support_agent.repositories import audit, tickets, workflow_runs
+from support_agent.services import memory
 from support_agent.services.case_updates import set_run_status, set_ticket_status
 from support_agent.workflow.graph import Segment
 from support_agent.workflow.state import AskedFor, OrderHint, WorkflowState
@@ -93,6 +98,38 @@ async def save_segment(
     ticket_status = written.get("ticket_status") or _TICKET_STATUS_FOR_RUN[status]
     await set_ticket_status(session, ticket, ticket_status, run_id=run.id, actor="system")
     await _record_usage(session, run, meter)
+    await _remember_outcome(session, settings, run, ticket, final, now)
+
+
+async def _remember_outcome(
+    session: AsyncSession,
+    settings: Settings,
+    run: WorkflowRun,
+    ticket: Ticket,
+    final: WorkflowState,
+    now: datetime,
+) -> None:
+    """Remember a finished run's verified outcome. Codes only: no text from the state."""
+    outcome = final.get("outcome")
+    remembered = memory_outcome(
+        run_status=final["status"],
+        refund_status=final.get("refund_status"),
+        approval_decision=final.get("approval_decision"),
+        action=None if outcome is None else outcome.action,
+    )
+    if remembered is None:
+        return
+    kind, code = remembered
+    await memory.record_run_outcome(
+        session,
+        settings,
+        run=run,
+        ticket=ticket,
+        kind=kind,
+        outcome=code,
+        order_number=final.get("order_number"),
+        now=now,
+    )
 
 
 async def _record_classification(

@@ -64,8 +64,8 @@ SEED_TABLES: list[type[Base]] = [
     AuditEvent,
     Job,
     CustomerMessage,
+    CustomerMemory,  # points at workflow runs, tickets and orders
     WorkflowRun,
-    CustomerMemory,
     Ticket,
     Return,
     OrderItem,

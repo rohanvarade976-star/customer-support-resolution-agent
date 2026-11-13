@@ -156,6 +156,14 @@ class Settings(BaseSettings):
     # On shutdown, how long the current job may take to finish before it is released.
     worker_shutdown_grace_seconds: float = Field(default=30.0, ge=0, le=600)
 
+    # Long-term customer memory (ADR-013). Each item expires this many days after it is
+    # written; a change applies to items written afterwards.
+    memory_retention_days: int = Field(default=180, ge=1, le=3650)
+    # How many recent items a run loads as background context.
+    memory_max_items: int = Field(default=5, ge=0, le=50)
+    # How often each worker schedules the purge of expired memory.
+    memory_purge_check_seconds: int = Field(default=3600, ge=1, le=86400)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:

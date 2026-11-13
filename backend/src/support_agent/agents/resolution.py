@@ -8,6 +8,8 @@ The model only proposes. Code decides what counts (domain/validation.py, agents/
 - `ResolutionDraft` has no amount field. For a refund, code fills the amount from the
   eligibility decision. If a model sends an `amount_minor` anyway it is ignored.
 - Evidence, policy rules and the complaint are shown inside untrusted-data tags.
+- The customer's long-term memory, if any, is shown inside untrusted-data tags too, as
+  background only. It is never evidence and the message may not repeat it (ADR-013).
 - On a revision the model sees the validator's reason codes (code-written) and the critic's
   issues (model-written, so wrapped as untrusted data).
 """
@@ -19,6 +21,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from support_agent.agents.history import render_history
 from support_agent.agents.investigator import Evidence
 from support_agent.agents.policy import PolicyFindings
 from support_agent.domain.eligibility import EligibilityDecision
@@ -96,6 +99,9 @@ class ResolutionInputs:
     eligibility: EligibilityDecision
     # Computed by code from the carrier's shipment record; None when there is no shipment.
     delay_facts: ShippingDelayFacts | None = None
+    # The customer's long-term memory, rendered by code (ADR-013). Shown to the drafting
+    # model only, as untrusted background: not to the critic, and never to validation.
+    customer_memory: str = ""
 
 
 @cache
@@ -152,11 +158,16 @@ def render_delay_facts(facts: ShippingDelayFacts | None) -> str:
     return header + "\n".join(lines)
 
 
+def _draft_request(inputs: ResolutionInputs) -> str:
+    """The case, the customer's history if any (wrapped as untrusted), and the request."""
+    text = render_case(inputs)
+    if inputs.customer_memory:
+        text += "\n\n" + render_history(inputs.customer_memory)
+    return text + "\n\nDraft the resolution now."
+
+
 def initial_messages(inputs: ResolutionInputs) -> list[ChatMessage]:
-    return [
-        system_message(load_prompt()),
-        user_message(render_case(inputs) + "\n\nDraft the resolution now."),
-    ]
+    return [system_message(load_prompt()), user_message(_draft_request(inputs))]
 
 
 def _allowed_citations_text(inputs: ResolutionInputs) -> str:
@@ -188,7 +199,7 @@ def revision_messages(
         )
     return [
         system_message(load_prompt()),
-        user_message(render_case(inputs) + "\n\nDraft the resolution now."),
+        user_message(_draft_request(inputs)),
         ChatMessage(role="assistant", content=previous.model_dump_json()),
         user_message(request),
     ]

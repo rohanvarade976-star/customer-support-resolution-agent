@@ -42,6 +42,7 @@ from support_agent.db.seed import load_scenarios, seed
 from support_agent.domain.enums import (
     ApprovalDecision,
     JobStatus,
+    JobType,
     ProposalStatus,
     RunStatus,
     TicketStatus,
@@ -375,14 +376,14 @@ async def test_an_approval_nobody_decides_expires_and_escalates_the_run(
     assert approval is not None
 
     # Before its expiry, the sweep leaves it alone.
-    await queue.schedule_expiry_sweep(session, now=clock(), max_attempts=3)
+    await queue.schedule_sweep(session, JobType.EXPIRE_APPROVALS, now=clock(), max_attempts=3)
     assert await drain_jobs() == 1
     assert (await reload(session, WorkflowRun, run_id)).status == RunStatus.AWAITING_APPROVAL
 
     # After it, the worker's scheduled sweep expires it and the run resumes into escalation.
     clock.now = NOW + timedelta(minutes=wire_app.approval_ttl_minutes, seconds=1)
     deps = worker_deps()
-    await queue.schedule_expiry_sweep(session, now=deps.clock(), max_attempts=3)
+    await queue.schedule_sweep(session, JobType.EXPIRE_APPROVALS, now=deps.clock(), max_attempts=3)
     assert await drain_jobs() == 2  # the sweep, then the run's resume
 
     assert (await reload(session, Approval, approval.id)).decision == ApprovalDecision.EXPIRED

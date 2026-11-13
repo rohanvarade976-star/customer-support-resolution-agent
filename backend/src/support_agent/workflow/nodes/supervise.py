@@ -24,6 +24,7 @@ async def supervise(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str, ob
             category=TicketCategory(classification.category),
             order_number=order_number,
             tier=deps.tool_context.settings.supervisor_tier,
+            customer_memory=state.get("customer_memory", ""),
         )
     except LLMUnavailableError:
         return {"errors": [WorkflowError.LLM_UNAVAILABLE]}

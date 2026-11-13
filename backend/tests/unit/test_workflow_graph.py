@@ -211,8 +211,15 @@ def test_normalize_order_number(raw: str | None, expected: str | None) -> None:
 
 async def test_nodes_return_only_the_fields_they_change() -> None:
     state = make_state("ORD-1001")
+    world = FakeWorld()
+    deps = fake_deps(scripted_client(AgentFake({})), world)
 
-    assert await intake(state) == {"status": RunStatus.INVESTIGATING, "order_number": "ORD-1001"}
+    assert await intake(state, deps=deps) == {
+        "status": RunStatus.INVESTIGATING,
+        "order_number": "ORD-1001",
+        "customer_memory": "",
+    }
+    assert world.memory_loaded_for == [CUSTOMER]  # the state's customer, set by code
     assert await needs_clarification(state) == {
         "status": RunStatus.AWAITING_CUSTOMER,
         "asked_for": AskedFor.CLARIFICATION,

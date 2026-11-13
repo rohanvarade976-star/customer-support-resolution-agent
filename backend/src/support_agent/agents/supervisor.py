@@ -8,6 +8,10 @@ investigator and the policy agent to run and gives each a short focus hint. Code
 - keeps the hints as plain text. They are model output, so whoever uses them wraps them as
   untrusted data (agents/investigator.py, agents/policy.py).
 
+The customer's long-term memory (rendered by code, ADR-013) is shown as untrusted
+background, like the complaint. It can only make the model add a specialist, never remove a
+required one.
+
 The supervisor only affects information gathering. It never sees or sets eligibility, an
 amount or the final action: those come from code, the resolution agent and a human.
 """
@@ -19,6 +23,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from support_agent.agents.history import render_history
 from support_agent.domain.enums import TicketCategory
 from support_agent.llm.client import LLMClient
 from support_agent.llm.tool_loop import wrap_untrusted
@@ -87,16 +92,17 @@ async def supervise(
     category: TicketCategory,
     order_number: str,
     tier: ModelTier,
+    customer_memory: str = "",
 ) -> SupervisorPlan:
     """May raise LLMUnavailableError or StructuredOutputError (the workflow node handles them)."""
+    text = (
+        f"Complaint category: {category.value}\nOrder number: {order_number}\n\n"
+        + wrap_untrusted("customer_complaint", complaint_text)
+    )
+    if customer_memory:  # background only, wrapped as untrusted data
+        text += "\n\n" + render_history(customer_memory)
     decision = await llm.structured(
-        [
-            system_message(load_prompt()),
-            user_message(
-                f"Complaint category: {category.value}\nOrder number: {order_number}\n\n"
-                + wrap_untrusted("customer_complaint", complaint_text)
-            ),
-        ],
+        [system_message(load_prompt()), user_message(text)],
         SupervisorDecision,
         tier=tier,
     )
