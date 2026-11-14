@@ -52,7 +52,9 @@ from support_agent.api.deps import (
 )
 from support_agent.core.config import Settings, get_settings
 from support_agent.core.security import hash_password
+from support_agent.db.base import Base
 from support_agent.db.models import AuditEvent, Customer, CustomerMemory, Job, Ticket, WorkflowRun
+from support_agent.db.seed import load_scenarios, seed
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import RetrySettings, RoutedLLMClient
 from support_agent.llm.disabled import DisabledLLMClient
@@ -459,4 +461,29 @@ async def committed_ticket(
             await db.execute(delete(WorkflowRun).where(WorkflowRun.ticket_id == ticket_id))
             await db.execute(delete(Ticket).where(Ticket.id == ticket_id))
             await db.execute(delete(Customer).where(Customer.id == customer_id))
+            await db.commit()
+
+
+@pytest.fixture
+async def committed_world(
+    committed_sessions: async_sessionmaker[AsyncSession], demo_password_hash: str
+) -> AsyncIterator[None]:
+    """The demo seed (at SEED_NOW) and the policies, committed for real.
+
+    For tests that need several connections to see the same orders, proposals and refunds
+    (the money races). Afterwards every app table and the mock provider's refunds are
+    emptied, so the next test finds the database as empty as `migrated_database` left it.
+    """
+    async with committed_sessions() as db:
+        await seed(db, load_scenarios(), SEED_NOW, demo_password_hash)
+        await ingest_policies(db, load_policy_directory(POLICY_DIR), FakeEmbedder())
+        await db.commit()
+    try:
+        yield
+    finally:
+        tables = ", ".join(table.name for table in Base.metadata.sorted_tables)
+        async with committed_sessions() as db:
+            await db.execute(text(f"TRUNCATE {tables} CASCADE"))  # names from our own models
+            if await db.scalar(text("SELECT to_regclass('mock_payments.refunds') IS NOT NULL")):
+                await db.execute(text("TRUNCATE mock_payments.refunds"))
             await db.commit()

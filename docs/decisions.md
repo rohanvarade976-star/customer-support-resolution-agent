@@ -1090,3 +1090,126 @@ FR-19).
 - A run that was `completed` with a `submitted` refund can later become `failed` (the
   provider declined it) or `escalated` (checks exhausted). That is intended: the earlier
   status only ever said the provider had accepted the request.
+
+
+---
+
+## ADR-015: Money invariants, and how crash, race and chaos tests verify them
+
+- **Date:** 2026-11-14
+- **Status:** Accepted
+- **Milestone:** M8
+
+### Context
+
+M8 promises that retries, restarts and concurrent requests can never duplicate or lose a
+refund (PRD "Definition of done"; ADR-004, ADR-012, ADR-014). Example-based tests show the
+paths we thought of. They do not show what happens when the process dies between two
+statements, when two actors hit the same row at the same moment, or when the provider
+misbehaves in a combination nobody wrote down. We need the rules stated once, a way to check
+them that does not trust the code it checks, and tests that attack the code from those
+three directions.
+
+### Decision
+
+1. **The invariants**, checked by `services/invariants.py` (SQL in
+   `repositories/invariants.py`). Each violation is a code plus ids, never customer data:
+
+   | Code | Rule |
+   |---|---|
+   | `REFUNDS_EXCEED_PAID` | Per order, refunds that did not fail add up to at most the paid amount. |
+   | `REFUND_NOT_APPROVED` | Every refund has an approved approval whose hash equals the hash of its proposal's payload, **recomputed** by the checker. |
+   | `REFUND_DIFFERS_FROM_PROPOSAL` | The refund's amount and order are the approved ones. |
+   | `DUPLICATE_REFUND_FOR_PROPOSAL` | At most one refund per proposal (the unique constraint is not trusted). |
+   | `PROVIDER_REFUND_MISSING` / `PROVIDER_REFUND_ORPHAN` | Our refunds and the provider's match by idempotency key, both ways. A `reserved` or `pending_reconciliation` refund may lack a provider record. |
+   | `PROVIDER_AMOUNT_MISMATCH` / `PROVIDER_REFERENCE_MISMATCH` / `PROVIDER_OUTCOME_MISMATCH` | Same amount, same reference, and never "succeeded" on one side with "failed" on the other. |
+   | `TICKET_RESOLVED_WITHOUT_REFUND` | A ticket whose latest run made a refund is resolved only if that refund succeeded, at the provider too. |
+   | `TICKET_BEHIND_REFUND` | A succeeded refund's ticket is resolved, unless its run is with a person (escalated). |
+   | `REFUND_UNWATCHED` | An unsettled refund has a next reconciliation check, or its run is escalated (ADR-014 hands it to a person). |
+   | `RUN_STUCK_EXECUTING` | An executing run has a scheduled refund check or an open job. |
+
+   The checker is **independent**: it only reads tables and reuses no service query. It
+   reads the mock provider's table when that table is in the same database
+   (`to_regclass`), as plain SQL, without importing the provider's code. The seed's past
+   refunds (keys starting `seed-refund-`, `HISTORY_KEY_PREFIX` in `db/seed.py`) are skipped
+   in the provider comparison only: they stand for refunds made before the provider
+   existed, so the provider cannot know them. They are still checked against their
+   proposals and approvals.
+
+2. **A grace period for the "left behind" rules.** The last three rules are about time: on
+   a live system, a run between two of its commits looks stuck for a moment. Those rules
+   skip rows whose `updated_at` is newer than `INVARIANT_GRACE_SECONDS` (default 900),
+   measured with the database's clock, the same clock that wrote `updated_at`. Tests use 0.
+   `scripts/check_invariants.py` runs the checker read-only (it rolls back) against
+   `DATABASE_URL` and exits 1 on any violation; `--grace-seconds` overrides the grace.
+
+3. **Crash points** (`core/crash_points.py`). The refund executor calls `reached(point)`
+   after the reservation is committed, after the provider answers, and after the outcome
+   is written but before the run and ticket are updated. Nothing is armed unless a test
+   arms it, and arming is refused when `APP_ENV=production`. The crash is a
+   `SimulatedCrash(BaseException)`: the worker's `except Exception` does not catch it, so
+   the job stays `running` until its lease runs out, exactly like a killed process, and the
+   test rolls back the open transaction as a dropped connection would.
+   `tests/integration/test_crash_recovery.py` crashes at each point and lets a new worker
+   and the reconciler recover. The third point behaves like the second: the outcome and
+   the run/ticket updates are one transaction, so the crash loses both and there is never a
+   half-recorded refund. The test asserts exactly that.
+
+4. **Races on separate committed connections** (`tests/integration/test_money_races.py`,
+   with the `committed_world` fixture: the seed committed for real, every table truncated
+   afterwards). The interleavings are forced with events and barriers, not left to timing:
+   two executions of one approval after both passed the early check; two reviewers
+   approving at once; approval against the expiry sweep, with each side taking the lock
+   first; and the executor and the reconciler each arriving late on the same operation.
+
+5. **Seeded chaos** (`tests/integration/test_money_chaos.py`). Random sequences of manual
+   and workflow cases, approvals, rejections, expiries, clock jumps, worker and reconciler
+   sweeps and crash points, with every provider request facing a seeded fault (connect
+   error, 500, reply lost after the work was done, 504, slow, decline). Afterwards the
+   faults stop, the worker settles what it can, and the checker must report nothing; the
+   provider must hold no refund we did not ask for and never more per order than was paid.
+   The seed is in the test id and in the failure notes, with the step log. CI runs 6 seeds
+   of 40 steps (about 25 s); `CHAOS_SEED`, `CHAOS_SEEDS` and `CHAOS_STEPS` replay or widen
+   it. As a check of the test itself, a deliberately broken resend key was caught by 3 of
+   the 6 default seeds.
+
+6. **Bug found and fixed: the workflow's save could undo the reconciler.** The refund step
+   reads the refund's status, the graph saves a checkpoint, then `save_segment` writes the
+   run status, ticket status and reply from what the step read. If the reconciler (on
+   another worker) settled the refund in that gap, the save put a resolved ticket back to
+   "in progress", or an escalated run back to "executing" with nothing left to finish it.
+   `save_segment` now locks the refund row (the lock the reconciler's settle takes first)
+   and, if the refund's status has moved on or the run was escalated, leaves the run,
+   ticket and reply as the reconciler wrote them. Two race tests reproduce both cases and
+   failed before the fix.
+
+### Alternatives considered
+
+- **Assertions in each test, no shared checker:** every test would restate the rules and
+  check only what its author thought of. One checker run after every scenario finds
+  problems nobody was looking for.
+- **Database constraints or triggers for every rule:** "refunds per order never exceed the
+  paid amount" spans rows, and the provider's table belongs to another service.
+  Constraints stay where they fit (unique proposal, positive amounts); the checker covers
+  the rest, including what the constraints already promise.
+- **Monkeypatching functions to simulate crashes:** works today (some older tests do it)
+  but breaks silently when code moves. Named points document where the dangerous moments
+  are and cost one comparison in production.
+- **Crashing with an ordinary exception:** the worker would catch it and schedule a tidy
+  retry, which tests the retry path, not a dead process.
+- **Property-based testing with Hypothesis:** better shrinking, but a new dependency whose
+  async and database support would need fixtures of its own. A seeded RNG with the seed and
+  step log printed gives replayable failures with what we already have.
+
+### Consequences
+
+- `scripts/check_invariants.py` can run any time, including against a live system, and is
+  worth adding to the eval report (M9).
+- The checker is only as good as its rules: a bug that breaks none of them goes unseen.
+  `tests/integration/test_invariants.py` plants each violation by hand to prove every rule
+  can fail.
+- The chaos test runs on one connection, so it explores orderings and faults, not true
+  parallelism; the race tests cover that. Row ids are random, so a replayed seed takes the
+  same decisions but may process due rows in a different order.
+- `committed_world` truncates every app table after its test, so tests using it must not
+  run in parallel with other database tests (none do today).

@@ -27,7 +27,9 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.core import crash_points
 from support_agent.core.config import Settings
+from support_agent.core.crash_points import CrashPoint
 from support_agent.core.errors import AppError
 from support_agent.db.models import ActionProposal, RefundOperation, Ticket, WorkflowRun
 from support_agent.domain.eligibility import check_eligibility
@@ -127,6 +129,7 @@ async def execute_approved_refund(
     operation, created = await _reserve(session, case, now, stale_after)
     if not created:
         return operation
+    crash_points.reached(CrashPoint.AFTER_RESERVE)  # tests only (ADR-015)
 
     outcome = await send_refund(
         payments,
@@ -134,6 +137,7 @@ async def execute_approved_refund(
         amount_minor=operation.amount_minor,
         payload=case.payload,
     )
+    crash_points.reached(CrashPoint.AFTER_PROVIDER_CALL)  # tests only (ADR-015)
     await _record_outcome(session, case, operation, outcome, now)
     return operation
 
@@ -322,6 +326,7 @@ async def _record_outcome(
             "error_code": outcome.error_code,
         },
     )
+    crash_points.reached(CrashPoint.AFTER_RECORD)  # tests only (ADR-015)
 
     if outcome.status in ACCEPTED_STATUSES:
         await proposals.set_proposal_status(session, case.proposal, ProposalStatus.EXECUTED)

@@ -73,6 +73,21 @@ async def get_for_proposal(session: AsyncSession, proposal_id: UUID) -> RefundOp
     return await session.scalar(stmt)
 
 
+async def lock_for_proposal(session: AsyncSession, proposal_id: UUID) -> RefundOperation | None:
+    """The proposal's refund operation, locked until the caller commits; None if there is none.
+
+    The reconciler's settle (`lock_if_held`) takes the same lock first, so whoever locks
+    second sees what the first one committed.
+    """
+    stmt = (
+        select(RefundOperation)
+        .where(RefundOperation.proposal_id == proposal_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return await session.scalar(stmt)
+
+
 async def insert_reserved(
     session: AsyncSession,
     *,

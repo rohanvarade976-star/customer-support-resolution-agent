@@ -180,6 +180,11 @@ class Settings(BaseSettings):
     # (or while) calling the provider. Must outlast the executor's own provider call.
     reconcile_stale_reserved_seconds: int = Field(default=300, ge=1, le=86400)
 
+    # Money invariant checker (services/invariants.py, ADR-015). The "stuck" checks only
+    # report a row untouched for this long, so a live system's in-flight work is not
+    # mistaken for a stuck one. Tests use 0.
+    invariant_grace_seconds: int = Field(default=900, ge=0, le=86400)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
