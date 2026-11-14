@@ -366,6 +366,26 @@ async def latest_checkpoint_id(checkpointer: Checkpointer, thread_id: str) -> st
     return checkpoint_id
 
 
+async def cited_policy_keys(checkpointer: Checkpointer, thread_id: str) -> list[str]:
+    """The policy citations (chunk keys) the run's latest checkpoint holds, for the reviewer.
+
+    From the policy agent's grounded rules and the accepted resolution draft. These are
+    model-chosen strings: the caller must keep only keys that exist in `policy_chunks`
+    (services/approvals.py does) and show our own policy text, never the model's wording.
+    A run with no checkpoint (a manual M3 run) has none.
+    """
+    saved = await checkpointer.aget_tuple(thread_config(thread_id))
+    if saved is None:
+        return []
+    values = saved.checkpoint.get("channel_values", {})
+    keys: list[str] = []
+    findings = getattr(values.get("policy"), "findings", None)
+    keys.extend(rule.citation for rule in getattr(findings, "rules", []))
+    draft = getattr(values.get("outcome"), "draft", None)
+    keys.extend(getattr(draft, "policy_citations", []))
+    return list(dict.fromkeys(key for key in keys if isinstance(key, str)))  # unique, in order
+
+
 async def advance_workflow(
     deps: WorkflowDeps,
     checkpointer: Checkpointer,

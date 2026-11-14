@@ -14,7 +14,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from support_agent.db.models import Order, Return
+from support_agent.db.models import Order, PolicyDocument, Return
 from support_agent.domain.eligibility import EligibilityDecision, OrderFacts, check_eligibility
 from support_agent.domain.enums import ReturnStatus
 from support_agent.domain.money import refund_totals
@@ -32,6 +32,8 @@ class LoadedOrder:
     order_number: str
     currency: str
     facts: OrderFacts
+    # The refund policy version in force on the order's placed_at date; None if none applies.
+    refund_policy: PolicyDocument | None = None
 
 
 def _latest_active_return(order: Order) -> Return | None:
@@ -62,7 +64,7 @@ async def load_order(session: AsyncSession, customer_id: UUID, order_number: str
         in_progress_refunds_minor=in_progress,
         refund_window_days=None if policy is None else policy.refund_window_days,
     )
-    return LoadedOrder(order.id, order.order_number, order.currency, facts)
+    return LoadedOrder(order.id, order.order_number, order.currency, facts, policy)
 
 
 async def check_refund_eligibility(

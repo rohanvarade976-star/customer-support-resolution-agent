@@ -1,0 +1,9 @@
+# Kept out of the frontend image's build context.
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore

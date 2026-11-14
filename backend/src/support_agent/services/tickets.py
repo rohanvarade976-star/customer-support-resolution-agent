@@ -9,8 +9,9 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.core.errors import AppError
+from support_agent.db.models import WorkflowRun
 from support_agent.domain.enums import Role
-from support_agent.repositories import orders, tickets
+from support_agent.repositories import orders, tickets, workflow_runs
 from support_agent.repositories.tickets import TicketRecord
 from support_agent.schemas.auth import Principal
 from support_agent.schemas.tickets import (
@@ -30,7 +31,7 @@ def _is_staff(principal: Principal) -> bool:
     return principal.role in (Role.REVIEWER, Role.ADMIN)
 
 
-def _customer_view(record: TicketRecord) -> TicketResponse:
+def _customer_view(record: TicketRecord, latest_run: WorkflowRun | None = None) -> TicketResponse:
     ticket = record.ticket
     return TicketResponse(
         id=ticket.id,
@@ -39,13 +40,15 @@ def _customer_view(record: TicketRecord) -> TicketResponse:
         status=ticket.status,
         summary=ticket.summary,
         created_at=ticket.created_at,
+        latest_run_id=None if latest_run is None else latest_run.id,
+        latest_run_status=None if latest_run is None else latest_run.status,
     )
 
 
 def _to_response(
-    record: TicketRecord, principal: Principal
+    record: TicketRecord, principal: Principal, latest_run: WorkflowRun | None = None
 ) -> ReviewerTicketResponse | TicketResponse:
-    customer_view = _customer_view(record)
+    customer_view = _customer_view(record, latest_run)
     if not _is_staff(principal):
         return customer_view
     return ReviewerTicketResponse(
@@ -89,8 +92,10 @@ async def list_tickets(
         records = await tickets.list_for_customer(session, principal.id, limit=limit, offset=offset)
     else:
         records = []
+    # Only the tickets already listed for this caller, so the runs are scoped the same way.
+    runs = await workflow_runs.latest_for_tickets(session, [r.ticket.id for r in records])
     items: list[ReviewerTicketResponse | TicketResponse] = [
-        _to_response(record, principal) for record in records
+        _to_response(record, principal, runs.get(record.ticket.id)) for record in records
     ]
     return TicketListResponse(items=items, limit=limit, offset=offset)
 
@@ -104,4 +109,5 @@ async def get_ticket(
     owns_it = principal.role == Role.CUSTOMER and record.ticket.customer_id == principal.id
     if not (owns_it or _is_staff(principal)):
         raise ticket_not_found()  # same answer as "no such ticket"
-    return _to_response(record, principal)
+    runs = await workflow_runs.latest_for_tickets(session, [record.ticket.id])
+    return _to_response(record, principal, runs.get(record.ticket.id))

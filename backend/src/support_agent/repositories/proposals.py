@@ -209,3 +209,29 @@ async def record_decision(
     approval.reviewer_id = reviewer_id
     approval.decided_at = decided_at
     await session.flush()
+
+
+@dataclass(frozen=True)
+class ApprovalCaseRecord:
+    """An approval with everything around it: proposal, run, ticket and customer name."""
+
+    approval: Approval
+    proposal: ActionProposal
+    run: WorkflowRun
+    ticket: Ticket
+    customer_name: str
+
+
+async def get_approval_case(session: AsyncSession, approval_id: UUID) -> ApprovalCaseRecord | None:
+    """One approval and its case, in one joined query. Read only: nothing is locked."""
+    stmt = (
+        select(Approval, ActionProposal, WorkflowRun, Ticket, Customer.name)
+        .join(ActionProposal, ActionProposal.id == Approval.proposal_id)
+        .join(WorkflowRun, WorkflowRun.id == ActionProposal.run_id)
+        .join(Ticket, Ticket.id == WorkflowRun.ticket_id)
+        .join(Customer, Customer.id == Ticket.customer_id)
+        .where(Approval.id == approval_id)
+        .execution_options(populate_existing=True)
+    )
+    row = (await session.execute(stmt)).first()
+    return None if row is None else ApprovalCaseRecord(*row)

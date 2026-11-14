@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import exists, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -121,3 +122,22 @@ async def add_usage(
     run.input_tokens += input_tokens
     run.output_tokens += output_tokens
     await session.flush()
+
+
+async def latest_for_tickets(
+    session: AsyncSession, ticket_ids: list[UUID]
+) -> dict[UUID, WorkflowRun]:
+    """Each ticket's newest run, keyed by ticket id. Tickets with no run are left out.
+
+    The caller has already limited `ticket_ids` to tickets the user may see.
+    """
+    if not ticket_ids:
+        return {}
+    stmt = (
+        select(WorkflowRun)
+        .where(WorkflowRun.ticket_id.in_(ticket_ids))
+        # DISTINCT ON keeps the first row per ticket in this order: the newest run.
+        .ext(distinct_on(WorkflowRun.ticket_id))
+        .order_by(WorkflowRun.ticket_id, WorkflowRun.started_at.desc(), WorkflowRun.id.desc())
+    )
+    return {run.ticket_id: run for run in (await session.scalars(stmt)).all()}

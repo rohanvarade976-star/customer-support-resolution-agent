@@ -48,6 +48,7 @@ from support_agent.api.deps import (
     get_llm_client,
     get_payment_client,
     get_session,
+    get_session_factory,
     get_shipping_client,
 )
 from support_agent.core.config import Settings, get_settings
@@ -262,6 +263,8 @@ def app(
     application.dependency_overrides[get_shipping_client] = test_shipping_client
     application.dependency_overrides[get_embedder] = lambda: FakeEmbedder()
     application.dependency_overrides[get_branch_sessions] = lambda: branch_sessions
+    # A live stream's polls (ADR-019) also see the rolled-back test session.
+    application.dependency_overrides[get_session_factory] = lambda: branch_sessions
     application.dependency_overrides[get_checkpointer] = lambda: checkpointer
     return application
 

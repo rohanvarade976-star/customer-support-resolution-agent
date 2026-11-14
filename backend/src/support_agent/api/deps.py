@@ -13,7 +13,7 @@ these same dependencies (tests/integration/conftest.py), so their overrides stil
 """
 
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated, cast
@@ -64,6 +64,23 @@ def get_branch_sessions() -> BranchSessions:
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+# The same session, but closed when the route function returns, BEFORE the response body is
+# sent. For streaming routes: a request-scoped session would stay open (in a transaction)
+# for as long as the stream does.
+ShortSessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
+
+
+def get_session_factory() -> Callable[[], AbstractAsyncContextManager[AsyncSession]]:
+    """Opens one short-lived session per use. A live stream polls with it (ADR-019).
+
+    Tests override it to hand out the rolled-back test session.
+    """
+    return _new_session
+
+
+SessionFactoryDep = Annotated[
+    Callable[[], AbstractAsyncContextManager[AsyncSession]], Depends(get_session_factory)
+]
 
 Clock = Callable[[], datetime]
 
@@ -132,6 +149,20 @@ async def get_current_principal(
 
 
 PrincipalDep = Annotated[Principal, Depends(get_current_principal)]
+
+
+async def get_streaming_principal(
+    session: ShortSessionDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> Principal:
+    """The same check as `get_current_principal`, on a session closed before streaming."""
+    if credentials is None:
+        raise auth_service.unauthenticated()
+    return await auth_service.authenticate_token(session, settings, credentials.credentials)
+
+
+StreamingPrincipalDep = Annotated[Principal, Depends(get_streaming_principal)]
 
 
 def require_customer(principal: PrincipalDep) -> Principal:

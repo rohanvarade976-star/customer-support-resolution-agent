@@ -57,16 +57,18 @@ drifts, but refund eligibility uses the real clock, so scenarios slowly stop mat
 ## Run everything with Docker (from the repo root)
 
 One image (`backend/Dockerfile`) runs the API, the worker and the mock payment and shipping
-providers. Only the command differs. Postgres stays the `pgvector/pgvector:pg16` image.
+providers. Only the command differs. A second, small image (`frontend/Dockerfile`) serves the
+React app. Postgres stays the `pgvector/pgvector:pg16` image.
 You need Docker Desktop and a `.env` (copy `.env.example`). Secrets are read from `.env`
 when containers start and are never copied into the image.
 
 ```powershell
-# 1. Build the image (code-only changes later reuse the cached dependency layer)
+# 1. Build the images (code-only changes later reuse the cached dependency layers)
 docker compose --profile app build
 
 # 2. Start everything. The order is automatic: postgres (healthy) -> migrate
 #    (alembic upgrade head, then exits) -> mock-payments, mock-shipping (healthy) -> api, worker
+#    -> frontend
 docker compose --profile app up -d
 docker compose --profile app ps          # all "healthy"; migrate "Exited (0)"
 
@@ -76,6 +78,7 @@ docker compose run --rm seed
 # 4. Use it
 Invoke-RestMethod http://localhost:8000/health   # status ok, database ok
 Start-Process http://localhost:8000/docs         # interactive API docs
+Start-Process http://localhost:3000              # the web app (log in with a demo account)
 
 # 5. Logs (JSON lines); -f follows them, Ctrl+C stops following
 docker compose logs -f api worker
@@ -93,6 +96,7 @@ docker compose --profile app down
 | `mock-shipping` | 8002 | `uvicorn mock_providers.shipping.app:create_app` |
 | `migrate` | none | `alembic upgrade head`, then exits |
 | `seed` | none | migrate, `scripts/ingest_policies.py`, `scripts/seed_db.py` (only with `run`) |
+| `frontend` | 3000 | nginx (non-root) serving the built React app |
 
 Notes:
 
@@ -114,7 +118,26 @@ Notes:
   embedding model is the largest) and 65 MB the model itself.
 - **Tracing:** `docker compose --profile app --profile tracing up -d` adds Jaeger; set
   `OTEL_EXPORTER=otlp` in `.env`. The containers already send to `http://jaeger:4318`.
+- **The frontend image** is 82 MB. The browser calls the API directly, at the address built
+  into the JavaScript: `FRONTEND_API_BASE_URL` in `.env` (default `http://localhost:8000`), then
+  rebuild. That address's origin must be in the API's `CORS_ALLOWED_ORIGINS`.
 - **Rebuild after code changes:** `docker compose --profile app up -d --build`.
+
+## Run the frontend locally (from `frontend/`, next to the API)
+
+Needs Node 22.13 or newer. Start the API as below (or with Docker), then:
+
+```powershell
+npm ci                                  # install exactly what package-lock.json lists
+npm run dev                             # http://localhost:5173
+```
+
+Log in as a demo customer (`priya@example.com`) or reviewer (`anita@example.com`) with your
+`DEMO_PASSWORD`. To watch a run live, the worker must be running too. The API address
+defaults to `http://localhost:8000`; to change it, copy `.env.example` to `.env.local` and set
+`VITE_API_BASE_URL`. Checks: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`.
+See `frontend/README.md` for the pages and the code layout, and ADR-019 for the design (live
+status over Server-Sent Events, token storage, CORS).
 
 ## Run the API (from `backend/`)
 
@@ -177,6 +200,15 @@ $ticket = Invoke-RestMethod -Method Post http://localhost:8000/tickets -Headers 
 $run = Invoke-RestMethod -Method Post "http://localhost:8000/tickets/$($ticket.id)/runs" -Headers $h
 $run.status            # created: queued, not run yet
 Invoke-RestMethod "http://localhost:8000/runs/$($run.run_id)" -Headers $h   # status and job
+```
+
+The run's live status, as the web app sees it (ADR-019): `GET /runs/{id}/events` returns the
+status, the verified reply and the steps as JSON; `GET /runs/{id}/stream` sends the same as
+Server-Sent Events, then each change as it happens (the token goes in the header, never the URL):
+
+```powershell
+(Invoke-RestMethod "http://localhost:8000/runs/$($run.run_id)/events" -Headers $h).steps | Format-Table type, at
+curl.exe -N -H "Authorization: Bearer $($login.access_token)" "http://localhost:8000/runs/$($run.run_id)/stream"
 ```
 
 The jobs themselves:

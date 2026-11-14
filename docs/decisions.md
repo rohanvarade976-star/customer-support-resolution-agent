@@ -1671,3 +1671,134 @@ Spans and metrics carry only ids, codes, counts, model names, route templates an
 - Job payloads may now hold a `traceparent` key. Handlers ignore keys they do not read.
 - Any new span attribute must be added to `ALLOWED_ATTRIBUTES`, and any new metric label must be a
   small fixed set.
+
+---
+
+## ADR-019: The React frontend: live status over SSE, token storage, CORS and the reviewer case view
+
+- **Date:** 2026-11-14
+- **Status:** Accepted
+- **Milestone:** M10
+
+### Context
+
+The PRD asks for a thin client with two role-based areas (PRD "User interface"). Customers raise a
+complaint, follow it live (FR-22), answer the run's question and manage their memory. Reviewers work
+the approval queue with the evidence in front of them. The API already had the routes for actions,
+but not for watching a run, for the verified reply, or for the evidence behind an approval. A
+browser client also brings three questions the API never had: how a browser may call it (CORS), how
+a browser keeps the token, and how a live stream is authenticated.
+
+### Decision
+
+1. **A static React app that only displays.** React + TypeScript (strict) + Vite + Tailwind, with
+   `react-router-dom` for URLs and role-guarded pages. No data-fetching library, no UI kit, no SSE
+   library. The UI never computes eligibility, amounts or decisions: amounts are integer paise from
+   the API, formatted with integer arithmetic (`lib/money.ts`). The role comes from `GET /me`, never
+   from the login form. Route guards only keep people on the right pages; the API checks again.
+2. **Live status: Server-Sent Events read with `fetch()`, token in the `Authorization` header.**
+   - `GET /runs/{id}/stream` (`text/event-stream`) and `GET /runs/{id}/events` (the same snapshot as
+     JSON). Owner or staff only, through the same `load_visible_run` check as `GET /runs/{id}`:
+     anyone else gets 404.
+   - The browser's `EventSource` cannot send headers, so the token would have to go in the URL,
+     where it lands in proxy and server logs and in browser history. Instead the client reads the
+     stream with `fetch()` and a 40-line parser (`api/sse.ts`).
+   - Rejected: a short-lived single-use stream ticket (`POST /runs/{id}/stream-ticket`, then
+     `EventSource(...?ticket=...)`). It works with `EventSource`, but adds a table or cache, an extra
+     round trip, and a credential in the URL (short-lived, but still logged). Our client needs none
+     of what `EventSource` adds (its automatic reconnection is a few lines in `useRunStream`).
+   - Events: `status` (run status, ticket status, `finished`, and the ticket's `customer_reply`),
+     `step` (one per audit event), `end` (`finished` or `timeout`). Customers get only the PRD's
+     customer-visible event types and no payload: the browser turns each type into a fixed
+     sentence. Reviewers get every type plus payload fields from `REVIEWER_PAYLOAD_KEYS` whose values
+     look like ids or codes (`domain/run_events.py`), the same allowlist idea as tracing (ADR-018).
+     The reviewer's free-text note, staff ids and the idempotency key are never sent.
+   - The only free text is the verified reply, which the output guardrail checked before it was
+     saved (ADR-017) and which states only verified outcomes (FR-19).
+   - **Polling, not LISTEN/NOTIFY.** The stream sends the snapshot, then checks the database every
+     `SSE_POLL_INTERVAL_SECONDS` (1 s) and sends only what changed, with a comment line every
+     `SSE_HEARTBEAT_SECONDS` so proxies keep the connection open. Each poll opens and closes its own
+     session (no transaction or connection is held while waiting, CLAUDE.md rule 7) and re-checks
+     ownership. The authentication session is function-scoped (`ShortSessionDep`), so it is closed
+     before the first byte is streamed. LISTEN/NOTIFY would be faster, but needs one dedicated
+     connection per listener and does not work through Supabase's transaction pooler.
+   - **Bounded streams.** A stream ends when the run is finished (a finished run whose ticket is
+     still `in_progress` has a refund in flight, so its stream stays open), or after
+     `SSE_MAX_STREAM_SECONDS` (300 s). The client then reconnects with its current token, so an
+     expired or revoked token can never keep a stream alive.
+   - **Fallback.** If the stream fails, or drops without an `end` event, the client polls `/events`
+     every 3 s and retries the stream after a doubling delay (capped at 30 s). 401, 403 and 404 are
+     final.
+3. **Tokens: in memory, mirrored to `sessionStorage`.** The in-memory copy is what requests send; the
+   `sessionStorage` copy survives a reload of the same tab, is gone when the tab closes, is never
+   shared across tabs and is never sent by the browser on its own. Logout and any 401 clear both.
+   The trade-off: script running on the page could read it, so an XSS bug would expose a token
+   valid for up to an hour. Mitigations: React escapes all text and nothing renders raw HTML; the
+   container serves a strict Content-Security-Policy (only our own scripts and styles, network
+   access only to the API origin, no framing); tokens expire after `ACCESS_TOKEN_MINUTES`.
+   Rejected: `localStorage` (shared by all tabs and kept indefinitely, so a longer exposure) and an
+   httpOnly cookie (invisible to scripts, but needs CSRF protection, SameSite and cross-site cookie
+   rules between the frontend and API hosts, and a new login flow; it is the upgrade path).
+4. **CORS: an explicit allowlist from settings.** `CORS_ALLOWED_ORIGINS` (comma-separated; default
+   the Vite dev server and the frontend container). A validator refuses `*`, wildcards, paths and
+   anything without a scheme, so a typo cannot open the API to every site. Credentials are off
+   (bearer tokens, not cookies). Methods GET, POST and DELETE; headers `Authorization` and
+   `Content-Type`; `Retry-After` is exposed so the UI can say how long to wait after a 429.
+5. **The reviewer case view: `GET /approvals/{approval_id}`.** Reviewers only (403 for customers).
+   Everything is stored or computed by code: the proposal payload as stored and hashed, the order's
+   facts read now through the eligibility service with the rules applied now, the refund policy
+   version in force on the order's date, and the refund operation's status once one exists. The
+   policy citations are the chunk keys the run cited (read from its checkpoint), **kept only if they
+   exist in `policy_chunks`** and shown with our own section text, never the model's paraphrase.
+   Model-written facts and rationales are not shown, because they are not verified. The complaint is
+   the customer's own text, shown as plain text.
+6. **"My tickets".** `TicketResponse` gains `latest_run_id` and `latest_run_status`, read only for
+   the tickets already listed for the caller (one `DISTINCT ON` query), so they are scoped exactly
+   like the tickets themselves.
+7. **The container.** A Node stage builds the static files; `nginxinc/nginx-unprivileged` serves
+   them as a non-root user, with the security headers, long caching for hashed assets, no caching
+   for `index.html`, and the single-page fallback. `VITE_API_BASE_URL` is built into the bundle (it
+   is public, never a secret), and the same origin fills the CSP's `connect-src` at startup.
+
+### Alternatives considered
+
+- **WebSockets:** two-way, which we do not need, and a second protocol for proxies and auth.
+- **The API serving the frontend's files (same origin):** no CORS at all, but couples the two
+  deployments, and the PRD deploys the frontend separately (Vercel or Cloudflare Pages).
+- **A data-fetching library (React Query, SWR):** caching and retries we do not need at this size;
+  a 40-line hook is easier to read.
+- **Showing model rationales to reviewers:** useful context, but unverified model text in the view
+  that approves money. The facts and our own policy text are what a decision should rest on.
+
+### Limits
+
+- **Event order before migration `e2b6c9d4a1f3`.** `audit_events.created_at` used to default to
+  `now()`, the transaction's start time, so every event of one saved segment of a run shared a
+  timestamp and the tie-break (a random UUID) shuffled them: a timeline could show
+  `run.escalated` before `run.classified`. The column now defaults to `clock_timestamp()`, read at
+  each insert, so new events keep the order they were written in
+  (`tests/integration/test_audit_order.py`, which fails under the old default). Events stored
+  before the migration keep their shared timestamps, and their order among themselves stays
+  arbitrary.
+- **One open connection per watching browser.** Polling costs one small query per second per open
+  stream. Fine for a demo; a busy system would want LISTEN/NOTIFY on a direct connection, or a
+  broker.
+- **No per-user limit on concurrent streams.** A client could open many; each is bounded in time.
+- **A token is readable by page scripts** (decision 3).
+- **The API URL is fixed per frontend build.** A different API means a rebuild.
+- **The case view re-reads the facts each time,** so after an approval the refund counts as "in
+  progress" and "eligible now" turns false. That is correct (the money is committed).
+
+### Consequences
+
+- New settings: `CORS_ALLOWED_ORIGINS`, `SSE_POLL_INTERVAL_SECONDS`, `SSE_MAX_STREAM_SECONDS`,
+  `SSE_HEARTBEAT_SECONDS`.
+- New routes: `GET /runs/{id}/events`, `GET /runs/{id}/stream`, `GET /approvals/{approval_id}`.
+  `TicketResponse` has two new optional fields.
+- New migration `e2b6c9d4a1f3`: `audit_events.created_at` defaults to `clock_timestamp()` (only the
+  default changes; no data is converted). Other tables keep `now()`, where one time per
+  transaction is what we want.
+- `services/runs.load_visible_run` is the one ownership check for anything about a run.
+- Any new audit payload key a reviewer should see must be added to `REVIEWER_PAYLOAD_KEYS`; any new
+  customer-facing event type to `CUSTOMER_EVENT_TYPES` and to the browser's labels.
+- CI gains a `frontend` job (lint, type check, tests, build).

@@ -6,10 +6,10 @@ Every other module reads config through `get_settings()`, never from `os.environ
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # config.py -> core -> support_agent -> src -> backend -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -213,6 +213,41 @@ class Settings(BaseSettings):
     # so it listens on loopback unless you change the host on purpose.
     worker_metrics_port: int | None = Field(default=None, ge=1, le=65535)
     worker_metrics_host: str = "127.0.0.1"
+
+    # Browser origins allowed to call the API (CORS, ADR-019). Comma-separated in .env.
+    # An explicit list only: "*" is refused, so a typo can never open the API to every site.
+    cors_allowed_origins: Annotated[list[str], NoDecode] = [
+        "http://localhost:5173",  # the Vite dev server
+        "http://localhost:3000",  # the frontend container
+    ]
+
+    # Live run status over Server-Sent Events (GET /runs/{id}/stream, ADR-019).
+    # How often an open stream checks the database for news.
+    sse_poll_interval_seconds: float = Field(default=1.0, gt=0, le=30)
+    # How long one stream stays open before the client must reconnect (and so present its
+    # token again). An expired token can never keep a stream alive past this.
+    sse_max_stream_seconds: float = Field(default=300.0, gt=0, le=3600)
+    # A comment line sent when nothing else was, so proxies do not close an idle stream.
+    sse_heartbeat_seconds: float = Field(default=15.0, gt=0, le=300)
+
+    @field_validator("cors_allowed_origins", mode="before")
+    @classmethod
+    def _split_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _explicit_origins(cls, value: list[str]) -> list[str]:
+        for origin in value:
+            if "*" in origin:
+                raise ValueError("CORS_ALLOWED_ORIGINS must list origins explicitly, never '*'")
+            if not origin.startswith(("http://", "https://")) or origin.endswith("/"):
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS entries look like https://example.com (no path)"
+                )
+        return value
 
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
