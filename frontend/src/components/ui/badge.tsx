@@ -17,6 +17,7 @@ const badgeVariants = cva(
         warning: "bg-warning-50 text-warning-800 ring-warning-200",
         danger: "bg-danger-50 text-danger-800 ring-danger-200",
         info: "bg-info-50 text-info-800 ring-info-200",
+        ai: "bg-ai-50 text-ai-800 ring-ai-200", // AI-generated content only (ADR-021)
       },
     },
     defaultVariants: { tone: "neutral" },
@@ -30,6 +31,7 @@ const DOT: Record<string, string> = {
   warning: "bg-warning-500",
   danger: "bg-danger-500",
   info: "bg-info-500",
+  ai: "bg-ai-500",
 };
 
 export type BadgeTone = NonNullable<VariantProps<typeof badgeVariants>["tone"]>;

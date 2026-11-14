@@ -19,6 +19,7 @@ from support_agent.core.config import Settings
 from support_agent.db.models import AuditEvent
 from support_agent.domain.enums import Role
 from support_agent.domain.run_events import (
+    checked_sources,
     compact_json,
     is_finished,
     reviewer_details,
@@ -35,6 +36,16 @@ from support_agent.services.runs import load_visible_run
 # Opens a short-lived session: `async with sessions() as session: ...`
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 Monotonic = Callable[[], float]
+
+
+def _checked(events: list[AuditEvent]) -> list[str]:
+    """What kinds of records the run checked, as fixed codes (the customer's "What we checked")."""
+    calls = [
+        (str(event.redacted_payload.get("tool")), str(event.redacted_payload.get("outcome")))
+        for event in events
+        if event.event_type == "tool.called"
+    ]
+    return checked_sources(calls)
 
 
 def _step(event: AuditEvent, reviewer: bool) -> RunStepEvent:
@@ -64,6 +75,7 @@ async def load_snapshot(session: AsyncSession, principal: Principal, run_id: UUI
         ticket_status=ticket.status,
         reply=ticket.customer_reply,
         finished=is_finished(run.status, ticket.status),
+        checked=_checked(events),
     )
     return RunSnapshot(run=status, steps=steps)
 

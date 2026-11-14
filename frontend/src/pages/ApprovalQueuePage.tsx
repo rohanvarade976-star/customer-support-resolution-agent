@@ -1,12 +1,27 @@
 // Reviewers: pending, unexpired refund approvals (GET /approvals) as a sortable table, with
 // the time left before each expires coloured by urgency. Sorting only reorders the rows the
 // API returned; the amounts are the stored proposals', formatted for display.
+//
+// Above the table, what the system did on its own this week; on each row, the AI's recommended
+// action (labelled as AI) and the risk flags computed by code (ADR-021). Both are codes from
+// the audit trail: the AI's rationale is shown on the case page only.
 
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, Clock, Inbox, RefreshCw } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  ChevronRight,
+  Clock,
+  Inbox,
+  RefreshCw,
+  ShieldExclamationPoint,
+  Sparkles,
+} from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import type { ApprovalList, PendingApproval } from "../api/types";
+import { AutomationSummaryCards } from "../components/ai/AutomationSummaryCards";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState, ErrorState, ListSkeleton } from "../components/states";
 import { Badge, type BadgeTone } from "../components/ui/badge";
@@ -15,6 +30,7 @@ import { Card } from "../components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { useApiGet } from "../hooks/useApiGet";
 import { useNow } from "../hooks/useNow";
+import { actionLabel, riskText } from "../lib/analysis";
 import { formatDateTime } from "../lib/labels";
 import { formatMoney } from "../lib/money";
 import { timeUntil, type Urgency } from "../lib/time";
@@ -43,6 +59,31 @@ function ExpiryBadge({ expiresAt, now }: { expiresAt: string; now: number }) {
     <Badge tone={URGENCY_TONE[left.urgency]} title={`Expires ${formatDateTime(expiresAt)}`}>
       <Clock aria-hidden="true" />
       {left.short}
+    </Badge>
+  );
+}
+
+function AiActionBadge({ action }: { action: string | null }) {
+  return (
+    <Badge tone="ai" title="The AI's recommendation. Not verified; the amount comes from the refund rules.">
+      <Sparkles aria-hidden="true" />
+      <span className="sr-only">AI recommends: </span>
+      {actionLabel(action)}
+    </Badge>
+  );
+}
+
+// Risk flags are computed by code; the badge lists them in its title and screen-reader text.
+function RiskIndicator({ flags }: { flags: string[] }) {
+  if (flags.length === 0) {
+    return <span className="text-xs text-gray-500">No flags</span>;
+  }
+  const titles = flags.map((code) => riskText(code).title);
+  return (
+    <Badge tone="warning" title={titles.join(" · ")} data-testid="risk-indicator">
+      <ShieldExclamationPoint aria-hidden="true" />
+      {flags.length === 1 ? (titles[0] ?? "1 flag") : `${String(flags.length)} risk flags`}
+      {flags.length > 1 && <span className="sr-only">: {titles.join(", ")}</span>}
     </Badge>
   );
 }
@@ -115,6 +156,8 @@ export function ApprovalQueuePage() {
         }
       />
 
+      <AutomationSummaryCards />
+
       {error !== null ? (
         <ErrorState message={error} onRetry={reload} />
       ) : loading ? (
@@ -160,8 +203,10 @@ export function ApprovalQueuePage() {
                     <p className="mt-0.5 truncate text-sm text-gray-600">
                       {item.order_number} · {item.reason}
                     </p>
-                    <div className="mt-2">
+                    <div className="mt-2 flex flex-wrap gap-2">
                       <ExpiryBadge expiresAt={item.expires_at} now={now} />
+                      <AiActionBadge action={item.ai_action} />
+                      {item.risk_flags.length > 0 && <RiskIndicator flags={item.risk_flags} />}
                     </div>
                   </div>
                   <ChevronRight className="size-4 shrink-0 text-gray-400" aria-hidden="true" />
@@ -178,7 +223,9 @@ export function ApprovalQueuePage() {
                   <SortHeader column="customer" label="Customer" sort={sort} onToggle={toggle} />
                   <SortHeader column="order" label="Order" sort={sort} onToggle={toggle} />
                   <SortHeader column="amount" label="Amount" sort={sort} onToggle={toggle} className="text-right" />
-                  <TableHead>Reason</TableHead>
+                  <TableHead className="hidden 2xl:table-cell">Reason</TableHead>
+                  <TableHead>AI recommendation</TableHead>
+                  <TableHead>Risk</TableHead>
                   <SortHeader column="expiry" label="Expires in" sort={sort} onToggle={toggle} />
                   <TableHead>
                     <span className="sr-only">Open</span>
@@ -192,18 +239,24 @@ export function ApprovalQueuePage() {
                     className="group cursor-pointer hover:bg-gray-50"
                     onClick={() => void navigate(`/approvals/${item.approval_id}`)}
                   >
-                    <TableCell>
+                    <TableCell className="whitespace-nowrap">
                       {/* The link makes each row reachable by keyboard; a click anywhere on the row does the same. */}
                       <Link to={`/approvals/${item.approval_id}`} className="rounded font-medium text-gray-900">
                         {item.customer_name}
                       </Link>
                     </TableCell>
-                    <TableCell className="text-gray-700">{item.order_number}</TableCell>
+                    <TableCell className="whitespace-nowrap text-gray-700">{item.order_number}</TableCell>
                     <TableCell className="text-right font-semibold text-gray-900 tabular-nums">
                       {formatMoney(item.amount_minor, item.currency)}
                     </TableCell>
-                    <TableCell className="max-w-72 truncate text-gray-600" title={item.reason}>
+                    <TableCell className="hidden max-w-60 truncate text-gray-600 2xl:table-cell" title={item.reason}>
                       {item.reason}
+                    </TableCell>
+                    <TableCell>
+                      <AiActionBadge action={item.ai_action} />
+                    </TableCell>
+                    <TableCell>
+                      <RiskIndicator flags={item.risk_flags} />
                     </TableCell>
                     <TableCell>
                       <ExpiryBadge expiresAt={item.expires_at} now={now} />

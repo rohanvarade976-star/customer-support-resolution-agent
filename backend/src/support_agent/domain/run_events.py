@@ -10,6 +10,10 @@ Pure functions, no I/O. The audit trail is the source; this decides what leaves 
   is dropped. A value that does not look like a token (a sentence, for example) is dropped
   too, even under an allowed key, like the tracing allowlist (ADR-018).
 
+Customers may also see *what kinds of records* were checked ("order", "shipment", ...): fixed
+codes mapped by code from the successful tool calls, never the tools' names or results
+(`checked_sources`, ADR-021).
+
 The only free text in a run's live status is the ticket's customer reply, which the output
 guardrail has already checked (ADR-017) and which states only verified outcomes.
 """
@@ -55,6 +59,7 @@ CUSTOMER_EVENT_TYPES: frozenset[str] = frozenset(
 REVIEWER_PAYLOAD_KEYS: frozenset[str] = frozenset(
     {
         "action",
+        "active_ms",
         "added_by_code",
         "amount_minor",
         "approval_id",
@@ -66,21 +71,25 @@ REVIEWER_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "codes",
         "confidence",
         "conflicting_passages",
+        "critic_ms",
         "critic_verdicts",
         "currency",
         "dropped_facts",
         "dropped_rules",
+        "duration_ms",
         "error_code",
         "expires_at",
         "extra_investigation_round",
         "facts",
         "failed_calls",
         "failure",
+        "fallback_calls",
         "from_status",
         "input_tokens",
         "latency_ms",
         "llm_calls",
         "missing_information",
+        "missing_required",
         "no_relevant_policy",
         "order_hint",
         "order_id",
@@ -118,6 +127,26 @@ _MAX_LIST_ITEMS = 20
 _FINISHED_RUN_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.ESCALATED, RunStatus.FAILED})
 
 Scalar = str | int | float | bool
+
+
+# What each read tool looks at, as a customer-safe code. A tool not listed is not shown.
+_SOURCE_FOR_TOOL: dict[str, str] = {
+    "get_order": "order",
+    "get_return_status": "return",
+    "get_payment_status": "payment",
+    "get_refundable_balance": "payment",
+    "get_shipment": "shipment",
+    "search_policy": "policy",
+    "check_refund_eligibility": "policy",
+}
+# The order the customer's card lists them in.
+CHECKED_SOURCES: tuple[str, ...] = ("order", "return", "payment", "shipment", "policy")
+
+
+def checked_sources(tool_calls: list[tuple[str, str]]) -> list[str]:
+    """The kinds of records successfully checked, from (tool, outcome) pairs, in fixed order."""
+    found = {_SOURCE_FOR_TOOL.get(tool) for tool, outcome in tool_calls if outcome == "ok"}
+    return [source for source in CHECKED_SOURCES if source in found]
 
 
 def is_finished(run_status: RunStatus, ticket_status: TicketStatus) -> bool:

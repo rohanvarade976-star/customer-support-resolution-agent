@@ -15,6 +15,10 @@ per call, `investigation.completed`, `policy.completed`, `resolution.completed`,
 `reply.guardrail_replaced` (codes of the output check that replaced a reply), `run.paused`,
 the run's end event, and `run.usage`. Refund events come from the refund executor itself.
 
+Agent events also carry `duration_ms` (the agent's time in this segment, from the meter), and
+`run.usage` carries `active_ms` (the segment's time) and `fallback_calls` (answers from a
+fallback provider): numbers only, for the reviewer's AI analysis (ADR-021).
+
 When the run has finished, its verified outcome is also remembered for the customer
 (services/memory.py, ADR-013): fixed codes derived from statuses, never text.
 
@@ -26,6 +30,8 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.agents.classifier import Classification
+from support_agent.agents.investigator import InvestigationOutcome
+from support_agent.agents.required_evidence import missing_required_tools
 from support_agent.agents.resolve import ESCALATION_MESSAGE
 from support_agent.core import metrics
 from support_agent.core.config import Settings
@@ -34,7 +40,7 @@ from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, Ticke
 from support_agent.domain.memory import memory_outcome
 from support_agent.domain.output_guard import check_reply
 from support_agent.llm.tool_loop import OUTCOME_OK, ToolCallRecord
-from support_agent.llm.usage import UsageMeter
+from support_agent.llm.usage import SEGMENT, UsageMeter
 from support_agent.repositories import audit, refunds, tickets, workflow_runs
 from support_agent.services import memory
 from support_agent.services.case_updates import set_run_status, set_ticket_status
@@ -70,9 +76,9 @@ async def save_segment(
     await _record_injection(session, run, written)
     classification = written.get("classification")
     if classification is not None:  # the classifier ran in this segment
-        await _record_classification(session, settings, run, ticket, written, classification)
-    await _record_gathering(session, run, written)
-    await _record_resolution(session, run, written)
+        await _record_classification(session, settings, run, ticket, written, classification, meter)
+    await _record_gathering(session, run, final, written, meter)
+    await _record_resolution(session, run, written, meter)
 
     details: dict[str, object] = {}
     if errors := written.get("errors"):
@@ -233,6 +239,7 @@ async def _record_classification(
     ticket: Ticket,
     written: WorkflowState,
     classification: Classification,
+    meter: UsageMeter,
 ) -> None:
     # Only a confident label becomes the ticket's category. A low-confidence guess is kept
     # in the audit event, but the ticket stays uncategorised until clarified.
@@ -251,6 +258,7 @@ async def _record_classification(
             "category": classification.category,
             "confidence": round(classification.confidence, 2),
             "order_hint": written.get("order_hint", OrderHint.NONE).value,
+            **_duration(meter, "classify"),
         },
     )
 
@@ -291,8 +299,33 @@ def _call_counts(trace: list[ToolCallRecord]) -> dict[str, int]:
     }
 
 
+def _duration(meter: UsageMeter, *steps: str, minus: str | None = None) -> dict[str, int]:
+    """{"duration_ms": n}: the time the meter holds for these graph steps in this segment.
+
+    Empty when none of them ran here (so an event never claims a time it did not measure).
+    `minus` takes out a step timed inside another one (the critic runs inside resolve_case).
+    """
+    times = [meter.durations_ms[step] for step in steps if step in meter.durations_ms]
+    if not times:
+        return {}
+    total = sum(times) - (meter.durations_ms.get(minus, 0) if minus else 0)
+    return {"duration_ms": max(total, 0)}
+
+
+def _missing_required(final: WorkflowState, investigation: InvestigationOutcome) -> list[str]:
+    """The required lookups that still have no successful call, computed by code."""
+    classification = final.get("classification")
+    if classification is None or classification.category == "unclear":
+        return []
+    return missing_required_tools(investigation.results, TicketCategory(classification.category))
+
+
 async def _record_gathering(
-    session: AsyncSession, run: WorkflowRun, written: WorkflowState
+    session: AsyncSession,
+    run: WorkflowRun,
+    final: WorkflowState,
+    written: WorkflowState,
+    meter: UsageMeter,
 ) -> None:
     """Audit the supervisor and the specialists: names, outcome codes, latency and counts."""
     plan = written.get("supervisor")
@@ -307,6 +340,7 @@ async def _record_gathering(
                 "run_policy": plan.run_policy,
                 "added_by_code": plan.added_by_code,
                 "extra_investigation_round": written.get("investigation_retry") is not None,
+                **_duration(meter, "supervise"),
             },
         )
 
@@ -320,7 +354,7 @@ async def _record_gathering(
             run_id=run.id,
             actor="baseline_agent",
             event_type="baseline.completed",
-            payload=_call_counts(investigation.trace),
+            payload={**_call_counts(investigation.trace), **_duration(meter, "baseline_agent")},
         )
         return
 
@@ -344,6 +378,8 @@ async def _record_gathering(
                 "facts": len(evidence.facts),
                 "dropped_facts": len(evidence.dropped_facts),
                 "missing_information": len(evidence.missing_information),
+                "missing_required": _missing_required(final, investigation),
+                **_duration(meter, "investigate", "reinvestigate"),
             },
         )
 
@@ -366,12 +402,13 @@ async def _record_gathering(
                 "policy_versions": findings.policy_versions,
                 "no_relevant_policy": findings.no_relevant_policy,
                 "conflicting_passages": findings.conflicting_passages,
+                **_duration(meter, "policy"),
             },
         )
 
 
 async def _record_resolution(
-    session: AsyncSession, run: WorkflowRun, written: WorkflowState
+    session: AsyncSession, run: WorkflowRun, written: WorkflowState, meter: UsageMeter
 ) -> None:
     outcome = written.get("outcome")
     if outcome is None:
@@ -385,7 +422,10 @@ async def _record_resolution(
         ],
         "validation_codes": [[code.value for code in a.validation] for a in outcome.attempts],
         "failure": None if outcome.failure is None else outcome.failure.value,
+        **_duration(meter, "resolve_case", minus="critic"),
     }
+    if "critic" in meter.durations_ms:
+        payload["critic_ms"] = meter.durations_ms["critic"]
     if outcome.amount_minor is not None:
         payload["amount_minor"] = outcome.amount_minor
     await audit.record(
@@ -415,5 +455,7 @@ async def _record_usage(session: AsyncSession, run: WorkflowRun, meter: UsageMet
             "llm_calls": meter.calls,
             "input_tokens": meter.input_tokens,
             "output_tokens": meter.output_tokens,
+            "fallback_calls": meter.fallback_calls,
+            "active_ms": meter.durations_ms.get(SEGMENT, 0),
         },
     )

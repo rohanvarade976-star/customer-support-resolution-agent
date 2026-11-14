@@ -127,6 +127,7 @@ const RUN_AWAITING = {
     reply:
       "Thanks for reaching out. I can see order ORD-1002 was shipped 3 days ago. To check with the courier, could you confirm the PIN code it is being delivered to?",
     finished: false,
+    checked: ["order", "shipment"],
   },
   steps: [
     step("e1", "run.created", 25),
@@ -144,6 +145,7 @@ const RUN_COMPLETED = {
     ticket_status: "resolved",
     reply: "Your refund of ₹899.00 for order ORD-1003 is complete. It should appear in your account within 5–7 business days.",
     finished: true,
+    checked: ["order", "return", "payment", "policy"],
   },
   steps: [
     step("f1", "run.created", 900, { ticket_id: "t-3" }),
@@ -162,9 +164,9 @@ const RUN_COMPLETED = {
 
 const APPROVALS = {
   items: [
-    { approval_id: "a-1", proposal_id: "p-1", ticket_id: "t-2", order_number: "ORD-1001", customer_name: "Priya Sharma", amount_minor: 249900, currency: "INR", reason: "Return received and inspection passed; no refund issued yet", reasons: [], created_at: at(-50 * MIN), expires_at: at(7 * MIN) },
-    { approval_id: "a-3", proposal_id: "p-3", ticket_id: "t-7", order_number: "ORD-1042", customer_name: "Arjun Mehta", amount_minor: 54900, currency: "INR", reason: "Item damaged on arrival; photos verified", reasons: [], created_at: at(-35 * MIN), expires_at: at(24 * MIN) },
-    { approval_id: "a-4", proposal_id: "p-4", ticket_id: "t-8", order_number: "ORD-1077", customer_name: "Meera Iyer", amount_minor: 1299900, currency: "INR", reason: "Wrong item delivered; return received", reasons: [], created_at: at(-5 * MIN), expires_at: at(55 * MIN) },
+    { approval_id: "a-1", proposal_id: "p-1", ticket_id: "t-2", order_number: "ORD-1001", customer_name: "Priya Sharma", amount_minor: 249900, currency: "INR", reason: "Return received and inspection passed; no refund issued yet", reasons: [], created_at: at(-50 * MIN), expires_at: at(7 * MIN), run_id: "run-3", ai_action: "refund", risk_flags: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"] },
+    { approval_id: "a-3", proposal_id: "p-3", ticket_id: "t-7", order_number: "ORD-1042", customer_name: "Arjun Mehta", amount_minor: 54900, currency: "INR", reason: "Item damaged on arrival; photos verified", reasons: [], created_at: at(-35 * MIN), expires_at: at(24 * MIN), run_id: "run-4", ai_action: "refund", risk_flags: [] },
+    { approval_id: "a-4", proposal_id: "p-4", ticket_id: "t-8", order_number: "ORD-1077", customer_name: "Meera Iyer", amount_minor: 1299900, currency: "INR", reason: "Wrong item delivered; return received", reasons: [], created_at: at(-5 * MIN), expires_at: at(55 * MIN), run_id: "run-5", ai_action: "refund", risk_flags: ["LOW_CLASSIFIER_CONFIDENCE"] },
   ],
 };
 
@@ -221,6 +223,65 @@ const CASE_APPROVED = {
   facts: { ...CASE_PENDING.facts, succeeded_refunds_minor: 249900, refundable_balance_minor: 0, eligible_now: false, reasons_now: ["ALREADY_REFUNDED"] },
 };
 
+// The reviewer's AI analysis (ADR-021): codes and counts, plus the AI's rationale.
+const ANALYSIS = {
+  run_id: "run-3",
+  mode: "multi_agent",
+  status: "awaiting_approval",
+  recommendation: {
+    action: "refund",
+    accepted: true,
+    reason_codes: [],
+    rationale:
+      "The order was delivered 17 days ago and the return was received 5 days ago, inside the 30-day window. Inspection passed and no refund has been issued, so the full paid amount is refundable under section 3 of the refund policy.",
+    source: "ai_generated",
+    verified: false,
+  },
+  agents: [
+    { agent: "classifier", at: at(-50 * MIN), duration_ms: 640, details: { category: "refund", confidence: 0.94 } },
+    { agent: "supervisor", at: at(-50 * MIN), duration_ms: 410, details: { specialists: ["investigator", "policy_agent"], added_by_code: [], extra_round: false } },
+    { agent: "investigator", at: at(-50 * MIN), duration_ms: 3120, details: { tool_calls: 4, failed_calls: 0, facts: 3, dropped_facts: 0, calls_by_code: 1 } },
+    { agent: "policy_agent", at: at(-50 * MIN), duration_ms: 2480, details: { searches: 2, rules: 3, dropped_rules: 1, conflicting_passages: false, no_relevant_policy: false } },
+    { agent: "resolution_agent", at: at(-50 * MIN), duration_ms: 2210, details: { action: "refund", attempts: 2, revisions: 1 } },
+    { agent: "critic", at: at(-50 * MIN), duration_ms: 980, details: { verdict: "approve", reviews: 2 } },
+  ],
+  tools: [
+    { call_id: "call_1", tool: "get_order", agent: "investigator", outcome: "ok", latency_ms: 14, by_code: false },
+    { call_id: "call_2", tool: "get_return_status", agent: "investigator", outcome: "ok", latency_ms: 11, by_code: false },
+    { call_id: "call_3", tool: "get_payment_status", agent: "investigator", outcome: "ok", latency_ms: 19, by_code: false },
+    { call_id: "required_get_shipment", tool: "get_shipment", agent: "investigator", outcome: "ok", latency_ms: 38, by_code: true },
+    { call_id: "search_1", tool: "search_policy", agent: "policy_agent", outcome: "ok", latency_ms: 95, by_code: false },
+    { call_id: "search_2", tool: "search_policy", agent: "policy_agent", outcome: "ok", latency_ms: 88, by_code: false },
+  ],
+  quality: {
+    attempts: 2,
+    revisions: 1,
+    validator_passed: true,
+    validation_codes: [],
+    critic_verdict: "approve",
+    facts_grounded: 3,
+    facts_dropped: 0,
+    citations_verified: 3,
+    citations_dropped: 1,
+    reply_replaced: false,
+  },
+  risk_flags: [
+    { code: "INJECTION_SUSPECTED", codes: ["IGNORE_RULES"], count: 1 },
+    { code: "PROVIDER_FALLBACK", codes: [], count: 1 },
+  ],
+  cost: { llm_calls: 9, input_tokens: 14250, output_tokens: 1830, active_ms: 9840, fallback_calls: 1 },
+};
+
+const SUMMARY = {
+  days: 7,
+  since: at(-7 * 1440 * MIN),
+  runs: 42,
+  resolved_automatically: 27,
+  sent_for_approval: 9,
+  escalated: 6,
+  median_seconds_to_outcome: 8.4,
+};
+
 const sse = (snapshot) =>
   [
     `event: status\ndata: ${JSON.stringify(snapshot.run)}\n\n`,
@@ -239,6 +300,10 @@ const BASE_ROUTES = {
   "GET /approvals": () => APPROVALS,
   "GET /approvals/a-1": () => CASE_PENDING,
   "GET /approvals/a-2": () => CASE_APPROVED,
+  // Wrapped: the analysis has its own "status" field, which the router would read as HTTP's.
+  "GET /runs/run-3/analysis": () => ({ status: 200, body: ANALYSIS }),
+  "GET /runs/run-2/analysis": () => ({ status: 200, body: { ...ANALYSIS, run_id: "run-2", status: "completed", risk_flags: [] } }),
+  "GET /reviewer/automation-summary": () => SUMMARY,
 };
 
 // ------------------------------------------------------------------ pages

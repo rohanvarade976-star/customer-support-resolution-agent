@@ -51,7 +51,7 @@ from support_agent.schemas.approvals import (
     RefundSummary,
 )
 from support_agent.schemas.auth import Principal
-from support_agent.services import refund_execution
+from support_agent.services import refund_execution, run_analysis
 from support_agent.services import runs as runs_service
 from support_agent.services.case_updates import load_case, set_run_status, set_ticket_status
 
@@ -84,7 +84,13 @@ def _changed_error() -> AppError:
     )
 
 
-async def list_pending(session: AsyncSession, now: datetime) -> ApprovalListResponse:
+async def list_pending(
+    session: AsyncSession, settings: Settings, now: datetime
+) -> ApprovalListResponse:
+    records = await proposals.list_pending(session, now)
+    signals = await run_analysis.queue_signals(
+        session, settings, list({record.proposal.run_id for record in records})
+    )
     items = [
         PendingApproval(
             approval_id=record.approval.id,
@@ -98,8 +104,11 @@ async def list_pending(session: AsyncSession, now: datetime) -> ApprovalListResp
             reasons=record.proposal.payload["checks_passed"],
             created_at=record.approval.created_at,
             expires_at=record.approval.expires_at,
+            run_id=record.proposal.run_id,
+            ai_action=signals[record.proposal.run_id].ai_action,
+            risk_flags=signals[record.proposal.run_id].risk_flags,
         )
-        for record in await proposals.list_pending(session, now)
+        for record in records
     ]
     return ApprovalListResponse(items=items)
 

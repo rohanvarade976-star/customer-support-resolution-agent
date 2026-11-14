@@ -21,6 +21,10 @@ class RunStatusEvent(BaseModel):
     reply: str | None
     # True when nothing more will happen on its own (clients stop listening).
     finished: bool
+    # The kinds of records the run checked successfully, as fixed codes from
+    # domain/run_events.CHECKED_SOURCES ("order", "return", "payment", "shipment", "policy").
+    # Never tool names, results or model text: safe for the customer (ADR-021).
+    checked: list[str] = []
 
 
 class RunStepEvent(BaseModel):

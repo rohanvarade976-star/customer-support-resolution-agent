@@ -49,6 +49,11 @@ class PendingApproval(BaseModel):
     reasons: list[str]  # the eligibility checks that passed
     created_at: datetime
     expires_at: datetime
+    run_id: UUID
+    # From the run's audit trail, computed by code (ADR-021). Codes only: the AI's
+    # recommended action and the risk flags. The rationale is shown on the case page only.
+    ai_action: str | None = None
+    risk_flags: list[str] = []
 
 
 class ApprovalListResponse(BaseModel):

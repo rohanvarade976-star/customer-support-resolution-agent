@@ -19,6 +19,7 @@ from support_agent.api.routes import (
     memory,
     metrics,
     orders,
+    run_analysis,
     run_events,
     runs,
     tickets,
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(tickets.router)
     app.include_router(runs.router)
     app.include_router(run_events.router)
+    app.include_router(run_analysis.router)
     app.include_router(approvals.router)
 
     # Added last, so it is the outermost layer: a browser's preflight (OPTIONS) is answered

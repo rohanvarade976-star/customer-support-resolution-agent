@@ -1,6 +1,9 @@
 // A run's live page (customer owner or reviewer): a progress stepper, the verified reply, a
 // reply box while the run waits for the customer, a live-connection indicator, and the
 // detailed timeline. Everything shown comes from useRunStream (SSE with polling fallback).
+//
+// Reviewers also get the AI analysis (ADR-021). Customers get "What we checked": plain words
+// for the kinds of records the run looked at, never model text or internal codes.
 
 import { ArrowLeft, MessageSquareText, Send, ShieldCheck } from "lucide-react";
 import { useState, type SyntheticEvent } from "react";
@@ -9,10 +12,12 @@ import { Link, useParams } from "react-router-dom";
 import { describeError } from "../api/client";
 import type { Run } from "../api/types";
 import { isReviewer, useAuth } from "../auth/auth";
+import { AiAnalysisSection } from "../components/ai/AiAnalysis";
 import { PageHeader } from "../components/PageHeader";
 import { RunProgress } from "../components/RunProgress";
 import { RunTimeline } from "../components/RunTimeline";
 import { ErrorState } from "../components/states";
+import { WhatWeCheckedCard } from "../components/WhatWeCheckedCard";
 import { Alert } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -132,6 +137,8 @@ export function RunPage({ streamOptions }: { streamOptions?: RunStreamOptions })
           )}
 
           {status.status === "awaiting_customer" && !reviewer && <ReplyBox runId={runId} onSent={live.refresh} />}
+
+          {reviewer ? <AiAnalysisSection runId={runId} /> : <WhatWeCheckedCard checked={status.checked} />}
 
           <Card>
             <CardHeader className="px-6 pt-6">

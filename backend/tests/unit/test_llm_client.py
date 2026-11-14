@@ -37,6 +37,7 @@ from support_agent.llm.types import (
     system_message,
     user_message,
 )
+from support_agent.llm.usage import metered
 
 MESSAGES = customer_turn("You are a support assistant.", "Where is my order ORD-1042?")
 PLANTED_KEY = "gsk_planted-test-key-should-never-appear"
@@ -94,6 +95,20 @@ async def test_falls_back_to_second_provider_after_retries_run_out() -> None:
     assert result.provider == "gemini"
     assert result.model == "gemini-large"  # the fallback uses the same tier
     assert len(groq.requests) == 3
+
+
+async def test_the_meter_counts_answers_from_the_fallback_provider() -> None:
+    """The reviewer's PROVIDER_FALLBACK flag comes from this count (ADR-021)."""
+    groq = FakeProvider([text_reply("first"), rate_limited(), rate_limited()], name="groq")
+    gemini = FakeProvider([text_reply("second")], name="gemini")
+    client = make_client(groq, gemini, max_attempts=2)
+
+    with metered() as meter:
+        await client.chat(MESSAGES)  # groq answers
+        await client.chat(MESSAGES)  # groq is rate limited twice, gemini answers
+
+    assert meter.calls == 2
+    assert meter.fallback_calls == 1
 
 
 async def test_all_providers_failing_raises_unavailable() -> None:

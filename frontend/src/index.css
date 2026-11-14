@@ -74,6 +74,17 @@
   --color-info-700: #0369a1;
   --color-info-800: #075985;
 
+  /* AI-generated content only (ADR-021): a purple that no verified fact, status or action
+     uses, so model output can never look like a checked record. 700 on 50 is 7.4:1. */
+  --color-ai-50: #faf5ff;
+  --color-ai-100: #f3e8ff;
+  --color-ai-200: #e9d5ff;
+  --color-ai-500: #a855f7;
+  --color-ai-600: #9333ea;
+  --color-ai-700: #7e22ce;
+  --color-ai-800: #6b21a8;
+  --color-ai-900: #581c87;
+
   /* Type: one sans-serif family; the scale is 12 / 14 / 16 / 18 / 20 / 24 / 30 px. */
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

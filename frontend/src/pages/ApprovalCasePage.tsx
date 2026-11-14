@@ -5,6 +5,10 @@
 //
 // The page computes nothing: the amount is the stored proposal's, the facts and eligibility
 // come from the backend's rules, and the policy text is our own stored section text.
+//
+// Below the evidence, the AI analysis (ADR-021): what the agents did, and the AI's own
+// recommendation, labelled as AI-generated and unverified. Verified cards carry a "Verified
+// from records" label; AI content uses its own colour, so the two never look alike.
 
 import { BadgeCheck, Check, Clock, ExternalLink, FileText, Quote, ShieldCheck, X } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -13,6 +17,7 @@ import { Link, useParams } from "react-router-dom";
 import { describeError } from "../api/client";
 import type { ApprovalCase, CaseFacts, DecisionResponse } from "../api/types";
 import { useAuth } from "../auth/auth";
+import { AiAnalysisSection } from "../components/ai/AiAnalysis";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PageHeader } from "../components/PageHeader";
 import { DetailSkeleton, ErrorState } from "../components/states";
@@ -34,6 +39,16 @@ const MAX_NOTE_LENGTH = 1000; // the API's limit (schemas/approvals.py)
 const SETTLED_REFUNDS = new Set(["succeeded", "failed"]);
 
 type Decision = "approve" | "reject";
+
+// Marks a card whose content comes from our own records or rules, never from a model.
+function VerifiedLabel() {
+  return (
+    <Badge tone="primary" title="Read from our records or computed by our rules">
+      <ShieldCheck aria-hidden="true" />
+      Verified from records
+    </Badge>
+  );
+}
 
 // After an approval the worker executes the refund, and reconciliation may settle it later:
 // keep refreshing until the refund has a final status.
@@ -140,6 +155,7 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
                 <CardTitle>Proposal</CardTitle>
                 <CardDescription>What the system proposed, as stored and checked by code.</CardDescription>
               </div>
+              <VerifiedLabel />
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-gray-800">{data.proposal.reason}</p>
@@ -185,6 +201,7 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
                   )}
                 </CardDescription>
               </div>
+              <VerifiedLabel />
             </CardHeader>
             <CardContent>
               {data.citations.length === 0 ? (
@@ -212,8 +229,9 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
           </Card>
         </div>
 
-        {/* Decision */}
-        <aside aria-label="Decision" className="lg:sticky lg:top-20">
+        {/* Decision. On phones it comes right after the verified evidence, before the AI analysis;
+            on wide screens it spans both rows so it stays in view (sticky) beside them. */}
+        <aside aria-label="Decision" className="lg:sticky lg:top-20 lg:col-start-2 lg:row-span-2 lg:row-start-1">
           <Card>
             <CardContent className="space-y-5">
               <div className="flex items-center justify-between gap-3">
@@ -251,6 +269,10 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
             </CardContent>
           </Card>
         </aside>
+
+        <div className="lg:col-start-1">
+          <AiAnalysisSection runId={data.run_id} />
+        </div>
       </div>
 
       <ConfirmDialog
@@ -416,17 +438,20 @@ function FactsCard({ facts, currency }: { facts: CaseFacts; currency: string }) 
           <CardTitle>Order facts</CardTitle>
           <CardDescription>Read from the order records just now, with the rules applied now.</CardDescription>
         </div>
-        {facts.eligible_now ? (
-          <Badge tone="success">
-            <BadgeCheck aria-hidden="true" />
-            Eligible now
-          </Badge>
-        ) : (
-          <Badge tone="danger">
-            <X aria-hidden="true" />
-            Not eligible now
-          </Badge>
-        )}
+        <div className="flex flex-wrap gap-2">
+          <VerifiedLabel />
+          {facts.eligible_now ? (
+            <Badge tone="success">
+              <BadgeCheck aria-hidden="true" />
+              Eligible now
+            </Badge>
+          ) : (
+            <Badge tone="danger">
+              <X aria-hidden="true" />
+              Not eligible now
+            </Badge>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">

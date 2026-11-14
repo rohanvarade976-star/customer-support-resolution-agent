@@ -1677,7 +1677,8 @@ Spans and metrics carry only ids, codes, counts, model names, route templates an
 ## ADR-019: The React frontend: live status over SSE, token storage, CORS and the reviewer case view
 
 - **Date:** 2026-11-14
-- **Status:** Accepted ("no UI kit" in decision 1 superseded by ADR-020)
+- **Status:** Accepted ("no UI kit" in decision 1 superseded by ADR-020; "no model rationales for
+  reviewers" in the alternatives superseded by ADR-021)
 - **Milestone:** M10
 
 ### Context
@@ -1885,3 +1886,129 @@ desktop. Two constraints shape every choice:
   tags at runtime; `npm run screenshots` catches the latter.
 - jsdom has no `<dialog>.showModal()` or `ResizeObserver`; `src/test/setup.ts` adds small
   stand-ins, so dialog tests check behaviour, not the browser's focus trapping.
+
+
+---
+
+## ADR-021: Making the AI's work visible, without mixing it up with verified facts
+
+- **Date:** 2026-11-14
+- **Status:** Accepted (supersedes "Showing model rationales to reviewers" in ADR-019's alternatives)
+- **Milestone:** M10
+
+### Context
+
+The reviewer saw only the result of a case (the stored amount, the checks passed, the facts and the
+policy text), so the product looked like "a customer complains and a person approves". The agents'
+work was in the audit trail, but nobody could see it. We want reviewers to see what the agents did,
+and customers to see that an assistant checked their records, without weakening the rules that make
+the system safe:
+
+- the LLM proposes, code decides, a person approves money (CLAUDE.md rule 1);
+- customer-facing messages state only verified outcomes (rule 8);
+- the reviewer's case view rests on verified records, not model text (ADR-019 decision 5).
+
+### Decision
+
+1. **The analysis is computed by code from the audit trail.** `domain/run_analysis.py` is a pure
+   function over a run's audit events, which already hold only ids, codes, counts and times. It
+   returns:
+   - **agent activity:** classifier, supervisor (with the specialists it chose), investigator,
+     policy agent, resolution agent, critic (or the baseline agent), in the order their results
+     were recorded, each with its duration and a few counts. The browser turns the counts into a
+     short sentence ("4 tools called, 3 facts grounded, 1 added by code"), so even that sentence
+     is written by code;
+   - **tools used:** tool names and outcome codes. Lookups that code made itself (the required
+     evidence step, call ids starting `required_`) are marked "by code";
+   - **quality checks:** the validator's result on the last draft, revisions, the critic's verdict,
+     facts grounded versus dropped, policy citations verified versus dropped, and whether the output
+     guardrail replaced a reply;
+   - **risk flags**, fixed rules that no model can raise or clear:
+     - `DELIVERY_DATE_CONFLICT`: the validator's `EVIDENCE_CONFLICT`, which only the delivery-date
+       check raises;
+     - `INJECTION_SUSPECTED`: the pattern codes from `injection_suspected` events;
+     - `MISSING_REQUIRED_EVIDENCE`: required lookups with no successful call after gathering;
+     - `LOW_CLASSIFIER_CONFIDENCE`: "unclear", or below `CLASSIFIER_CONFIDENCE_THRESHOLD`;
+     - `PROVIDER_FALLBACK`: answers from a provider other than the first;
+   - **cost:** LLM calls, tokens and active time, summed over the run's segments.
+2. **New measurements, codes and numbers only.** Durations, fallbacks and active time were not
+   recorded before:
+   - `traced()` times every graph node and the critic is timed inside `resolve`, into the
+     segment's `UsageMeter` (a context variable, so parallel branches add to one meter);
+   - `RoutedLLMClient` counts answers that came from a fallback provider;
+   - `run_recording` adds `duration_ms` to each agent's audit event, `critic_ms` to
+     `resolution.completed`, `missing_required` to `investigation.completed`, and `active_ms` and
+     `fallback_calls` to `run.usage`.
+   No migration is needed: these are new keys in JSON payloads, and they are added to
+   `REVIEWER_PAYLOAD_KEYS`. Runs recorded earlier show "—" for durations and active time.
+3. **One piece of model text, for reviewers only: the accepted draft's rationale.**
+   `GET /runs/{id}/analysis` returns it under `recommendation.rationale`, with
+   `source: "ai_generated"` and `verified: false`. It is read from the run's latest checkpoint
+   (`workflow/graph.accepted_rationale`), like the cited policy keys. Controls:
+   - only an *accepted* draft's rationale; a draft that code rejected is replaced by the escalation
+     reason codes, because the case does not rest on it;
+   - reviewers only (`ReviewerDep`: 403 for customers, even for their own run);
+   - rendered as plain text (React escapes it; nothing renders HTML);
+   - shown in its own card with a purple `ai` colour token, a Sparkles icon and an
+     "AI-generated · not verified" label. Verified cards carry a "Verified from records" label,
+     and code-computed cards carry "Computed by code";
+   - nothing reads it: amounts, proposals, approvals and refunds use none of the analysis.
+4. **The review queue shows codes only, from the audit trail.** Each row gains `run_id`,
+   `ai_action` (the resolution agent's latest action) and `risk_flags` (codes). These are read with
+   one query for all rows (`audit.list_of_types_for_runs`) and **no checkpoint reads**, so the queue
+   stays one cheap call however long it grows. The full rationale is on the case page only, where a
+   reviewer reads it next to the evidence.
+5. **The automation summary:** `GET /reviewer/automation-summary` (reviewers only), for runs
+   started in the last 7 days:
+   - resolved automatically: completed with no refund proposal;
+   - sent for approval: runs with a refund proposal;
+   - escalated;
+   - median time to outcome: start to the first of completed, escalated, failed or approval
+     requested. This measures the system, not how long a reviewer took.
+   The definitions live next to the SQL (`repositories/automation.py`).
+6. **Customers: "What we checked" and a visible assistant.** The run status gains `checked`: fixed
+   codes (`order`, `return`, `payment`, `shipment`, `policy`), mapped by code from successful tool
+   calls (`domain/run_events.checked_sources`). The browser shows plain words for each code and
+   drops unknown ones. The customer's timeline names the assistant ("Our assistant is checking your
+   order details"). Customers never get the rationale, tool names, risk flags or internal codes.
+7. **Layout.** On phones, the case page puts the decision panel right after the verified evidence
+   and the AI analysis after it. On wide screens the decision panel spans both and stays in view.
+
+### Alternatives considered
+
+- **No rationale at all (ADR-019's choice):** safest, but it hides what the agents reasoned, which
+  is what a reviewer needs to spot a wrong recommendation. With the controls in decision 3, it is
+  context, not evidence.
+- **The rationale in every queue row:** one checkpoint read per pending approval, and model text in
+  a list where it is read quickly and out of context. Rejected: the queue shows the action and the
+  flags; the case page shows the text.
+- **Model-written summaries of each agent's work:** more fluent, but unverified text in every row.
+  Code-written sentences from counts say less, but are always true.
+- **Risk scores from a model ("how risky is this case?"):** a model would decide what a reviewer
+  worries about. Fixed rules are explainable and testable.
+- **A new table for agent timings:** more structure, but a migration for numbers that fit in the
+  audit payloads we already write per agent.
+
+### Limits
+
+- **Durations are per segment, not exact per call.** Parallel specialists overlap, so durations do
+  not add up to the active time. The critic's time is subtracted from the resolution agent's.
+- **`DELIVERY_DATE_CONFLICT` relies on `EVIDENCE_CONFLICT` meaning a delivery-date conflict.** That
+  is true today (`domain/validation.py`). A new evidence conflict would need its own code.
+- **A rationale can be persuasive and wrong.** The label, the colour and the "context only" line
+  say so, but they cannot stop a reviewer from trusting it. The amount still comes only from the
+  refund rules, and every approval is confirmed in a dialog that states that amount.
+- **The rationale is the latest checkpoint's.** A run that looped back after a customer reply
+  shows the latest accepted draft's rationale.
+- **The summary counts every run**, including manual runs and eval customers' runs, if they are in
+  the same database.
+
+### Consequences
+
+- New routes: `GET /runs/{id}/analysis`, `GET /reviewer/automation-summary`.
+- `PendingApproval` gains `run_id`, `ai_action` and `risk_flags`; `RunStatusEvent` gains `checked`.
+- New audit payload keys: `duration_ms`, `critic_ms`, `missing_required`, `active_ms`,
+  `fallback_calls`.
+- New design token: the `ai` colour scale (purple), used only for AI-generated content, plus a
+  matching `ai` badge tone.
+- Customer event labels now name the assistant.

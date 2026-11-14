@@ -47,9 +47,9 @@ async def create_refund_proposal(
 
 @router.get("/approvals")
 async def list_approvals(
-    _reviewer: ReviewerDep, session: SessionDep, clock: ClockDep
+    _reviewer: ReviewerDep, session: SessionDep, settings: SettingsDep, clock: ClockDep
 ) -> ApprovalListResponse:
-    return await approvals_service.list_pending(session, clock())
+    return await approvals_service.list_pending(session, settings, clock())
 
 
 # One approval's case: evidence, citations, the stored amount and, later, the refund's status.

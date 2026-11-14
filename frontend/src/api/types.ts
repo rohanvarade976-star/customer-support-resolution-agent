@@ -98,6 +98,9 @@ export interface RunStatusEvent {
   ticket_status: TicketStatus;
   reply: string | null; // the verified reply: checked by the backend's output guardrail
   finished: boolean;
+  // Kinds of records the run checked, as fixed codes: "order", "return", "payment",
+  // "shipment", "policy". Never tool names, results or model text (ADR-021).
+  checked: string[];
 }
 
 export type DetailValue = string | number | boolean | (string | number | boolean)[];
@@ -144,6 +147,9 @@ export interface PendingApproval {
   reasons: string[];
   created_at: string;
   expires_at: string;
+  run_id: string;
+  ai_action: string | null; // the AI's recommended action code, from the audit trail
+  risk_flags: string[]; // risk flag codes computed by code (ADR-021)
 }
 
 export interface ApprovalList {
@@ -234,4 +240,85 @@ export interface ApprovalCase {
   governing_policy: GoverningPolicy | null;
   citations: PolicyCitation[];
   refund: RefundSummary | null;
+}
+
+// ---------------------------------------------------------------- AI analysis (ADR-021)
+// Reviewers only. Codes, counts and times computed by code from the audit trail, plus one
+// piece of model text: `recommendation.rationale`, AI-generated and unverified, always shown
+// as plain text and never as evidence.
+
+export type AnalysisDetail = string | number | boolean | string[];
+
+export interface AiRecommendation {
+  action: string | null;
+  accepted: boolean;
+  reason_codes: string[];
+  rationale: string | null;
+  source: "ai_generated";
+  verified: false;
+}
+
+export interface AgentActivity {
+  agent: string;
+  at: string;
+  duration_ms: number | null;
+  details: Record<string, AnalysisDetail>;
+}
+
+export interface ToolUse {
+  call_id: string;
+  tool: string;
+  agent: string;
+  outcome: string;
+  latency_ms: number | null;
+  by_code: boolean;
+}
+
+export interface QualityChecks {
+  attempts: number;
+  revisions: number;
+  validator_passed: boolean | null;
+  validation_codes: string[];
+  critic_verdict: string | null;
+  facts_grounded: number;
+  facts_dropped: number;
+  citations_verified: number;
+  citations_dropped: number;
+  reply_replaced: boolean;
+}
+
+export interface RiskFlag {
+  code: string;
+  codes: string[];
+  count: number;
+}
+
+export interface RunCost {
+  llm_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  active_ms: number | null;
+  fallback_calls: number;
+}
+
+export interface RunAnalysis {
+  run_id: string;
+  mode: string;
+  status: RunStatus;
+  recommendation: AiRecommendation;
+  agents: AgentActivity[];
+  tools: ToolUse[];
+  quality: QualityChecks;
+  risk_flags: RiskFlag[];
+  cost: RunCost;
+}
+
+export interface AutomationSummary {
+  days: number;
+  since: string;
+  runs: number;
+  resolved_automatically: number;
+  sent_for_approval: number;
+  escalated: number;
+  median_seconds_to_outcome: number | null;
 }

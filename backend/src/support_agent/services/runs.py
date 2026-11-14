@@ -61,7 +61,7 @@ from support_agent.domain.enums import (
 from support_agent.integrations.payments import PaymentClient
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import LLMClient
-from support_agent.llm.usage import metered
+from support_agent.llm.usage import SEGMENT, metered, timed
 from support_agent.rag.embeddings import Embedder
 from support_agent.repositories import audit, customer_messages, proposals, tickets, workflow_runs
 from support_agent.repositories.tickets import TicketRecord
@@ -375,7 +375,7 @@ async def _advance(
     """
     deps = _build_deps(session, env, run, ticket)
     try:
-        with metered() as meter:
+        with metered() as meter, timed(SEGMENT):  # timed exits first, while the meter is set
             segment = await advance_workflow(
                 deps, env.checkpointer, run.thread_id, initial=initial, resume=resume
             )

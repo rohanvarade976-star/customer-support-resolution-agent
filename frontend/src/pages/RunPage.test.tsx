@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import type { RunSnapshot, RunStatusEvent, RunStepEvent } from "../api/types";
+import { ANALYSIS, RATIONALE } from "../test/fixtures";
 import { ANITA, fakeApi, json, logInAs, PRIYA, renderApp, sseFrame, sseResponse } from "../test/helpers";
 
 const STATUS: RunStatusEvent = {
@@ -12,6 +13,7 @@ const STATUS: RunStatusEvent = {
   ticket_status: "awaiting_customer",
   reply: "Which order is this about?",
   finished: false,
+  checked: ["order", "shipment", "policy"],
 };
 
 const STEP: RunStepEvent = {
@@ -80,13 +82,47 @@ describe("RunPage", () => {
     expect(screen.queryByLabelText("Your reply")).not.toBeInTheDocument();
   });
 
-  it("does not offer reviewers the customer's reply box", async () => {
-    fakeApi({ "GET /runs/run-1/stream": () => sseResponse([sseFrame("status", STATUS)], true) });
+  it("does not offer reviewers the customer's reply box, and shows them the AI analysis", async () => {
+    fakeApi({
+      "GET /runs/run-1/stream": () => sseResponse([sseFrame("status", STATUS)], true),
+      "GET /runs/run-1/analysis": () => json(ANALYSIS),
+    });
     logInAs(ANITA);
     renderApp("/runs/run-1");
 
     expect(await screen.findByTestId("verified-reply")).toBeInTheDocument();
     expect(screen.queryByLabelText("Your reply")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("ai-rationale")).toHaveTextContent(RATIONALE);
+    expect(screen.queryByTestId("what-we-checked")).not.toBeInTheDocument();
+  });
+
+  it("shows customers what was checked in plain words, with no AI text or internal codes", async () => {
+    const calls = fakeApi({
+      "GET /runs/run-1/stream": () =>
+        sseResponse(
+          [
+            sseFrame("status", { ...STATUS, checked: ["order", "shipment", "policy", "internal_code"] }),
+            sseFrame("step", { ...STEP, type: "investigation.started" }),
+          ],
+          true,
+        ),
+    });
+    logInAs(PRIYA);
+    renderApp("/runs/run-1");
+
+    const card = await screen.findByTestId("what-we-checked");
+    expect(within(card).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "Your order details",
+      "Delivery tracking from the carrier",
+      "Our refund and delivery policies",
+    ]);
+    expect(card).not.toHaveTextContent("internal_code");
+    // The customer never asks for the analysis, and nothing AI-labelled is shown.
+    expect(calls.some((call) => call.path.endsWith("/analysis"))).toBe(false);
+    expect(screen.queryByText(/AI-generated/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-recommendation")).not.toBeInTheDocument();
+    // The assistant is named in the customer's timeline.
+    expect(screen.getByText("Our assistant is checking your order details")).toBeInTheDocument();
   });
 
   it("stops with the API's message when the run is not yours", async () => {

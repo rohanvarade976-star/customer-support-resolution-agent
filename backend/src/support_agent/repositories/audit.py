@@ -40,3 +40,17 @@ async def list_for_run(session: AsyncSession, run_id: UUID) -> list[AuditEvent]:
         .limit(MAX_EVENTS_PER_RUN)
     )
     return list((await session.scalars(stmt)).all())
+
+
+async def list_of_types_for_runs(
+    session: AsyncSession, run_ids: list[UUID], event_types: frozenset[str]
+) -> list[AuditEvent]:
+    """Events of the given types for several runs, oldest first. One query (the review queue)."""
+    if not run_ids:
+        return []
+    stmt = (
+        select(AuditEvent)
+        .where(AuditEvent.run_id.in_(run_ids), AuditEvent.event_type.in_(event_types))
+        .order_by(AuditEvent.created_at, AuditEvent.id)
+    )
+    return list((await session.scalars(stmt)).all())

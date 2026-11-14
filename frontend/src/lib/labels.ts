@@ -1,15 +1,17 @@
 // Fixed wording for codes the API returns. A code with no entry is shown as itself, so a new
 // backend code is never hidden or guessed at.
 
-// The customer-facing sentence for each live event (PRD "Live events").
+// The customer-facing sentence for each live event (PRD "Live events"). The assistant's work
+// is named as such ("Our assistant is checking..."), so customers can see an AI is helping;
+// what it decides is still checked by our rules before anything is sent (ADR-021).
 const EVENT_LABELS: Record<string, string> = {
   "run.created": "We've received your request",
-  "run.classified": "We've identified what you need help with",
-  "investigation.started": "Checking your order details",
-  "policy.completed": "Checking the applicable policy",
+  "run.classified": "Our assistant identified what you need help with",
+  "investigation.started": "Our assistant is checking your order details",
+  "policy.completed": "Our assistant checked the applicable policy",
   "clarification.requested": "We need one more detail from you",
   "proposal.created": "Preparing a resolution",
-  "resolution.completed": "Preparing a resolution",
+  "resolution.completed": "Our assistant prepared a resolution",
   "validation.passed": "Resolution checked against our rules",
   "validation.failed": "Resolution checked against our rules",
   "approval.requested": "Your refund request is awaiting approval",

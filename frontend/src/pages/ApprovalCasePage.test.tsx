@@ -3,7 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import type { ApprovalCase } from "../api/types";
+import { ANALYSIS, RATIONALE } from "../test/fixtures";
 import { ANITA, fakeApi, json, logInAs, renderApp } from "../test/helpers";
+
+const ANALYSIS_ROUTE = { "GET /runs/run-1/analysis": () => json(ANALYSIS) };
 
 const PENDING: ApprovalCase = {
   approval_id: "a-1",
@@ -51,6 +54,7 @@ describe("ApprovalCasePage", () => {
   it("shows the stored amount and citations, sends the decision with the note, then the refund status", async () => {
     let decided = false;
     const calls = fakeApi({
+      ...ANALYSIS_ROUTE,
       "GET /approvals/a-1": () => json(decided ? APPROVED : PENDING),
       "POST /approvals/a-1/decision": () => {
         decided = true;
@@ -100,6 +104,7 @@ describe("ApprovalCasePage", () => {
 
   it("sends a rejection without a note when none is typed", async () => {
     const calls = fakeApi({
+      ...ANALYSIS_ROUTE,
       "GET /approvals/a-1": () => json(PENDING),
       "POST /approvals/a-1/decision": () =>
         json({ approval_id: "a-1", proposal_id: "p-1", decision: "rejected", proposal_status: "rejected", refund: null, message: "Rejected." }, 202),
@@ -120,7 +125,7 @@ describe("ApprovalCasePage", () => {
   });
 
   it("sends nothing when the reviewer cancels the confirmation", async () => {
-    const calls = fakeApi({ "GET /approvals/a-1": () => json(PENDING) });
+    const calls = fakeApi({ ...ANALYSIS_ROUTE, "GET /approvals/a-1": () => json(PENDING) });
     logInAs(ANITA);
     renderApp("/approvals/a-1");
     await screen.findByTestId("amount");
@@ -138,6 +143,7 @@ describe("ApprovalCasePage", () => {
 
   it("shows the API's refusal (already decided)", async () => {
     fakeApi({
+      ...ANALYSIS_ROUTE,
       "GET /approvals/a-1": () => json(PENDING),
       "POST /approvals/a-1/decision": () =>
         json({ success: false, error_code: "ALREADY_DECIDED", message: "This approval has already been decided." }, 409),
@@ -151,5 +157,64 @@ describe("ApprovalCasePage", () => {
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Approve ₹2,499.00" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("This approval has already been decided.");
+  });
+
+  it("shows the AI analysis apart from the verified records, with the rationale as plain text", async () => {
+    fakeApi({ ...ANALYSIS_ROUTE, "GET /approvals/a-1": () => json(PENDING) });
+    logInAs(ANITA);
+    renderApp("/approvals/a-1");
+
+    // The AI's recommendation: labelled, in its own card, and its text is never parsed as HTML.
+    const card = await screen.findByTestId("ai-recommendation");
+    expect(within(card).getByText("AI-generated · not verified")).toBeInTheDocument();
+    expect(within(card).getByText("Refund")).toBeInTheDocument();
+    const rationale = within(card).getByTestId("ai-rationale");
+    expect(rationale.textContent).toBe(RATIONALE);
+    expect(rationale.querySelector("b")).toBeNull();
+    // Verified cards keep their label; the AI card never carries it.
+    expect(screen.getAllByText("Verified from records").length).toBeGreaterThanOrEqual(2);
+    expect(within(card).queryByText("Verified from records")).not.toBeInTheDocument();
+
+    // Computed by code: risk flags, agents in order, quality checks and tools.
+    const flags = screen.getByTestId("risk-flags");
+    expect(within(flags).getByText("Delivery dates disagree")).toBeInTheDocument();
+    expect(within(flags).getByText("Instruction-like text")).toBeInTheDocument();
+    const agents = within(screen.getByRole("list", { name: "Agent activity" })).getAllByRole("listitem");
+    expect(agents.map((item) => item.querySelector("span.font-medium")?.textContent)).toEqual([
+      "Classifier",
+      "Supervisor",
+      "Investigator",
+      "Policy agent",
+      "Resolution agent",
+      "Critic",
+    ]);
+    expect(screen.getByText("4 tools called, 3 facts grounded, 1 added by code")).toBeInTheDocument();
+    expect(screen.getByText("3 policy sections cited, 1 dropped")).toBeInTheDocument();
+    expect(screen.getByText("Proposed: Refund, 1 revision")).toBeInTheDocument();
+    expect(screen.getByText("Critic approved")).toBeInTheDocument();
+    const quality = screen.getByTestId("quality-checks");
+    expect(within(quality).getByText("3 / 1")).toBeInTheDocument(); // citations verified / dropped
+    const tools = screen.getByRole("list", { name: "Tools used" });
+    expect(within(tools).getByText("Shipment tracking").closest("li")).toHaveTextContent("by code");
+  });
+
+  it("says when code rejected the AI's draft, with no rationale", async () => {
+    const rejected = {
+      ...ANALYSIS,
+      recommendation: {
+        ...ANALYSIS.recommendation,
+        action: "escalate",
+        accepted: false,
+        rationale: null,
+        reason_codes: ["EVIDENCE_CONFLICT"],
+      },
+    };
+    fakeApi({ "GET /runs/run-1/analysis": () => json(rejected), "GET /approvals/a-1": () => json(PENDING) });
+    logInAs(ANITA);
+    renderApp("/approvals/a-1");
+
+    const card = await screen.findByTestId("ai-recommendation");
+    expect(card).toHaveTextContent("No AI draft was accepted");
+    expect(within(card).queryByTestId("ai-rationale")).not.toBeInTheDocument();
   });
 });
