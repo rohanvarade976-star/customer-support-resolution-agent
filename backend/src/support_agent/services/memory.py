@@ -75,6 +75,36 @@ async def record_run_outcome(
         )
 
 
+async def record_refund_outcome(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    run: WorkflowRun,
+    ticket: Ticket,
+    order_id: UUID,
+    outcome: MemoryOutcome,
+    now: datetime,
+) -> None:
+    """Remember the provider's verified answer for this run's refund. Not committed.
+
+    Called by reconciliation, after the run itself may already have been remembered (as
+    "refund submitted", or as escalated): the run's one item is updated, not duplicated.
+    `order_id` is the refund operation's order, which revalidation tied to this ticket.
+    """
+    await customer_memory.set_refund_outcome(
+        session,
+        customer_id=ticket.customer_id,
+        ticket_id=ticket.id,
+        order_id=order_id,
+        outcome=outcome,
+        category=ticket.category,
+        source_run_id=run.id,
+        now=now,
+        expires_at=now + timedelta(days=settings.memory_retention_days),
+    )
+    log.info("memory_refund_outcome", extra={"run_id": str(run.id), "outcome": outcome.value})
+
+
 async def load_for_run(
     session: AsyncSession, settings: Settings, customer_id: UUID, *, now: datetime
 ) -> str:

@@ -132,10 +132,13 @@ class JobType(StrEnum):
     RESUME_AFTER_CUSTOMER_REPLY = "resume_after_customer_reply"
     EXPIRE_APPROVALS = "expire_approvals"  # scheduled, no run
     PURGE_EXPIRED_MEMORY = "purge_expired_memory"  # scheduled, no run
+    RECONCILE_REFUNDS = "reconcile_refunds"  # scheduled, no run
 
 
 # The scheduled sweeps: they work on no run, and at most one of each may be open at a time.
-SWEEP_JOB_TYPES = frozenset({JobType.EXPIRE_APPROVALS, JobType.PURGE_EXPIRED_MEMORY})
+SWEEP_JOB_TYPES = frozenset(
+    {JobType.EXPIRE_APPROVALS, JobType.PURGE_EXPIRED_MEMORY, JobType.RECONCILE_REFUNDS}
+)
 
 
 class MemoryKind(StrEnum):

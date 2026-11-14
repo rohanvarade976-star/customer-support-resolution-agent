@@ -118,4 +118,4 @@ From the repo root: `docker compose up -d` starts Postgres.
 
 ## Current milestone
 
-M7 — Human-in-the-loop and memory. See the master plan and PRD section "Milestones".
+M8 — Money safety. See the master plan and PRD section "Milestones".

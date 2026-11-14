@@ -31,7 +31,7 @@ from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, Ticke
 from support_agent.domain.memory import memory_outcome
 from support_agent.llm.tool_loop import OUTCOME_OK, ToolCallRecord
 from support_agent.llm.usage import UsageMeter
-from support_agent.repositories import audit, tickets, workflow_runs
+from support_agent.repositories import audit, refunds, tickets, workflow_runs
 from support_agent.services import memory
 from support_agent.services.case_updates import set_run_status, set_ticket_status
 from support_agent.workflow.graph import Segment
@@ -74,7 +74,9 @@ async def save_segment(
     for key in ("proposal_refusal", "refund_refusal"):
         if key in written:
             details[key] = written[key]
-    await set_run_status(session, run, status, now=now, actor="system", details=details or None)
+    superseded = await _refund_superseded(session, run, ticket, final, written)
+    if not superseded:
+        await set_run_status(session, run, status, now=now, actor="system", details=details or None)
 
     if segment.paused:
         await audit.record(
@@ -92,13 +94,47 @@ async def save_segment(
             event_type="clarification.requested",
             payload={"reason": _clarification_reason(final)},
         )
-    if reply := written.get("customer_reply"):
-        await tickets.set_reply(session, ticket, reply)
-    # KeyError = a graph bug (a state with no ticket mapping) -> the run is marked failed.
-    ticket_status = written.get("ticket_status") or _TICKET_STATUS_FOR_RUN[status]
-    await set_ticket_status(session, ticket, ticket_status, run_id=run.id, actor="system")
+    if not superseded:
+        if reply := written.get("customer_reply"):
+            await tickets.set_reply(session, ticket, reply)
+        # KeyError = a graph bug (a state with no ticket mapping) -> the run is marked failed.
+        ticket_status = written.get("ticket_status") or _TICKET_STATUS_FOR_RUN[status]
+        await set_ticket_status(session, ticket, ticket_status, run_id=run.id, actor="system")
     await _record_usage(session, run, meter)
     await _remember_outcome(session, settings, run, ticket, final, now)
+
+
+async def _refund_superseded(
+    session: AsyncSession,
+    run: WorkflowRun,
+    ticket: Ticket,
+    final: WorkflowState,
+    written: WorkflowState,
+) -> bool:
+    """True if the refund step's view is out of date, so the segment must not save it.
+
+    The refund step read the refund's status, then the graph saved its checkpoint. In that
+    gap the reconciler (on another worker) may have settled the refund (submitted ->
+    succeeded, with the ticket resolved) or given up and escalated the run. Writing the
+    step's older statuses now would undo that: a resolved ticket back to "in progress", an
+    escalated run back to "executing" with nothing left to finish it (ADR-015). The
+    reconciler already wrote the run, ticket and reply that match what it verified.
+
+    Locking the refund row orders this save with the reconciler's settle, which takes the
+    same lock first: whichever is second sees what the first committed.
+    """
+    if "refund_status" not in written:  # this segment did not execute a refund
+        return False
+    proposal_id = final.get("proposal_id")
+    operation = (
+        None if proposal_id is None else await refunds.lock_for_proposal(session, proposal_id)
+    )
+    await session.flush()  # keep this segment's own pending changes before reloading
+    await session.refresh(run)
+    await session.refresh(ticket)
+    if operation is None:  # the refund step always leaves one; nothing newer to protect
+        return False
+    return operation.status != written["refund_status"] or run.status == RunStatus.ESCALATED
 
 
 async def _remember_outcome(

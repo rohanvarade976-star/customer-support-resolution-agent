@@ -55,6 +55,41 @@ async def insert_if_absent(
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
+async def set_refund_outcome(
+    session: AsyncSession,
+    *,
+    customer_id: UUID,
+    ticket_id: UUID,
+    order_id: UUID,
+    outcome: MemoryOutcome,
+    category: TicketCategory | None,
+    source_run_id: UUID,
+    now: datetime,
+    expires_at: datetime,
+) -> None:
+    """Make this run's item say how its refund ended, inserting it if the run has none.
+
+    Used by reconciliation: a run that ended with "refund submitted" (or escalated) already
+    has an item, and the provider's later, final answer replaces what it says.
+    """
+    stmt = insert(CustomerMemory).values(
+        customer_id=customer_id,
+        ticket_id=ticket_id,
+        order_id=order_id,
+        kind=MemoryKind.REFUND_EXECUTED,
+        outcome_code=outcome,
+        category=category,
+        source_run_id=source_run_id,
+        created_at=now,
+        expires_at=expires_at,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[CustomerMemory.source_run_id],
+        set_={"kind": stmt.excluded.kind, "outcome_code": stmt.excluded.outcome_code},
+    )
+    await session.execute(stmt)
+
+
 async def list_recent(
     session: AsyncSession, customer_id: UUID, *, now: datetime, limit: int
 ) -> list[MemoryEntry]:

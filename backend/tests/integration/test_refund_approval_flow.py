@@ -453,6 +453,7 @@ async def test_approving_twice_still_yields_one_refund(
             payment_client,
             UUID(proposal["proposal_id"]),
             now=clock.now,
+            settings=get_settings(),
         )
     rows = await refunds_for(session, proposal["proposal_id"])
     assert [row.id for row in rows] == [again.id]

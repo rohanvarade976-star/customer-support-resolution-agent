@@ -63,8 +63,9 @@ def memory_outcome(
         return MemoryKind.CASE_ESCALATED, MemoryOutcome.ESCALATED
     if run_status not in (RunStatus.COMPLETED, RunStatus.FAILED):
         return None
-    if refund_status is not None and refund_status in _REFUND_OUTCOMES:
-        return MemoryKind.REFUND_EXECUTED, _REFUND_OUTCOMES[refund_status]
+    refund_outcome = None if refund_status is None else refund_memory_outcome(refund_status)
+    if refund_outcome is not None:
+        return MemoryKind.REFUND_EXECUTED, refund_outcome
     if run_status != RunStatus.COMPLETED:
         return None
     if approval_decision == ApprovalDecision.REJECTED:
@@ -72,6 +73,11 @@ def memory_outcome(
     if action == ResolutionAction.EXPLAIN_STATUS:
         return MemoryKind.CASE_COMPLETED, MemoryOutcome.STATUS_EXPLAINED
     return None
+
+
+def refund_memory_outcome(status: RefundOperationStatus) -> MemoryOutcome | None:
+    """What a refund in `status` is remembered as; None while its outcome is unknown."""
+    return _REFUND_OUTCOMES.get(status)
 
 
 def render_memory(entries: list[MemoryEntry]) -> str:

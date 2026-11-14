@@ -75,6 +75,9 @@ SEED_TABLES: list[type[Base]] = [
 ]
 
 APPROVAL_TTL = timedelta(hours=24)
+# Idempotency keys of the seeded past refunds. They stand for refunds made before the mock
+# payment provider existed, so the provider has no record of them (services/invariants.py).
+HISTORY_KEY_PREFIX = "seed-refund-"
 
 
 class ResetRefusedError(RuntimeError):
@@ -308,7 +311,7 @@ class _Seeder:
                 order_id=order.id,
                 proposal_id=proposal.id,
                 amount_minor=order.paid_amount_minor,  # full refund
-                idempotency_key=f"seed-refund-{order.order_number}",
+                idempotency_key=f"{HISTORY_KEY_PREFIX}{order.order_number}",
                 provider_reference=data.provider_reference,
                 status=RefundOperationStatus.SUCCEEDED,
                 created_at=completed,

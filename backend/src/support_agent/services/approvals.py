@@ -29,6 +29,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
 from support_agent.db.models import ActionProposal, Approval, RefundOperation, Ticket, WorkflowRun
 from support_agent.domain.enums import (
@@ -125,7 +126,7 @@ async def decide(
 
     if run.mode == RunMode.MANUAL:
         response = await _decide_manual(
-            session, payments, approval, proposal, run, ticket, reviewer, body, now
+            session, env.settings, payments, approval, proposal, run, ticket, reviewer, body, now
         )
         return DecisionOutcome(response, queued=False)
     response = await _decide_and_queue(session, env, approval, proposal, run, reviewer, body, now)
@@ -227,6 +228,7 @@ async def expire_overdue_approvals(session: AsyncSession, env: runs_service.Enqu
 
 async def _decide_manual(
     session: AsyncSession,
+    settings: Settings,
     payments: PaymentClient,
     approval: Approval,
     proposal: ActionProposal,
@@ -254,7 +256,7 @@ async def _decide_manual(
     await session.commit()  # the decision is stored (and the lock released) before money moves
 
     operation = await refund_execution.execute_approved_refund(
-        session, payments, proposal.id, now=now
+        session, payments, proposal.id, now=now, settings=settings
     )
     return _approved_response(approval, proposal, operation)
 

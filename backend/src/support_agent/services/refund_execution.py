@@ -12,16 +12,24 @@ Only code calls this, after a stored approval; no agent can reach it. Three step
 
 Calling this again for the same proposal returns the existing refund operation
 without calling the provider again (and the database allows only one per proposal).
+
+Anything not final afterwards (submitted, processing, pending_reconciliation, or still
+reserved because this process died) is settled later by the reconciler
+(services/reconciliation.py, ADR-014). The outcome is written only if the operation is
+still reserved, so an executor that stalled cannot overwrite what the reconciler settled.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, NoReturn
 from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.core import crash_points
+from support_agent.core.config import Settings
+from support_agent.core.crash_points import CrashPoint
 from support_agent.core.errors import AppError
 from support_agent.db.models import ActionProposal, RefundOperation, Ticket, WorkflowRun
 from support_agent.domain.eligibility import check_eligibility
@@ -34,7 +42,11 @@ from support_agent.domain.enums import (
 )
 from support_agent.domain.money import refund_totals, refundable_balance
 from support_agent.domain.proposals import RefundProposalPayload, payload_hash
-from support_agent.domain.refund_outcomes import ACCEPTED_STATUSES, statuses_after_refund
+from support_agent.domain.refund_outcomes import (
+    ACCEPTED_STATUSES,
+    FINAL_STATUSES,
+    statuses_after_refund,
+)
 from support_agent.integrations.errors import (
     OutcomeUnknownError,
     ProviderRejectedError,
@@ -48,7 +60,7 @@ from support_agent.services.case_updates import load_case, set_run_status, set_t
 
 ACTOR = "system"
 
-_EVENT_FOR_STATUS = {
+EVENT_FOR_STATUS = {
     RefundOperationStatus.SUBMITTED: "refund.submitted",
     RefundOperationStatus.PROCESSING: "refund.processing",
     RefundOperationStatus.SUCCEEDED: "refund.succeeded",
@@ -92,7 +104,9 @@ class _Case:
 
 
 @dataclass(frozen=True)
-class _Outcome:
+class ProviderOutcome:
+    """What one refund request to the provider ended as, in our statuses."""
+
     status: RefundOperationStatus
     provider_reference: str | None
     error_code: str | None
@@ -104,17 +118,26 @@ async def execute_approved_refund(
     proposal_id: UUID,
     *,
     now: datetime,
+    settings: Settings,
 ) -> RefundOperation:
     existing = await refunds.get_for_proposal(session, proposal_id)
     if existing is not None:
         return existing  # already executed once: never call the provider again
 
     case = await _revalidate(session, proposal_id, now)
-    operation, created = await _reserve(session, case, now)
+    stale_after = timedelta(seconds=settings.reconcile_stale_reserved_seconds)
+    operation, created = await _reserve(session, case, now, stale_after)
     if not created:
         return operation
+    crash_points.reached(CrashPoint.AFTER_RESERVE)  # tests only (ADR-015)
 
-    outcome = await _call_provider(payments, operation, case.payload)
+    outcome = await send_refund(
+        payments,
+        idempotency_key=operation.idempotency_key,
+        amount_minor=operation.amount_minor,
+        payload=case.payload,
+    )
+    crash_points.reached(CrashPoint.AFTER_PROVIDER_CALL)  # tests only (ADR-015)
     await _record_outcome(session, case, operation, outcome, now)
     return operation
 
@@ -192,7 +215,7 @@ async def _invalidate(
 
 
 async def _reserve(
-    session: AsyncSession, case: _Case, now: datetime
+    session: AsyncSession, case: _Case, now: datetime, stale_after: timedelta
 ) -> tuple[RefundOperation, bool]:
     """Short locked transaction. Returns (operation, created_now)."""
     order = await orders.lock_by_id(session, case.payload.order_id)  # lock held from here...
@@ -216,6 +239,8 @@ async def _reserve(
         proposal_id=case.proposal.id,
         amount_minor=case.payload.amount_minor,
         idempotency_key=idempotency_key_for(case.proposal.id),
+        # Still reserved by then: this process died before or while calling the provider.
+        check_if_stuck_at=now + stale_after,
     )
     await audit.record(
         session,
@@ -236,21 +261,29 @@ async def _reserve(
 # ---------------------------------------------------------------- 3. call and record
 
 
-async def _call_provider(
-    payments: PaymentClient, operation: RefundOperation, payload: RefundProposalPayload
-) -> _Outcome:
-    """Exactly one attempt (ADR-004). Every possible answer maps to one of our statuses."""
+async def send_refund(
+    payments: PaymentClient,
+    *,
+    idempotency_key: str,
+    amount_minor: int,
+    payload: RefundProposalPayload,
+) -> ProviderOutcome:
+    """Exactly one attempt (ADR-004). Every possible answer maps to one of our statuses.
+
+    The reconciler's one re-send uses this too, so it sends exactly the same request
+    (same key, same body); a provider refuses a key reused with a different body.
+    """
     try:
         refund = await payments.create_refund(
-            idempotency_key=operation.idempotency_key,
+            idempotency_key=idempotency_key,
             order_reference=payload.order_number,
-            amount_minor=operation.amount_minor,
+            amount_minor=amount_minor,
             currency=payload.currency,
             reason=payload.reason,
         )
     except OutcomeUnknownError as exc:
         # A refund may exist. Only reconciliation by key may decide what happened.
-        return _Outcome(RefundOperationStatus.PENDING_RECONCILIATION, None, exc.error_code)
+        return ProviderOutcome(RefundOperationStatus.PENDING_RECONCILIATION, None, exc.error_code)
     except ProviderUnavailableError as exc:
         # create_refund only lets this through when nothing was sent; stay safe anyway.
         status = (
@@ -258,25 +291,34 @@ async def _call_provider(
             if exc.request_sent
             else RefundOperationStatus.FAILED
         )
-        return _Outcome(status, None, exc.error_code)
+        return ProviderOutcome(status, None, exc.error_code)
     except (ProviderRejectedError, ResourceNotFoundError) as exc:
-        return _Outcome(RefundOperationStatus.FAILED, None, exc.error_code)
-    return _Outcome(refund.status, refund.provider_reference, None)
+        return ProviderOutcome(RefundOperationStatus.FAILED, None, exc.error_code)
+    return ProviderOutcome(refund.status, refund.provider_reference, None)
 
 
 async def _record_outcome(
     session: AsyncSession,
     case: _Case,
     operation: RefundOperation,
-    outcome: _Outcome,
+    outcome: ProviderOutcome,
     now: datetime,
 ) -> None:
-    await refunds.set_outcome(session, operation, outcome.status, outcome.provider_reference)
+    written = await refunds.record_first_outcome(
+        session,
+        operation,
+        outcome.status,
+        outcome.provider_reference,
+        next_check_at=None if outcome.status in FINAL_STATUSES else now,
+    )
+    if not written:
+        await session.commit()  # the reconciler settled it, including the run and ticket
+        return
     await audit.record(
         session,
         run_id=case.run.id,
         actor=ACTOR,
-        event_type=_EVENT_FOR_STATUS[outcome.status],
+        event_type=EVENT_FOR_STATUS[outcome.status],
         payload={
             "refund_id": str(operation.id),
             "status": outcome.status.value,
@@ -284,6 +326,7 @@ async def _record_outcome(
             "error_code": outcome.error_code,
         },
     )
+    crash_points.reached(CrashPoint.AFTER_RECORD)  # tests only (ADR-015)
 
     if outcome.status in ACCEPTED_STATUSES:
         await proposals.set_proposal_status(session, case.proposal, ProposalStatus.EXECUTED)

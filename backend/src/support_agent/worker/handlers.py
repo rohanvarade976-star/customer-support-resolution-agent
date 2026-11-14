@@ -13,6 +13,8 @@ done, and then the job runs again. Every handler is therefore safe to run twice:
 - expire_approvals only picks approvals that are still undecided, so a rerun finds nothing
   new to do.
 - purge_expired_memory deletes rows whose expiry has passed; a rerun deletes nothing more.
+- reconcile_refunds claims each refund operation it checks and settles it only while the
+  claim holds (services/reconciliation.py, ADR-014); a rerun checks only what is due.
 
 Payloads hold ids only. A handler raises to ask for a retry, or PermanentJobError when
 retrying cannot help (the job then goes dead at once and its run is escalated).
@@ -32,6 +34,7 @@ from support_agent.core.errors import PermanentJobError
 from support_agent.domain.enums import JobType
 from support_agent.services import approvals as approvals_service
 from support_agent.services import memory as memory_service
+from support_agent.services import reconciliation
 from support_agent.services import runs as runs_service
 from support_agent.worker.queue import ClaimedJob
 from support_agent.workflow.graph import Checkpointer
@@ -113,12 +116,19 @@ async def purge_expired_memory(session: AsyncSession, job: ClaimedJob, deps: Wor
     await memory_service.purge_expired(session, now=deps.clock())
 
 
+async def reconcile_refunds(session: AsyncSession, job: ClaimedJob, deps: WorkerDeps) -> None:
+    # Fixed code only: the reconciler never needs a model.
+    async with deps.workflow_env(llm_enabled=False) as env:
+        await reconciliation.reconcile_due_refunds(session, env.payments, deps.settings, deps.clock)
+
+
 HANDLERS: dict[JobType, Handler] = {
     JobType.START_RUN: start_run,
     JobType.RESUME_AFTER_CUSTOMER_REPLY: resume_after_customer_reply,
     JobType.RESUME_AFTER_DECISION: resume_after_decision,
     JobType.EXPIRE_APPROVALS: expire_approvals,
     JobType.PURGE_EXPIRED_MEMORY: purge_expired_memory,
+    JobType.RECONCILE_REFUNDS: reconcile_refunds,
 }
 
 

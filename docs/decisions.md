@@ -964,3 +964,252 @@ exactly that kind of free text (nothing wrote to it yet).
   audit trail keeps. It is planned, not built.
 - Adding a value to `MemoryKind` or `MemoryOutcome` needs a migration (the CHECK
   constraints copy the lists), like every other status enum (ADR-003).
+
+---
+
+## ADR-014: Refund reconciliation, and when resending a refund is safe
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Milestone:** M8
+
+### Context
+
+ADR-004 makes refund creation a single attempt: an unclear answer becomes
+`pending_reconciliation` instead of a retry. ADR-012 leaves refunds of a dead job in
+`reserved`, `submitted` or `pending_reconciliation`. Until now nothing ever settled them, so:
+
+- a refund the provider finished later (submitted → processing → succeeded) never resolved
+  its ticket;
+- a refund whose reply was lost stayed "unknown" forever, holding its amount in the balance;
+- a worker that died between reserving and calling the provider left a `reserved` row that
+  nobody would ever send.
+
+Settling these touches money, so it must be safe under crashes, retries and two workers
+doing it at once, and must never say money moved before the provider confirms it (FR-18,
+FR-19).
+
+### Decision
+
+1. **A scheduled `reconcile_refunds` sweep** (`services/reconciliation.py`), queued every
+   `RECONCILE_CHECK_SECONDS` like the other sweeps (at most one open at a time). It checks up
+   to `RECONCILE_BATCH_SIZE` operations whose `next_reconcile_at` has passed, each at most
+   once per sweep. Every unsettled operation has a `next_reconcile_at`:
+   - the executor sets it to *now* after a `submitted`, `processing` or
+     `pending_reconciliation` answer, and clears it for `succeeded` or `failed`;
+   - a new `reserved` row gets *reserved time + `RECONCILE_STALE_RESERVED_SECONDS`*. If the
+     executor finishes normally, its answer replaces that; if it died, the row becomes due.
+2. **What a check does:**
+
+   | Status | Question to the provider | Result |
+   |---|---|---|
+   | `submitted`, `processing` | `get_refund(provider_reference)` | adopt a newer status |
+   | `pending_reconciliation`, stale `reserved` | `find_refund_by_key(key)` | found: adopt it; 404: resend once |
+
+   Any other error (timeout, 5xx, unreadable reply) is "no answer": check again later. A
+   status only ever moves **forward** (`domain/refund_outcomes.status_to_adopt`):
+   processing never goes back to submitted, and a final status never changes.
+3. **Resending is safe only when all of these hold:**
+   - the provider answered a definite **404 for our idempotency key**, so no refund exists
+     (ADR-004). A timeout or a 5xx on the lookup is not an answer;
+   - the operation is past the **stale threshold** (for `reserved`), or the executor already
+     recorded an unknown outcome, so the executor's own request is no longer in flight.
+     Settings validation makes the stale threshold and the reconciler's lease longer than
+     the longest provider exchange;
+   - it is the **same key and the exact same body**: the executor and the reconciler send
+     through one function, `send_refund`, built from the approved, hash-checked proposal;
+   - it is the **first resend**. `resent_at` is written and committed *before* the request
+     goes out, and only by the current holder of the claim. After one resend, a 404 is not
+     resent again: it counts as a failed check. So even if the provider ignored idempotency
+     keys entirely, we would send at most two requests for one approval, never an unbounded
+     number.
+
+   The approval's expiry is not checked again for a resend: the approval was valid when the
+   amount was reserved, and the resend completes that reserved operation.
+4. **Three short steps, and fencing.** Like the job queue (ADR-012):
+   1. *claim*: `SELECT … FOR UPDATE SKIP LOCKED`, add one to `reconcile_checks`, move
+      `next_reconcile_at` to the end of a lease (`RECONCILE_LEASE_SECONDS`), commit;
+   2. *ask the provider* with no transaction open (CLAUDE.md rule 7);
+   3. *settle*: lock the row **only if `reconcile_checks` and the status are unchanged since
+      the claim**, record everything, commit.
+
+   `reconcile_checks` is the fencing token. A reconciler that stalled past its lease, and
+   was replaced, finds no row to lock (or cannot mark a resend) and writes nothing. The
+   executor's own outcome write is a compare-and-set too ("only if still `reserved`"), so a
+   late executor cannot overwrite what a reconciler settled, or the other way round.
+5. **On a verified answer**, in one transaction: the operation's status and provider
+   reference, the proposal (`executed` once the provider accepted the refund), the run and
+   ticket statuses from `statuses_after_refund` (the ticket is `resolved` **only** on
+   `succeeded`), the customer reply from the executor's fixed `describe(status)`, the run's
+   memory item (updated in place to the refund outcome, ADR-013), and audit events
+   `refund.reconciled` (from → to, checks, whether it was resent) plus the executor's usual
+   `refund.<status>`. A resend adds `refund.resent`.
+6. **A run that is already escalated stays with its person.** Its money records, proposal,
+   audit trail and memory are settled; its run status, ticket status and escalation reply
+   are left alone. The `refund.reconciled` event tells the person what the provider said.
+7. **Backoff, then escalation without touching money.** A check that learns nothing sets
+   the next check `backoff_delay(checks)` away (the job queue's exponential backoff with
+   equal jitter, `RECONCILE_BACKOFF_BASE_SECONDS` / `_MAX_SECONDS`). Every check counts,
+   including "still processing". After `RECONCILE_MAX_CHECKS`, the run is escalated with
+   reason `RECONCILIATION_EXHAUSTED` (ticket escalated, fixed escalation reply, memory
+   "escalated"), `refund.reconciliation_stopped` is recorded, and `next_reconcile_at` is
+   cleared. **The operation keeps its status**, so its amount still counts against the
+   refundable balance, and nothing claims the money moved or did not. A definite problem
+   that more checks cannot fix escalates at once, with its own reason code: a refund the
+   provider confirmed earlier has disappeared (`CONFIRMED_REFUND_MISSING`), the provider's
+   record does not match our key or amount (`PROVIDER_MISMATCH`), or the proposal no longer
+   matches its approval (`PROPOSAL_CHANGED`).
+
+### Alternatives considered
+
+- **Retry inside the executor with the same key:** ADR-004 already rejected it. It would
+  also put the waiting inside the run's job, holding a worker for minutes.
+- **One reconcile job per refund operation** (queued by the executor): more precise
+  scheduling, but a job type that carries money state, and a crash between the refund
+  commit and the enqueue would need a sweep anyway. One sweep over a "due" column is simpler
+  and catches every case, including rows from before this change.
+- **An advisory lock per operation instead of a lease and token:** same objections as in
+  ADR-012 (pinned connections, transaction-mode poolers).
+- **Mark the operation `failed` after the last check:** wrong. A refund we could not verify
+  may have happened. Only the provider can say it failed.
+- **Resend whenever the lookup fails:** a timeout on the lookup says nothing about the
+  refund. Only a 404 does.
+
+### Consequences
+
+- A refund reaches `succeeded` (and its ticket `resolved`) within about one sweep interval
+  of the provider finishing it, plus any backoff.
+- Unsettled refunds now have a bounded life: about `RECONCILE_MAX_CHECKS` checks spread by
+  backoff (hours with the defaults), then a person.
+- A resend whose request never reached the provider (connect failure) is recorded as
+  `failed`, as the executor does: nothing was sent and no refund exists. The one resend is
+  used up, so that refund needs a new proposal.
+- A manual (M3) run's refund is settled by the same code, so manual runs now also get a
+  memory item when their refund settles.
+- `execute_approved_refund` now takes the settings (for the stale threshold).
+- A run that was `completed` with a `submitted` refund can later become `failed` (the
+  provider declined it) or `escalated` (checks exhausted). That is intended: the earlier
+  status only ever said the provider had accepted the request.
+
+
+---
+
+## ADR-015: Money invariants, and how crash, race and chaos tests verify them
+
+- **Date:** 2026-11-14
+- **Status:** Accepted
+- **Milestone:** M8
+
+### Context
+
+M8 promises that retries, restarts and concurrent requests can never duplicate or lose a
+refund (PRD "Definition of done"; ADR-004, ADR-012, ADR-014). Example-based tests show the
+paths we thought of. They do not show what happens when the process dies between two
+statements, when two actors hit the same row at the same moment, or when the provider
+misbehaves in a combination nobody wrote down. We need the rules stated once, a way to check
+them that does not trust the code it checks, and tests that attack the code from those
+three directions.
+
+### Decision
+
+1. **The invariants**, checked by `services/invariants.py` (SQL in
+   `repositories/invariants.py`). Each violation is a code plus ids, never customer data:
+
+   | Code | Rule |
+   |---|---|
+   | `REFUNDS_EXCEED_PAID` | Per order, refunds that did not fail add up to at most the paid amount. |
+   | `REFUND_NOT_APPROVED` | Every refund has an approved approval whose hash equals the hash of its proposal's payload, **recomputed** by the checker. |
+   | `REFUND_DIFFERS_FROM_PROPOSAL` | The refund's amount and order are the approved ones. |
+   | `DUPLICATE_REFUND_FOR_PROPOSAL` | At most one refund per proposal (the unique constraint is not trusted). |
+   | `PROVIDER_REFUND_MISSING` / `PROVIDER_REFUND_ORPHAN` | Our refunds and the provider's match by idempotency key, both ways. A `reserved` or `pending_reconciliation` refund may lack a provider record. |
+   | `PROVIDER_AMOUNT_MISMATCH` / `PROVIDER_REFERENCE_MISMATCH` / `PROVIDER_OUTCOME_MISMATCH` | Same amount, same reference, and never "succeeded" on one side with "failed" on the other. |
+   | `TICKET_RESOLVED_WITHOUT_REFUND` | A ticket whose latest run made a refund is resolved only if that refund succeeded, at the provider too. |
+   | `TICKET_BEHIND_REFUND` | A succeeded refund's ticket is resolved, unless its run is with a person (escalated). |
+   | `REFUND_UNWATCHED` | An unsettled refund has a next reconciliation check, or its run is escalated (ADR-014 hands it to a person). |
+   | `RUN_STUCK_EXECUTING` | An executing run has a scheduled refund check or an open job. |
+
+   The checker is **independent**: it only reads tables and reuses no service query. It
+   reads the mock provider's table when that table is in the same database
+   (`to_regclass`), as plain SQL, without importing the provider's code. The seed's past
+   refunds (keys starting `seed-refund-`, `HISTORY_KEY_PREFIX` in `db/seed.py`) are skipped
+   in the provider comparison only: they stand for refunds made before the provider
+   existed, so the provider cannot know them. They are still checked against their
+   proposals and approvals.
+
+2. **A grace period for the "left behind" rules.** The last three rules are about time: on
+   a live system, a run between two of its commits looks stuck for a moment. Those rules
+   skip rows whose `updated_at` is newer than `INVARIANT_GRACE_SECONDS` (default 900),
+   measured with the database's clock, the same clock that wrote `updated_at`. Tests use 0.
+   `scripts/check_invariants.py` runs the checker read-only (it rolls back) against
+   `DATABASE_URL` and exits 1 on any violation; `--grace-seconds` overrides the grace.
+
+3. **Crash points** (`core/crash_points.py`). The refund executor calls `reached(point)`
+   after the reservation is committed, after the provider answers, and after the outcome
+   is written but before the run and ticket are updated. Nothing is armed unless a test
+   arms it, and arming is refused when `APP_ENV=production`. The crash is a
+   `SimulatedCrash(BaseException)`: the worker's `except Exception` does not catch it, so
+   the job stays `running` until its lease runs out, exactly like a killed process, and the
+   test rolls back the open transaction as a dropped connection would.
+   `tests/integration/test_crash_recovery.py` crashes at each point and lets a new worker
+   and the reconciler recover. The third point behaves like the second: the outcome and
+   the run/ticket updates are one transaction, so the crash loses both and there is never a
+   half-recorded refund. The test asserts exactly that.
+
+4. **Races on separate committed connections** (`tests/integration/test_money_races.py`,
+   with the `committed_world` fixture: the seed committed for real, every table truncated
+   afterwards). The interleavings are forced with events and barriers, not left to timing:
+   two executions of one approval after both passed the early check; two reviewers
+   approving at once; approval against the expiry sweep, with each side taking the lock
+   first; and the executor and the reconciler each arriving late on the same operation.
+
+5. **Seeded chaos** (`tests/integration/test_money_chaos.py`). Random sequences of manual
+   and workflow cases, approvals, rejections, expiries, clock jumps, worker and reconciler
+   sweeps and crash points, with every provider request facing a seeded fault (connect
+   error, 500, reply lost after the work was done, 504, slow, decline). Afterwards the
+   faults stop, the worker settles what it can, and the checker must report nothing; the
+   provider must hold no refund we did not ask for and never more per order than was paid.
+   The seed is in the test id and in the failure notes, with the step log. CI runs 6 seeds
+   of 40 steps (about 25 s); `CHAOS_SEED`, `CHAOS_SEEDS` and `CHAOS_STEPS` replay or widen
+   it. As a check of the test itself, a deliberately broken resend key was caught by 3 of
+   the 6 default seeds.
+
+6. **Bug found and fixed: the workflow's save could undo the reconciler.** The refund step
+   reads the refund's status, the graph saves a checkpoint, then `save_segment` writes the
+   run status, ticket status and reply from what the step read. If the reconciler (on
+   another worker) settled the refund in that gap, the save put a resolved ticket back to
+   "in progress", or an escalated run back to "executing" with nothing left to finish it.
+   `save_segment` now locks the refund row (the lock the reconciler's settle takes first)
+   and, if the refund's status has moved on or the run was escalated, leaves the run,
+   ticket and reply as the reconciler wrote them. Two race tests reproduce both cases and
+   failed before the fix.
+
+### Alternatives considered
+
+- **Assertions in each test, no shared checker:** every test would restate the rules and
+  check only what its author thought of. One checker run after every scenario finds
+  problems nobody was looking for.
+- **Database constraints or triggers for every rule:** "refunds per order never exceed the
+  paid amount" spans rows, and the provider's table belongs to another service.
+  Constraints stay where they fit (unique proposal, positive amounts); the checker covers
+  the rest, including what the constraints already promise.
+- **Monkeypatching functions to simulate crashes:** works today (some older tests do it)
+  but breaks silently when code moves. Named points document where the dangerous moments
+  are and cost one comparison in production.
+- **Crashing with an ordinary exception:** the worker would catch it and schedule a tidy
+  retry, which tests the retry path, not a dead process.
+- **Property-based testing with Hypothesis:** better shrinking, but a new dependency whose
+  async and database support would need fixtures of its own. A seeded RNG with the seed and
+  step log printed gives replayable failures with what we already have.
+
+### Consequences
+
+- `scripts/check_invariants.py` can run any time, including against a live system, and is
+  worth adding to the eval report (M9).
+- The checker is only as good as its rules: a bug that breaks none of them goes unseen.
+  `tests/integration/test_invariants.py` plants each violation by hand to prove every rule
+  can fail.
+- The chaos test runs on one connection, so it explores orderings and faults, not true
+  parallelism; the race tests cover that. Row ids are random, so a replayed seed takes the
+  same decisions but may process due rows in a different order.
+- `committed_world` truncates every app table after its test, so tests using it must not
+  run in parallel with other database tests (none do today).

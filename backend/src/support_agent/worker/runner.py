@@ -3,6 +3,7 @@
     loop:
         every approval_expiry_check_seconds: queue an approval-expiry sweep (if none is open)
         every memory_purge_check_seconds: queue a memory purge sweep (if none is open)
+        every reconcile_check_seconds: queue a refund reconciliation sweep (if none is open)
         claim the next due job (or sleep for the poll interval)
         run its handler, with a heartbeat task renewing the lease
         success           -> complete
@@ -158,6 +159,7 @@ async def run_forever(deps: WorkerDeps, stop: asyncio.Event) -> None:
     intervals = {
         JobType.EXPIRE_APPROVALS: settings.approval_expiry_check_seconds,
         JobType.PURGE_EXPIRED_MEMORY: settings.memory_purge_check_seconds,
+        JobType.RECONCILE_REFUNDS: settings.reconcile_check_seconds,
     }
     next_sweep = dict.fromkeys(intervals, deps.clock())
     while not stop.is_set():
