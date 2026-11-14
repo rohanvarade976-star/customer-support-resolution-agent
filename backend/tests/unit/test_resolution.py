@@ -110,6 +110,7 @@ async def run(
     case: ResolutionInputs | None = None,
     results: list[ToolResult] | None = None,
     max_revisions: int = 1,
+    critic_enabled: bool = True,
 ) -> tuple[ResolutionOutcome, FakeProvider]:
     fake = FakeProvider(list(script))
     client = RoutedLLMClient(
@@ -126,6 +127,7 @@ async def run(
         max_revisions=max_revisions,
         delivery_tolerance=timedelta(hours=24),
         critic_tier="large",
+        critic_enabled=critic_enabled,
     )
     return outcome, fake
 
@@ -360,6 +362,26 @@ async def test_a_critic_cannot_change_the_amount() -> None:
     outcome, _ = await run(script)
 
     assert outcome.amount_minor == ELIGIBLE_MINOR
+
+
+async def test_with_the_critic_off_a_valid_draft_is_accepted_without_a_critic_call() -> None:
+    outcome, fake = await run([good_draft()], critic_enabled=False)
+
+    assert outcome.action == ResolutionAction.REFUND
+    assert outcome.amount_minor == ELIGIBLE_MINOR
+    assert outcome.attempts[0].verdict is None
+    assert [r.forced_tool for r in fake.requests] == ["resolution_draft"]
+
+
+async def test_with_the_critic_off_the_validator_still_rejects_and_revises() -> None:
+    overclaim = draft_reply("refund", message=OVERCLAIM, citations=[CITATION])
+
+    outcome, fake = await run([overclaim, good_draft()], critic_enabled=False)
+
+    assert ValidationCode.UNVERIFIED_CLAIM in outcome.attempts[0].validation
+    assert outcome.action == ResolutionAction.REFUND
+    assert outcome.message == PROPOSED
+    assert [r.forced_tool for r in fake.requests] == ["resolution_draft", "resolution_draft"]
 
 
 # ---------------------------------------------------------------- other actions and failures

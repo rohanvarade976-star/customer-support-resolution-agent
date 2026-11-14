@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     resolution_max_revisions: int = Field(default=1, ge=0, le=2)
     # The critic's tier. It reviews text and cannot change amounts or override the validator.
     critic_tier: Literal["small", "large"] = "large"
+    # Off: drafts that pass the validator are accepted without the critic's review. Only for
+    # the evaluation's "multi_agent_no_critic" configuration (ADR-010, ADR-016); the
+    # validator, and a revision after its objections, still run.
+    critic_enabled: bool = True
     # The supervisor's tier (agents/supervisor.py). It only picks which specialists gather
     # information and what each should focus on; it decides nothing about the outcome.
     supervisor_tier: Literal["small", "large"] = "small"

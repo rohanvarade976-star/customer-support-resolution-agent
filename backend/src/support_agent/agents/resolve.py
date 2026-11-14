@@ -203,8 +203,13 @@ async def resolve(
     max_revisions: int,
     delivery_tolerance: timedelta,
     critic_tier: ModelTier,
+    critic_enabled: bool = True,
 ) -> ResolutionOutcome:
-    """Run the loop. `trace` and `results` are the investigator's (InvestigationOutcome)."""
+    """Run the loop. `trace` and `results` are the investigator's (InvestigationOutcome).
+
+    With `critic_enabled` off (an evaluation setting) the critic never runs; the validator
+    still checks every draft and may still ask for a revision.
+    """
     ctx = build_context(inputs, trace, results, delivery_tolerance)
     attempts: list[Attempt] = []
     messages = initial_messages(inputs)
@@ -222,7 +227,7 @@ async def resolve(
                 return escalation_outcome([code.value for code in codes], attempts)
 
             verdict: CriticVerdict | None = None
-            if not codes and draft.action != ResolutionAction.ESCALATE:
+            if critic_enabled and not codes and draft.action != ResolutionAction.ESCALATE:
                 failure = ResolutionFailure.CRITIC_OUTPUT_INVALID
                 verdict = await review_draft(llm, inputs, draft, tier=critic_tier)
             attempts.append(Attempt(draft, codes, verdict))

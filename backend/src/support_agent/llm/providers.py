@@ -286,9 +286,13 @@ def build_providers(settings: Settings) -> list[ChatProvider]:
     return providers
 
 
-def build_llm_client(settings: Settings) -> RoutedLLMClient:
+def build_llm_client(
+    settings: Settings, providers: list[ChatProvider] | None = None
+) -> RoutedLLMClient:
+    """The app's client. `providers` replaces the configured ones (the eval passes them
+    wrapped in a rate limiter); retries and fallback order stay the same."""
     return RoutedLLMClient(
-        build_providers(settings),
+        build_providers(settings) if providers is None else providers,
         RetrySettings(
             max_attempts=settings.llm_max_attempts,
             backoff_base_seconds=settings.llm_backoff_base_seconds,

@@ -1,0 +1,903 @@
+{
+  "customers": [
+    {
+      "name": "Ananya Gupta",
+      "email": "eval.ananya@example.com",
+      "external_auth_subject": "eval|ananya",
+      "orders": [
+        {
+          "order_number": "ORD-2001",
+          "status": "delivered",
+          "placed_days_ago": 14,
+          "delivered_days_ago": 10,
+          "items": [
+            {
+              "product_id": "SKU-EV-001",
+              "product_name": "Noise-cancelling Headphones",
+              "quantity": 1,
+              "paid_amount_minor": 349900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 6,
+              "received_days_ago": 3,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Rohit Bansal",
+      "email": "eval.rohit@example.com",
+      "external_auth_subject": "eval|rohit",
+      "orders": [
+        {
+          "order_number": "ORD-2002",
+          "status": "delivered",
+          "placed_days_ago": 24,
+          "delivered_days_ago": 20,
+          "items": [
+            {
+              "product_id": "SKU-EV-002",
+              "product_name": "Mechanical Keyboard",
+              "quantity": 1,
+              "paid_amount_minor": 459900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 15,
+              "received_days_ago": 5,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Farah Khan",
+      "email": "eval.farah@example.com",
+      "external_auth_subject": "eval|farah",
+      "orders": [
+        {
+          "order_number": "ORD-2003",
+          "status": "delivered",
+          "placed_days_ago": 12,
+          "delivered_days_ago": 8,
+          "items": [
+            {
+              "product_id": "SKU-EV-003",
+              "product_name": "27-inch Monitor",
+              "quantity": 1,
+              "paid_amount_minor": 1249900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 5,
+              "received_days_ago": 2,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Nikhil Joshi",
+      "email": "eval.nikhil@example.com",
+      "external_auth_subject": "eval|nikhil",
+      "orders": [
+        {
+          "order_number": "ORD-2004",
+          "status": "delivered",
+          "placed_days_ago": 9,
+          "delivered_days_ago": 7,
+          "items": [
+            {
+              "product_id": "SKU-EV-004",
+              "product_name": "10-inch Tablet",
+              "quantity": 1,
+              "paid_amount_minor": 2199900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 6,
+              "received_days_ago": 2,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Pooja Reddy",
+      "email": "eval.pooja@example.com",
+      "external_auth_subject": "eval|pooja",
+      "orders": [
+        {
+          "order_number": "ORD-2005",
+          "status": "delivered",
+          "placed_days_ago": 50,
+          "delivered_days_ago": 45,
+          "items": [
+            {
+              "product_id": "SKU-EV-005",
+              "product_name": "Fitness Band",
+              "quantity": 1,
+              "paid_amount_minor": 279900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Sameer Patil",
+      "email": "eval.sameer@example.com",
+      "external_auth_subject": "eval|sameer",
+      "orders": [
+        {
+          "order_number": "ORD-2006",
+          "status": "delivered",
+          "placed_days_ago": 16,
+          "delivered_days_ago": 12,
+          "items": [
+            {
+              "product_id": "SKU-EV-006",
+              "product_name": "Soundbar",
+              "quantity": 1,
+              "paid_amount_minor": 899900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 8,
+              "received_days_ago": 4,
+              "inspection_status": "failed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Divya Menon",
+      "email": "eval.divya@example.com",
+      "external_auth_subject": "eval|divya",
+      "orders": [
+        {
+          "order_number": "ORD-2007",
+          "status": "delivered",
+          "placed_days_ago": 10,
+          "delivered_days_ago": 7,
+          "items": [
+            {
+              "product_id": "SKU-EV-007",
+              "product_name": "Wireless Mouse",
+              "quantity": 1,
+              "paid_amount_minor": 159900
+            }
+          ],
+          "returns": [
+            {
+              "status": "in_transit",
+              "requested_days_ago": 3,
+              "inspection_status": "pending"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Karthik Rao",
+      "email": "eval.karthik@example.com",
+      "external_auth_subject": "eval|karthik",
+      "orders": [
+        {
+          "order_number": "ORD-2008",
+          "status": "delivered",
+          "placed_days_ago": 12,
+          "delivered_days_ago": 9,
+          "items": [
+            {
+              "product_id": "SKU-EV-008",
+              "product_name": "HD Webcam",
+              "quantity": 1,
+              "paid_amount_minor": 389900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 6,
+              "received_days_ago": 1,
+              "inspection_status": "pending"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Lakshmi Pillai",
+      "email": "eval.lakshmi@example.com",
+      "external_auth_subject": "eval|lakshmi",
+      "orders": [
+        {
+          "order_number": "ORD-2009",
+          "status": "delivered",
+          "placed_days_ago": 30,
+          "delivered_days_ago": 26,
+          "items": [
+            {
+              "product_id": "SKU-EV-009",
+              "product_name": "Power Bank",
+              "quantity": 1,
+              "paid_amount_minor": 219900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 20,
+              "received_days_ago": 17,
+              "inspection_status": "passed"
+            }
+          ],
+          "refund_history": {
+            "ticket_summary": "Customer returned the power bank and asked for a refund.",
+            "reason": "Return received and passed inspection within the return window.",
+            "opened_days_ago": 15,
+            "completed_days_ago": 14,
+            "reviewer_id": "seed|reviewer",
+            "provider_reference": "mockpay_rf_eval_2009"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Imran Sheikh",
+      "email": "eval.imran@example.com",
+      "external_auth_subject": "eval|imran",
+      "orders": [
+        {
+          "order_number": "ORD-2010",
+          "status": "shipped",
+          "placed_days_ago": 3,
+          "shipped_days_ago": 2,
+          "items": [
+            {
+              "product_id": "SKU-EV-010",
+              "product_name": "Gaming Console",
+              "quantity": 1,
+              "paid_amount_minor": 4999000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Neha Agarwal",
+      "email": "eval.neha@example.com",
+      "external_auth_subject": "eval|neha",
+      "orders": [
+        {
+          "order_number": "ORD-2011",
+          "status": "shipped",
+          "placed_days_ago": 9,
+          "shipped_days_ago": 8,
+          "items": [
+            {
+              "product_id": "SKU-EV-011",
+              "product_name": "Air Purifier",
+              "quantity": 1,
+              "paid_amount_minor": 1499000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Arvind Kumar",
+      "email": "eval.arvind@example.com",
+      "external_auth_subject": "eval|arvind",
+      "orders": [
+        {
+          "order_number": "ORD-2012",
+          "status": "shipped",
+          "placed_days_ago": 20,
+          "shipped_days_ago": 19,
+          "items": [
+            {
+              "product_id": "SKU-EV-012",
+              "product_name": "Office Chair",
+              "quantity": 1,
+              "paid_amount_minor": 1099000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Shreya Das",
+      "email": "eval.shreya@example.com",
+      "external_auth_subject": "eval|shreya",
+      "orders": [
+        {
+          "order_number": "ORD-2013",
+          "status": "delivered",
+          "placed_days_ago": 11,
+          "delivered_days_ago": 8,
+          "items": [
+            {
+              "product_id": "SKU-EV-013A",
+              "product_name": "Electric Kettle",
+              "quantity": 1,
+              "paid_amount_minor": 199900
+            },
+            {
+              "product_id": "SKU-EV-013B",
+              "product_name": "Pop-up Toaster",
+              "quantity": 1,
+              "paid_amount_minor": 249900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 5,
+              "received_days_ago": 2,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Manish Tiwari",
+      "email": "eval.manish@example.com",
+      "external_auth_subject": "eval|manish",
+      "orders": [
+        {
+          "order_number": "ORD-2014",
+          "status": "delivered",
+          "placed_days_ago": 6,
+          "delivered_days_ago": 2,
+          "items": [
+            {
+              "product_id": "SKU-EV-014",
+              "product_name": "Smart Speaker",
+              "quantity": 1,
+              "paid_amount_minor": 549900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Gopal Iyer",
+      "email": "eval.gopal@example.com",
+      "external_auth_subject": "eval|gopal",
+      "orders": [
+        {
+          "order_number": "ORD-2015",
+          "status": "delivered",
+          "placed_days_ago": 800,
+          "delivered_days_ago": 795,
+          "items": [
+            {
+              "product_id": "SKU-EV-015",
+              "product_name": "Digital Camera",
+              "quantity": 1,
+              "paid_amount_minor": 3499000
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 790,
+              "received_days_ago": 785,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Ritu Saxena",
+      "email": "eval.ritu@example.com",
+      "external_auth_subject": "eval|ritu",
+      "orders": [
+        {
+          "order_number": "ORD-2016",
+          "status": "delivered",
+          "placed_days_ago": 4,
+          "delivered_days_ago": 2,
+          "items": [
+            {
+              "product_id": "SKU-EV-016",
+              "product_name": "Hair Dryer",
+              "quantity": 1,
+              "paid_amount_minor": 329900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Tarun Malhotra",
+      "email": "eval.tarun@example.com",
+      "external_auth_subject": "eval|tarun",
+      "orders": [
+        {
+          "order_number": "ORD-2017",
+          "status": "delivered",
+          "placed_days_ago": 9,
+          "delivered_days_ago": 5,
+          "items": [
+            {
+              "product_id": "SKU-EV-017",
+              "product_name": "Smartwatch Strap",
+              "quantity": 1,
+              "paid_amount_minor": 89900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 4,
+              "received_days_ago": 1,
+              "inspection_status": "passed"
+            }
+          ]
+        },
+        {
+          "order_number": "ORD-2018",
+          "status": "delivered",
+          "placed_days_ago": 60,
+          "delivered_days_ago": 55,
+          "items": [
+            {
+              "product_id": "SKU-EV-018",
+              "product_name": "Bluetooth Earbuds",
+              "quantity": 1,
+              "paid_amount_minor": 599900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Zoya Mirza",
+      "email": "eval.zoya@example.com",
+      "external_auth_subject": "eval|zoya",
+      "orders": [
+        {
+          "order_number": "ORD-2019",
+          "status": "delivered",
+          "placed_days_ago": 10,
+          "delivered_days_ago": 7,
+          "items": [
+            {
+              "product_id": "SKU-EV-019",
+              "product_name": "Laptop Stand",
+              "quantity": 1,
+              "paid_amount_minor": 239900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 4,
+              "received_days_ago": 1,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Harsh Vora",
+      "email": "eval.harsh@example.com",
+      "external_auth_subject": "eval|harsh",
+      "orders": [
+        {
+          "order_number": "ORD-2020",
+          "status": "delivered",
+          "placed_days_ago": 8,
+          "delivered_days_ago": 5,
+          "items": [
+            {
+              "product_id": "SKU-EV-020",
+              "product_name": "Desk Lamp",
+              "quantity": 1,
+              "paid_amount_minor": 169900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Aisha Thomas",
+      "email": "eval.aisha@example.com",
+      "external_auth_subject": "eval|aisha",
+      "orders": [
+        {
+          "order_number": "ORD-2021",
+          "status": "delivered",
+          "placed_days_ago": 12,
+          "delivered_days_ago": 9,
+          "items": [
+            {
+              "product_id": "SKU-EV-021",
+              "product_name": "Wi-Fi Router",
+              "quantity": 1,
+              "paid_amount_minor": 699900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 6,
+              "received_days_ago": 2,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Vivek Chauhan",
+      "email": "eval.vivek@example.com",
+      "external_auth_subject": "eval|vivek",
+      "orders": [
+        {
+          "order_number": "ORD-2022",
+          "status": "delivered",
+          "placed_days_ago": 6,
+          "delivered_days_ago": 2,
+          "items": [
+            {
+              "product_id": "SKU-EV-022",
+              "product_name": "External SSD",
+              "quantity": 1,
+              "paid_amount_minor": 849900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Meghna Bose",
+      "email": "eval.meghna@example.com",
+      "external_auth_subject": "eval|meghna",
+      "orders": [
+        {
+          "order_number": "ORD-2023",
+          "status": "delivered",
+          "placed_days_ago": 10,
+          "delivered_days_ago": 7,
+          "items": [
+            {
+              "product_id": "SKU-EV-023",
+              "product_name": "Electric Toothbrush",
+              "quantity": 1,
+              "paid_amount_minor": 289900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 4,
+              "received_days_ago": 1,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Kunal Shah",
+      "email": "eval.kunal@example.com",
+      "external_auth_subject": "eval|kunal",
+      "orders": [
+        {
+          "order_number": "ORD-2024",
+          "status": "delivered",
+          "placed_days_ago": 35,
+          "delivered_days_ago": 32,
+          "items": [
+            {
+              "product_id": "SKU-EV-024",
+              "product_name": "Graphics Tablet",
+              "quantity": 1,
+              "paid_amount_minor": 749900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 2,
+              "received_days_ago": 1,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Sonal Jain",
+      "email": "eval.sonal@example.com",
+      "external_auth_subject": "eval|sonal",
+      "orders": [
+        {
+          "order_number": "ORD-2025",
+          "status": "delivered",
+          "placed_days_ago": 36,
+          "delivered_days_ago": 33,
+          "items": [
+            {
+              "product_id": "SKU-EV-025",
+              "product_name": "Home Projector",
+              "quantity": 1,
+              "paid_amount_minor": 2849900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 2,
+              "received_days_ago": 1,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Deepak Yadav",
+      "email": "eval.deepak@example.com",
+      "external_auth_subject": "eval|deepak",
+      "orders": [
+        {
+          "order_number": "ORD-2026",
+          "status": "delivered",
+          "placed_days_ago": 50,
+          "delivered_days_ago": 46,
+          "items": [
+            {
+              "product_id": "SKU-EV-026",
+              "product_name": "Microwave Oven",
+              "quantity": 1,
+              "paid_amount_minor": 1149900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Priyanka Ghosh",
+      "email": "eval.priyanka@example.com",
+      "external_auth_subject": "eval|priyanka",
+      "orders": [
+        {
+          "order_number": "ORD-2027",
+          "status": "delivered",
+          "placed_days_ago": 40,
+          "delivered_days_ago": 38,
+          "items": [
+            {
+              "product_id": "SKU-EV-027",
+              "product_name": "Beard Trimmer",
+              "quantity": 1,
+              "paid_amount_minor": 179900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Rajat Sinha",
+      "email": "eval.rajat@example.com",
+      "external_auth_subject": "eval|rajat",
+      "orders": [
+        {
+          "order_number": "ORD-2028",
+          "status": "delivered",
+          "placed_days_ago": 12,
+          "delivered_days_ago": 9,
+          "items": [
+            {
+              "product_id": "SKU-EV-028",
+              "product_name": "Smart Bulb Pack",
+              "quantity": 1,
+              "paid_amount_minor": 259900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 6,
+              "received_days_ago": 2,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Esha Kapoor",
+      "email": "eval.esha@example.com",
+      "external_auth_subject": "eval|esha",
+      "orders": [
+        {
+          "order_number": "ORD-2029",
+          "status": "shipped",
+          "placed_days_ago": 4,
+          "shipped_days_ago": 3,
+          "items": [
+            {
+              "product_id": "SKU-EV-029",
+              "product_name": "Yoga Mat",
+              "quantity": 1,
+              "paid_amount_minor": 129900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Yash Thakur",
+      "email": "eval.yash@example.com",
+      "external_auth_subject": "eval|yash",
+      "orders": [
+        {
+          "order_number": "ORD-2030",
+          "status": "delivered",
+          "placed_days_ago": 7,
+          "delivered_days_ago": 4,
+          "items": [
+            {
+              "product_id": "SKU-EV-030",
+              "product_name": "Phone Tripod",
+              "quantity": 1,
+              "paid_amount_minor": 99900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Nandini Rao",
+      "email": "eval.nandini@example.com",
+      "external_auth_subject": "eval|nandini",
+      "orders": [
+        {
+          "order_number": "ORD-2031",
+          "status": "delivered",
+          "placed_days_ago": 50,
+          "delivered_days_ago": 45,
+          "items": [
+            {
+              "product_id": "SKU-EV-031",
+              "product_name": "USB-C Hub",
+              "quantity": 1,
+              "paid_amount_minor": 149900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Omkar Desai",
+      "email": "eval.omkar@example.com",
+      "external_auth_subject": "eval|omkar",
+      "orders": [
+        {
+          "order_number": "ORD-2032",
+          "status": "delivered",
+          "placed_days_ago": 8,
+          "delivered_days_ago": 5,
+          "items": [
+            {
+              "product_id": "SKU-EV-032",
+              "product_name": "Kitchen Blender",
+              "quantity": 1,
+              "paid_amount_minor": 449900
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Bhavna Joshi",
+      "email": "eval.bhavna@example.com",
+      "external_auth_subject": "eval|bhavna",
+      "orders": [
+        {
+          "order_number": "ORD-2033",
+          "status": "delivered",
+          "placed_days_ago": 14,
+          "delivered_days_ago": 10,
+          "items": [
+            {
+              "product_id": "SKU-EV-033",
+              "product_name": "Air Fryer",
+              "quantity": 1,
+              "paid_amount_minor": 799900
+            }
+          ],
+          "returns": [
+            {
+              "status": "requested",
+              "requested_days_ago": 3,
+              "inspection_status": "pending"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Cyrus Mistry",
+      "email": "eval.cyrus@example.com",
+      "external_auth_subject": "eval|cyrus",
+      "orders": [
+        {
+          "order_number": "ORD-2034",
+          "status": "delivered",
+          "placed_days_ago": 9,
+          "delivered_days_ago": 6,
+          "items": [
+            {
+              "product_id": "SKU-EV-034",
+              "product_name": "Steam Iron",
+              "quantity": 1,
+              "paid_amount_minor": 229900
+            }
+          ],
+          "returns": [
+            {
+              "status": "in_transit",
+              "requested_days_ago": 2,
+              "inspection_status": "pending"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Fatima Ansari",
+      "email": "eval.fatima@example.com",
+      "external_auth_subject": "eval|fatima",
+      "orders": [
+        {
+          "order_number": "ORD-2035",
+          "status": "delivered",
+          "placed_days_ago": 7,
+          "delivered_days_ago": 4,
+          "items": [
+            {
+              "product_id": "SKU-EV-035",
+              "product_name": "Robot Vacuum",
+              "quantity": 1,
+              "paid_amount_minor": 2599900
+            }
+          ],
+          "returns": [
+            {
+              "status": "received",
+              "requested_days_ago": 3,
+              "received_days_ago": 1,
+              "inspection_status": "passed"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

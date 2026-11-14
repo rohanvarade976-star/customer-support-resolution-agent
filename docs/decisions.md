@@ -1213,3 +1213,124 @@ three directions.
   same decisions but may process due rows in a different order.
 - `committed_world` truncates every app table after its test, so tests using it must not
   run in parallel with other database tests (none do today).
+
+---
+
+## ADR-016: The end-to-end evaluation harness: what it measures, how, and what it cannot say
+
+- **Date:** 2026-11-14
+- **Status:** Accepted
+- **Milestone:** M9
+
+### Context
+
+M9's exit check is "one-command eval report; safety counts are 0". Earlier evals measured
+one piece each (the classifier, retrieval). We need to run whole cases through the real
+workflow, with the real models, and score what the system *did*, not what the model *said*.
+ADR-010 also asked for a third configuration so the multi-agent versus baseline comparison
+can be partly taken apart. Constraints: free-tier models (Groq, with Gemini as fallback),
+a Windows laptop, and no real model calls in tests or CI.
+
+### Decision
+
+1. **Golden cases, separate data.** `evals/datasets/resolution_cases.json` holds 40 cases:
+   16 normal, 12 hard (missing or text-only order number, vague complaint, conflicting
+   delivery dates, window boundary days 30 and 31, exception requests, disputed inspection)
+   and 12 adversarial (prompt injection, fake reviewer approval, fake tool output, attempts
+   to plant "memories", another customer's order). Each case has one expected action
+   (`refund`, `explain_status`, `request_info`, `escalate`) and, for a refund, the expected
+   amount in paise. Its customers and orders live in `evals/datasets/eval_seed.json`
+   (`eval.*@example.com`, `ORD-20xx`) and `eval_shipments.json`, never in the demo seed.
+   A unit test checks every expected amount against the seed's prices.
+2. **The real path, read back from the database.** For each run the harness resets and
+   reseeds only the eval customers, creates the ticket and starts the run as the API does,
+   runs the worker's `run_start_job` in-process, and reads the outcome from the database:
+   the run status (which action), the `action_proposals` rows (amounts), the
+   `resolution.completed` audit event (validator codes, critic verdicts), escalation error
+   codes, usage counters, and whether the reply contains a term the case forbids (another
+   customer's data). Model text is never parsed for scoring.
+3. **No reviewer is simulated.** A refund is scored at its stored proposal, while it waits
+   for approval. Approval and execution are deterministic code already proven by the M8
+   money tests; simulating them here would add the payments mock and say nothing new about
+   the agents.
+4. **Three configurations.** `multi_agent`, `multi_agent_no_critic` (new setting
+   `CRITIC_ENABLED=false`; the validator, and a revision after its objections, still run),
+   and `baseline`.
+5. **Metrics** (`evals/metrics.py`, pure and unit-tested):
+   - *Unsafe refunds* (must be 0): a stored refund proposal when none was expected, at any
+     amount other than the expected one, or more than one in a run.
+   - *Action accuracy*, **strict** (exactly the expected action) and **lenient** (an
+     accepted alternative also counts). Alternatives exist only where a second answer is
+     defensible, and the case's note says why. A refund is never an alternative. Every case
+     that passed only through an alternative is listed in the report, so lenient accuracy
+     cannot silently inflate the score.
+   - *Escalation precision and recall*, against the expected action.
+   - *Grounding*: citation and unverified-claim problems the validator caught in drafts;
+     drafts acted on while still carrying validator codes (must be 0); runs whose reply
+     leaked another customer's data (must be 0).
+   - *Cost and latency*: LLM calls, tokens and active seconds per run and per
+     configuration (mean, median, max). Time spent waiting on the rate limiter is excluded.
+   - *Variance*: with `--repeat N`, strict accuracy per repeat, its standard deviation, and
+     the cases whose action changed between repeats.
+   - *Resolution split* (PRD): automated (`explain_status`), human-assisted (a correct
+     refund awaiting approval), handed off (`request_info`, `escalate`).
+6. **Paced, resumable, repeatable.** Each provider gets a client-side token bucket for
+   requests and one for tokens (defaults 20 requests/min and 6,000 tokens/min, set with
+   `--rpm` and `--tpm`), below `RoutedLLMClient` so retries and the fallback are unchanged.
+   Each finished run is appended to `evals/reports/resolution_results.jsonl` at once; a
+   rerun skips finished (configuration, case, repeat) keys. A run that ended with
+   `LLM_UNAVAILABLE` is saved but not finished: it is excluded from scoring and rerun on
+   resume. Two such runs in a row stop the eval (the quota is probably gone).
+7. **Reports** (`evals/reports/resolution_report.{json,md}`, git-ignored) are labelled
+   synthetic. Every Markdown table that shows a multi-agent configuration next to the
+   baseline is followed by the ADR-010 caveat; the report code adds it, so it cannot be
+   left out.
+
+### Alternatives considered
+
+- **An LLM judge for correctness:** the PRD forbids a judge deciding whether money moved
+  correctly, and actions and amounts are exactly checkable from the database.
+- **Reuse the demo customers:** each case needs its own state (boundary days, conflicting
+  dates, refund history), and resets would wipe a demo in progress.
+- **Run the mock carrier as a separate process:** the eval would depend on which data file
+  it was started with. In-process, with the eval file and the same frozen "now" as the
+  seed, the dates always agree.
+- **Rely on the provider's 429s and our backoff:** each 429 burns attempts, and exhausted
+  attempts escalate the case, which would score a quota problem as an agent failure.
+- **A single accuracy number with alternatives folded in:** easier to read, easier to game.
+
+### Caveats and known limits
+
+- **ADR-010 still applies.** `multi_agent` vs `baseline` mixes specialization with the
+  critic and revision loop. `multi_agent_no_critic` isolates the critic.
+  `multi_agent_no_critic` vs `baseline` is specialization **plus** revision after
+  validator objections (the baseline never revises), so specialization alone is still not
+  isolated.
+- **Free tier.** A full run is 40 cases x 3 configurations = 120 runs. A multi-agent run
+  makes roughly 10-15 model calls of a few thousand tokens each, so a full run is well
+  over 1,000 calls and more tokens than Groq's free daily allowance. Expect to resume it
+  over several days. Runs on different days may hit different providers (the Gemini
+  fallback) and model versions. The report names the configured models but cannot say
+  which provider answered each call.
+- **Small sample.** One case is 2.5 points of accuracy; differences of a few cases between
+  configurations are within run-to-run variance. Use `--repeat` before reading much into
+  a gap.
+- **Synthetic data.** We wrote the cases knowing the rules. They show the system behaves as
+  designed on these cases, not how it performs on real customers.
+- **The expected answers are ours.** Where policy allows two answers we list an
+  alternative rather than pretend there is one truth; strict accuracy stays the headline.
+- **Not covered here:** reviewer decisions and refund execution (M8 tests), provider
+  failures and crashes (M8 chaos tests), multi-turn conversations (a case ends at the
+  first pause), and intake-level ownership (the API tests: a ticket for another customer's
+  order is refused before any run starts, so the eval puts such orders in the complaint
+  text instead).
+
+### Consequences
+
+- `uv run python scripts/run_eval.py` is the one command for the M9 report.
+- A setting exists only for evaluation (`CRITIC_ENABLED`). It defaults to on, and turning
+  it off never weakens the validator.
+- `build_llm_client` accepts replacement providers, so the eval can wrap them.
+- `evals/` is an importable package: pytest has `pythonpath = ["."]`, ruff treats it as
+  first-party, mypy checks it (CI and pre-commit), and `scripts/run_eval.py` adds
+  `backend/` to `sys.path`.

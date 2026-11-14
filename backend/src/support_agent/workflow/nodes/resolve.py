@@ -76,6 +76,7 @@ async def resolve_case(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str,
             max_revisions=settings.resolution_max_revisions,
             delivery_tolerance=tolerance,
             critic_tier=settings.critic_tier,
+            critic_enabled=settings.critic_enabled,
         )
     update: dict[str, object] = {"outcome": outcome}
     if outcome.failure is not None:

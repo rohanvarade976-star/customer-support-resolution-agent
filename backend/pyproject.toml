@@ -49,7 +49,7 @@ module-name = ["support_agent", "mock_providers"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "."]  # "." makes evals/ first-party
 
 [tool.ruff.lint]
 select = [
@@ -83,6 +83,8 @@ warn_required_dynamic_aliases = true
 # ---------------------------------------------------------------- pytest
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# backend/ on sys.path, so tests can import the eval package (evals/).
+pythonpath = ["."]
 addopts = "-ra --strict-markers --import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
