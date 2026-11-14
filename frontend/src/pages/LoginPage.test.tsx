@@ -16,17 +16,18 @@ async function logIn(email: string, password: string) {
 }
 
 describe("LoginPage", () => {
-  it("logs a customer in, keeps the token for this tab, and opens their orders", async () => {
+  it("logs a customer in, keeps the token for this tab, and opens their home page", async () => {
     const calls = fakeApi({
       "POST /auth/login": () => json(TOKEN),
       "GET /me": () => json(PRIYA),
       "GET /me/orders": () => json([]),
+      "GET /tickets?limit=50": () => json({ items: [], limit: 50, offset: 0 }),
     });
     renderApp("/login");
 
     await logIn("priya@example.com", "secret");
 
-    expect(await screen.findByRole("heading", { name: "My orders" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Welcome back, Priya" })).toBeInTheDocument();
     expect(calls[0]).toMatchObject({ method: "POST", path: "/auth/login", body: { email: "priya@example.com", password: "secret" } });
     // The role came from GET /me, called with the new token in the header.
     expect(calls[1]).toMatchObject({ path: "/me", authorization: "Bearer jwt-abc" });
@@ -60,17 +61,30 @@ describe("LoginPage", () => {
     expect(currentToken()).toBeNull();
   });
 
-  it("logout clears the token from memory and storage", async () => {
+  it("a demo account card fills in only the email", async () => {
+    fakeApi({});
+    renderApp("/login");
+
+    await userEvent.setup().click(screen.getByRole("button", { name: /Anita Desai/ }));
+
+    expect(screen.getByLabelText("Email")).toHaveValue("anita@example.com");
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    expect(screen.getByLabelText("Password")).toHaveFocus();
+  });
+
+  it("logout (from the account menu) clears the token from memory and storage", async () => {
     fakeApi({
       "POST /auth/login": () => json(TOKEN),
       "GET /me": () => json(PRIYA),
       "GET /me/orders": () => json([]),
+      "GET /tickets?limit=50": () => json({ items: [], limit: 50, offset: 0 }),
     });
     renderApp("/login");
     const user = await logIn("priya@example.com", "secret");
-    await screen.findByRole("heading", { name: "My orders" });
+    await screen.findByRole("heading", { name: "Welcome back, Priya" });
 
-    await user.click(screen.getByRole("button", { name: "Log out" }));
+    await user.click(screen.getByRole("button", { name: /Account menu/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Log out" }));
 
     expect(await screen.findByRole("button", { name: "Log in" })).toBeInTheDocument();
     expect(sessionStorage.getItem("support-agent.session")).toBeNull();

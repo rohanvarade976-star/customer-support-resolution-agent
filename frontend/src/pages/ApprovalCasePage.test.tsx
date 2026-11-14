@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -79,13 +79,20 @@ describe("ApprovalCasePage", () => {
     await user.type(screen.getByLabelText(/Note/), "Return verified");
     await user.click(screen.getByRole("button", { name: "Approve refund" }));
 
+    // Nothing is sent until the reviewer confirms; the dialog states the exact amount.
+    const dialog = await screen.findByRole("dialog", { name: "Approve this refund?" });
+    expect(dialog).toHaveTextContent("₹2,499.00 will be refunded to Priya Sharma for ORD-1001");
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+    await user.click(within(dialog).getByRole("button", { name: "Approve ₹2,499.00" }));
+
     await waitFor(() => {
       expect(calls.find((call) => call.method === "POST")?.body).toEqual({
         decision: "approve",
         note: "Return verified",
       });
     });
-    expect(await screen.findByText("The approval was recorded.")).toBeInTheDocument();
+    const panel = screen.getByRole("complementary", { name: "Decision" });
+    expect(await within(panel).findByText("The approval was recorded.")).toBeInTheDocument();
     expect(await screen.findByTestId("refund-status")).toHaveTextContent("Succeeded");
     expect(screen.getByTestId("refund-status")).toHaveTextContent("pay_ref_1");
     expect(screen.queryByRole("button", { name: "Approve refund" })).not.toBeInTheDocument();
@@ -101,11 +108,32 @@ describe("ApprovalCasePage", () => {
     renderApp("/approvals/a-1");
     await screen.findByTestId("amount");
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Reject" }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Reject" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reject this refund?" });
+    expect(dialog).toHaveTextContent("₹2,499.00");
+    await user.click(within(dialog).getByRole("button", { name: "Reject refund" }));
 
     await waitFor(() => {
       expect(calls.find((call) => call.method === "POST")?.body).toEqual({ decision: "reject" });
     });
+  });
+
+  it("sends nothing when the reviewer cancels the confirmation", async () => {
+    const calls = fakeApi({ "GET /approvals/a-1": () => json(PENDING) });
+    logInAs(ANITA);
+    renderApp("/approvals/a-1");
+    await screen.findByTestId("amount");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Approve refund" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+    expect(screen.getByRole("button", { name: "Approve refund" })).toBeEnabled();
   });
 
   it("shows the API's refusal (already decided)", async () => {
@@ -118,7 +146,9 @@ describe("ApprovalCasePage", () => {
     renderApp("/approvals/a-1");
     await screen.findByTestId("amount");
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Approve refund" }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Approve refund" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Approve ₹2,499.00" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("This approval has already been decided.");
   });

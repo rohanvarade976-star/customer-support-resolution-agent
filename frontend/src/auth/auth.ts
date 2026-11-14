@@ -26,5 +26,5 @@ export function isReviewer(user: Me | null): boolean {
 }
 
 export function homePathFor(reviewer: boolean): string {
-  return reviewer ? "/approvals" : "/orders";
+  return reviewer ? "/approvals" : "/home";
 }

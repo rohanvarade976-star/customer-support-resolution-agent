@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -35,7 +35,11 @@ describe("RunPage", () => {
     renderApp("/runs/run-1");
 
     expect(await screen.findByTestId("verified-reply")).toHaveTextContent("Which order is this about?");
-    expect(screen.getByText("We need one more detail from you")).toBeInTheDocument();
+    const activity = screen.getByRole("list", { name: "Activity" });
+    expect(within(activity).getByText("We need one more detail from you")).toBeInTheDocument();
+    // The stepper marks the decision stage as current: it is waiting on the customer.
+    const progress = screen.getByRole("list", { name: "Progress" });
+    expect(within(progress).getByText("Waiting for your reply").closest("li")).toHaveAttribute("aria-current", "step");
     expect(screen.getByText("Live")).toBeInTheDocument();
     // The stream request carries the token in the header, never in the URL.
     const stream = calls.find((call) => call.path === "/runs/run-1/stream");
@@ -52,6 +56,7 @@ describe("RunPage", () => {
     await waitFor(() => {
       expect(screen.queryByLabelText("Your reply")).not.toBeInTheDocument();
     });
+    expect(screen.getByText("Reply sent")).toBeInTheDocument(); // the confirmation toast
   });
 
   it("falls back to polling when the stream cannot be opened", async () => {
@@ -69,7 +74,7 @@ describe("RunPage", () => {
     renderApp("/runs/run-1");
 
     expect(await screen.findByTestId("verified-reply")).toHaveTextContent("Your refund is complete.");
-    expect(screen.getByText("Your refund is complete", { selector: "li" })).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Activity" })).getByText("Your refund is complete")).toBeInTheDocument();
     expect(await screen.findByText("Up to date")).toBeInTheDocument();
     expect(calls.some((call) => call.path === "/runs/run-1/events")).toBe(true);
     expect(screen.queryByLabelText("Your reply")).not.toBeInTheDocument();

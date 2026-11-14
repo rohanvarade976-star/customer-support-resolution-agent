@@ -136,8 +136,8 @@ Log in as a demo customer (`priya@example.com`) or reviewer (`anita@example.com`
 `DEMO_PASSWORD`. To watch a run live, the worker must be running too. The API address
 defaults to `http://localhost:8000`; to change it, copy `.env.example` to `.env.local` and set
 `VITE_API_BASE_URL`. Checks: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`.
-See `frontend/README.md` for the pages and the code layout, and ADR-019 for the design (live
-status over Server-Sent Events, token storage, CORS).
+See `frontend/README.md` for the pages and the code layout, ADR-019 for the design (live
+status over Server-Sent Events, token storage, CORS), and ADR-020 for the design system.
 
 ## Run the API (from `backend/`)
 

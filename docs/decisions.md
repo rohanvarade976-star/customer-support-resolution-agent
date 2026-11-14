@@ -1677,7 +1677,7 @@ Spans and metrics carry only ids, codes, counts, model names, route templates an
 ## ADR-019: The React frontend: live status over SSE, token storage, CORS and the reviewer case view
 
 - **Date:** 2026-11-14
-- **Status:** Accepted
+- **Status:** Accepted ("no UI kit" in decision 1 superseded by ADR-020)
 - **Milestone:** M10
 
 ### Context
@@ -1802,3 +1802,86 @@ a browser keeps the token, and how a live stream is authenticated.
 - Any new audit payload key a reviewer should see must be added to `REVIEWER_PAYLOAD_KEYS`; any new
   customer-facing event type to `CUSTOMER_EVENT_TYPES` and to the browser's labels.
 - CI gains a `frontend` job (lint, type check, tests, build).
+
+---
+
+## ADR-020: The frontend design system, and keeping it inside a strict Content-Security-Policy
+
+- **Date:** 2026-11-14
+- **Status:** Accepted
+- **Milestone:** M10
+
+### Context
+
+The first frontend (ADR-019) worked but looked like a prototype: plain links for navigation,
+uneven spacing, no loading or empty states, and actions with no confirmation. A portfolio product
+should feel like a professional SaaS dashboard and stay easy to use from a 375 px phone to a wide
+desktop. Two constraints shape every choice:
+
+- **The UI only displays.** It never computes eligibility, amounts or decisions (ADR-019).
+- **The strict CSP stays.** nginx sends `style-src 'self'` and `script-src 'self'`: no inline
+  `<style>` or `<script>`. Many UI libraries add a `<style>` tag at runtime, which this blocks.
+
+### Decision
+
+1. **Design tokens in `src/index.css` (Tailwind `@theme`), and nothing else.** Tailwind's default
+   palette is removed (`--color-*: initial`), so a class can only use our colours:
+   - a calm indigo-blue `primary` scale (50–950; 600 is the action colour, 5.5:1 on white);
+   - slate `gray` neutrals; `success`, `warning`, `danger`, `info` for meaning;
+   - Inter (self-hosted, bundled by Vite), a 12–30 px type scale, a 4 px spacing grid, radii of
+     6/8/12 px, three shadows, and one `:focus-visible` ring for every control.
+   Light theme only. The tokens are CSS variables, so dark mode is a later, contained change.
+2. **shadcn/ui-style components, written into `src/components/ui/`.** shadcn/ui is source code
+   copied into the project, not a package: button, badge, card, form controls, table, alert,
+   skeleton. They use `class-variance-authority` (variants), `clsx` and `tailwind-merge` (`cn()`).
+   Radix is used only where it earns its place: `DropdownMenu` (the user menu's keyboard
+   behaviour) and `Slot` (a button that renders as a router link).
+3. **CSP-safe replacements for the parts that inject styles:**
+   - **Dialogs and the mobile menu use the native `<dialog>` element**, not Radix Dialog, whose
+     scroll lock adds a `<style>` tag. `showModal()` gives focus trapping, Esc to close, an inert
+     background and focus return natively; a CSS rule (`html:has(dialog[open])`) stops the page
+     from scrolling.
+   - **The dropdown menu is always non-modal** (`modal={false}`), which skips the same scroll lock.
+   - **Toasts are our own** (`ui/toast.tsx`, ~70 lines, an `aria-live` region). shadcn's toast,
+     Sonner, adds its CSS at runtime.
+   - Inline `style` *properties* set by React and Radix (through the DOM, not HTML attributes) are
+     allowed by `style-src 'self'`, so positioning the menu works.
+4. **One app shell and one page pattern:** a role-based sidebar (a slide-over below 1024 px), a top
+   bar with breadcrumbs and the user menu, a content column of at most 1152 px, and a `PageHeader`
+   (title, one line, primary action) on every page. Every page uses the shared states: skeletons
+   while loading, an empty state with a next step, an error state with a retry button.
+5. **Money actions are confirmed.** Approve and reject open a dialog that states the stored amount
+   before anything is sent; "Delete all" memory is confirmed the same way.
+6. **Display-only helpers stay display-only.** The run stepper is a fixed lookup from the run's
+   status (`lib/runStages.ts`); home-page counts tally the statuses returned; the queue sorts the
+   rows returned (amounts compared as integers); "expires in" is the stored expiry minus now.
+7. **The wizard sends only what the API accepts.** `POST /tickets` takes `message` and an optional
+   `order_number` (extra fields are refused). Step 2 ("what went wrong") only starts the
+   description with an editable sentence; the backend's classifier still decides the category.
+8. **Screenshots under the real CSP.** `npm run screenshots` builds, serves the build with
+   `vite preview` (which now sends the nginx CSP), answers every API call from fixed fake data,
+   and captures each page at 375 px and 1440 px with Playwright (a dev dependency). It fails on any
+   CSP violation, console error, unknown API call or horizontal overflow.
+
+### Alternatives considered
+
+- **A full component kit (MUI, Chakra, Mantine):** heavier, its own styling system next to
+  Tailwind, and several inject styles at runtime (blocked by our CSP).
+- **Radix Dialog with a CSP nonce:** needs a per-request nonce, which a static nginx site cannot
+  generate without extra machinery.
+- **`'unsafe-inline'` for styles:** weakens the CSP for the whole app to save a few lines.
+- **System fonts only:** zero bytes, but text renders differently per OS; Inter costs ~48 KB (Latin)
+  plus ~85 KB (Latin Extended, which holds the ₹ sign), cached for a year.
+
+### Consequences
+
+- New runtime dependencies: `@radix-ui/react-dropdown-menu`, `@radix-ui/react-slot`,
+  `class-variance-authority`, `clsx`, `tailwind-merge`, `lucide-react`, `@fontsource-variable/inter`.
+  New dev dependency: `playwright` (its browser is downloaded separately and never shipped).
+- Bundle: JavaScript 290 KB → 475 KB (91 KB → 148 KB gzip), CSS 13 KB → 43 KB (4 KB → 9 KB gzip),
+  plus the font files.
+- Customers land on `/home` after logging in (it was `/orders`).
+- A new component must use the tokens (other colours do not compile) and must not add `<style>`
+  tags at runtime; `npm run screenshots` catches the latter.
+- jsdom has no `<dialog>.showModal()` or `ResizeObserver`; `src/test/setup.ts` adds small
+  stand-ins, so dialog tests check behaviour, not the browser's focus trapping.

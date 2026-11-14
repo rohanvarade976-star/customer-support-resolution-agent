@@ -46,6 +46,19 @@ export function runStatusLabel(status: string): string {
   return RUN_STATUS_LABELS[status] ?? status;
 }
 
+// Ticket statuses as customers read them.
+const TICKET_STATUS_LABELS: Record<string, string> = {
+  open: "Open",
+  in_progress: "In progress",
+  awaiting_customer: "Waiting on you",
+  resolved: "Resolved",
+  escalated: "With a specialist",
+};
+
+export function ticketStatusLabel(status: string): string {
+  return TICKET_STATUS_LABELS[status] ?? status;
+}
+
 const MEMORY_OUTCOME_LABELS: Record<string, string> = {
   status_explained: "Order status explained",
   refund_rejected: "Refund declined",
