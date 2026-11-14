@@ -1,5 +1,31 @@
-# Local development services. Start with: docker compose up -d
-# Credentials come from the repo-root .env file (copy .env.example to .env first).
+# The whole system in containers. Credentials come from the repo-root .env file
+# (copy .env.example to .env first); nothing secret is baked into the image.
+#
+#   docker compose up -d                          # only Postgres (the local `uv run` workflow)
+#   docker compose --profile app up -d --build    # everything: migrate, api, worker, mocks
+#   docker compose run --rm seed                  # one-shot: ingest policies + seed demo data
+#
+# See README, "Run everything with Docker".
+
+# Shared by every service built from backend/Dockerfile.
+x-app: &app
+  build:
+    context: ./backend
+  image: support-agent:local
+  # The "app" profile keeps these out of a plain `docker compose up -d`, which starts
+  # only Postgres, as the non-Docker workflow expects.
+  profiles: ["app"]
+  env_file: .env  # secrets (JWT_SECRET, API keys, DEMO_PASSWORD) at runtime only
+  restart: unless-stopped
+
+# .env points the app at localhost for the non-Docker workflow. Inside the Compose network
+# the database and the mocks are reached by service name, so these override those values.
+# The password goes into a URL: keep POSTGRES_PASSWORD free of characters like @ / : #.
+x-container-env: &container-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  PAYMENTS_BASE_URL: http://mock-payments:8001
+  SHIPPING_BASE_URL: http://mock-shipping:8002
+  OTEL_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
 
 services:
   postgres:
@@ -19,6 +45,106 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # One-shot: bring the schema up to date, then exit. Everything that uses the
+  # database waits for it to finish successfully.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment: *container-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    environment: *container-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-payments:
+        condition: service_healthy
+      mock-shipping:
+        condition: service_healthy
+    healthcheck:
+      # The slim image has no curl; Python's urllib does the same job. /health checks the database.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "support_agent.worker"]
+    environment:
+      <<: *container-env
+      # The worker's metrics server doubles as its health check. Loopback only: it has no token.
+      WORKER_METRICS_PORT: "9100"
+      WORKER_METRICS_HOST: 127.0.0.1
+    stop_grace_period: 40s  # longer than WORKER_SHUTDOWN_GRACE_SECONDS, so a job can finish
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-payments:
+        condition: service_healthy
+      mock-shipping:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  mock-payments:
+    <<: *app
+    command: ["uvicorn", "mock_providers.payments.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001"]
+    environment: *container-env  # stores refunds in the mock_payments schema
+    ports:
+      - "8001:8001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/openapi.json', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  mock-shipping:
+    <<: *app
+    command: ["uvicorn", "mock_providers.shipping.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/openapi.json', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # One-shot demo setup, never started by `up` (the "tools" profile keeps it out):
+  #   docker compose run --rm seed
+  # Loads the policies (with their embeddings) and the demo customers and orders.
+  # Every step is safe to re-run. It migrates first (a no-op when the schema is current)
+  # because `run` does not start the "app" profile's migrate service.
+  seed:
+    <<: *app
+    profiles: ["tools"]
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python scripts/ingest_policies.py && python scripts/seed_db.py
+    environment: *container-env
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # Optional trace viewer. A profile keeps it out of a plain `docker compose up -d`:
   #   docker compose --profile tracing up -d jaeger

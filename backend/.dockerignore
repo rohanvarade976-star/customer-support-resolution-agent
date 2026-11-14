@@ -1,0 +1,30 @@
+# Kept out of the Docker build context (and so out of the image).
+
+# Secrets: never in an image. Settings come from the environment at runtime.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Local virtual environment: the image builds its own.
+.venv/
+
+# Caches and build output
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Tests and generated eval reports are not needed to run the app.
+tests/
+evals/reports/
+
+# The image's own recipe and tooling files
+Dockerfile
+.dockerignore
+.pre-commit-config.yaml

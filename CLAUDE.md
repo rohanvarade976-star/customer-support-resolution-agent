@@ -118,4 +118,4 @@ From the repo root: `docker compose up -d` starts Postgres.
 
 ## Current milestone
 
-M9 — Guardrails, observability and evaluation. See the master plan and PRD section "Milestones".
+M10 — Ship it. See the master plan and PRD section "Milestones".
