@@ -1336,6 +1336,42 @@ a Windows laptop, and no real model calls in tests or CI.
   `backend/` to `sys.path`.
 
 
+
+### Amendment: the baseline's draft call and provider fallback (found in the first real eval)
+
+The first real-model eval escalated almost every baseline case (n01, n02, n03 and others),
+so the baseline comparison could not be reported. Investigation, in the way of ADR-009:
+
+- **The stored code was not the draft call.** The runs saved `BASELINE_OUTPUT_INVALID`, which
+  comes only from the gathering loop (two malformed tool calls in a row), not from the final
+  draft (`RESOLUTION_OUTPUT_INVALID`). I could not reproduce that gather failure: n01
+  baseline on Groq alone succeeded twice (a correct refund proposal). I do not know what
+  caused those original failures. A Groq tokens-per-minute 429 streak that handed calls to
+  Gemini is plausible but unproven.
+- **A real bug found on the way.** On Gemini alone, n01 gathered correctly, then the draft
+  call and its repair both returned plain text with no tool call, ending in
+  `RESOLUTION_OUTPUT_INVALID`. Cause: the draft call continued the gathering conversation
+  (assistant tool calls to `get_order`, `search_policy` and so on, plus tool messages) while
+  binding only `resolution_draft`. Groq tolerated that; Gemini did not. The multi-agent
+  resolution step never has this shape, so only the baseline was exposed.
+- **Fix.** `baseline.draft_messages` sends a clean conversation: the system prompt and one
+  user message holding the tool results as text (each keeps its `call_id` and its
+  untrusted-data wrapper, so it is still citable and still checked by the validator), the
+  case rendered by code, and the instruction. No tool-call history is replayed. Regression
+  test: the baseline's draft request contains only system and user messages, no tool calls,
+  and shows the `call_id`s. After the fix, the same Gemini-only run proposed the refund.
+
+**The broader risk (also relevant to ADR-007).** `RoutedLLMClient` falls back per request.
+When Groq is rate limited in the middle of a multi-step agent, the next call goes to Gemini
+with a history that Groq wrote: its tool-call ids, its call shapes, its tool-use style.
+Providers differ in how strictly they accept that, so any multi-step agent (the tool loops,
+and anything continuing a conversation with a forced tool) can break at the switch even
+though each provider works alone. This is not fixed. Mitigations in place: structured calls
+(`resolution_draft`, findings, critic) start from clean messages, and the baseline now does
+too. Not done: pinning one provider for a whole agent step, or testing every loop against
+every provider. Until then, an eval run that fell back mid-run should be read with that in
+mind; the report cannot say which provider answered each call.
+
 ---
 
 ## ADR-017: Guardrails: input marking, output checks, rate limits, and what they cannot stop
