@@ -28,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from support_agent.core.config import get_settings
 from support_agent.core.event_loop import run
 from support_agent.core.logging import configure_logging
+from support_agent.core.metrics import start_worker_metrics_server
+from support_agent.core.tracing import configure_tracing, shutdown_tracing
 from support_agent.db.session import get_engine, get_sessionmaker
 from support_agent.integrations.payments import PaymentClient
 from support_agent.integrations.shipping import ShippingClient
@@ -78,6 +80,12 @@ def _install_stop_handlers(stop: asyncio.Event) -> None:
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
+    configure_tracing(settings, "worker")
+    metrics_server = (
+        None
+        if settings.worker_metrics_port is None
+        else start_worker_metrics_server(settings.worker_metrics_host, settings.worker_metrics_port)
+    )
     llm = build_llm_client(settings)  # fails here, at startup, if misconfigured
     embedder = get_embedder(settings)
     stop = asyncio.Event()
@@ -110,6 +118,9 @@ async def main() -> None:
         log.info("worker started")
         await run_forever(deps, stop)
     await get_engine().dispose()  # close pooled database connections cleanly
+    if metrics_server is not None:
+        metrics_server.shutdown()
+    shutdown_tracing()
     log.info("worker stopped")
 
 

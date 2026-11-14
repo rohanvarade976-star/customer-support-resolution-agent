@@ -144,3 +144,17 @@ async def test_baseline_llm_failure_while_drafting_escalates() -> None:
     assert final["status"] == RunStatus.ESCALATED
     assert WorkflowError.LLM_UNAVAILABLE in final["errors"]
     assert world.proposals == []
+
+
+async def test_baseline_draft_call_has_no_tool_call_history() -> None:
+    # Regression (ADR-016): replaying the gathering tool calls into a call that binds only
+    # `resolution_draft` made Gemini answer in plain text instead of the forced call.
+    _, fake, _ = await run(baseline_scripts())
+
+    request = fake.requests_by_agent["resolution"][0]
+    assert [t.name for t in request.tools] == ["resolution_draft"]
+    assert all(m.role in ("system", "user") for m in request.messages)
+    assert not any(m.tool_calls or m.tool_call_id for m in request.messages)
+    text = "\n".join(m.content for m in request.messages)
+    assert 'call_id="call_1"' in text  # the results stay visible and citable
+    assert 'trust="untrusted_data"' in text

@@ -138,11 +138,29 @@ def alembic_cfg(test_database_url: str) -> Config:
     return cfg
 
 
+def _create_checkpoint_tables(url: str) -> None:
+    """Run the checkpointer's own migrations once (psycopg needs a selector loop)."""
+
+    async def setup() -> None:
+        async with open_checkpointer(url, build_read_registry()):
+            pass  # opening it runs setup(); nothing else to do
+
+    asyncio.run(setup(), loop_factory=asyncio.SelectorEventLoop)
+
+
 @pytest.fixture(scope="session")
 def migrated_database(test_database_url: str, alembic_cfg: Config) -> str:
-    """A freshly wiped test database with all migrations applied (once per test run)."""
+    """A freshly wiped test database with all migrations applied (once per test run).
+
+    The checkpointer's tables are created here too, before any test opens its rolled-back
+    transaction. Their migration builds an index CONCURRENTLY, which waits for every open
+    transaction to end; run inside a test, after the `session` fixture has begun, it would
+    wait for that test's own transaction forever (a deadlock, seen in the M9 harness test).
+    Afterwards the `checkpointer` fixture's setup() finds nothing left to migrate.
+    """
     _in_thread(asyncio.run, reset_schema(test_database_url))
     _in_thread(command.upgrade, alembic_cfg, "head")
+    _in_thread(_create_checkpoint_tables, test_database_url)
     return test_database_url
 
 

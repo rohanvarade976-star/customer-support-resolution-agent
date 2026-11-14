@@ -16,6 +16,7 @@ from typing import Any
 from langgraph.types import interrupt
 
 from support_agent.domain.enums import RunStatus
+from support_agent.domain.injection import signal_for
 from support_agent.workflow.state import AskedFor, WorkflowState
 
 AWAITING_APPROVAL = "awaiting_approval"
@@ -54,6 +55,9 @@ async def wait_for_customer(state: WorkflowState) -> dict[str, object]:
         "customer_replies": [reply],  # appended (the key has a reducer)
         "clarification_rounds": state.get("clarification_rounds", 0) + 1,
     }
+    # Replaces the previous batch: recording writes one audit event per batch.
+    signal = signal_for(f"reply_{len(state.get('customer_replies') or []) + 1}", reply)
+    update["injection_signals"] = [] if signal is None else [signal]
     if state.get("asked_for") == AskedFor.MORE_INFORMATION:
         update.update(_GATHERING_RESET)  # the run gathers again with the new information
     return update

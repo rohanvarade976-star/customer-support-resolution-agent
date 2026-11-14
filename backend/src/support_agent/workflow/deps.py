@@ -11,6 +11,8 @@ no SQL and unit tests can pass fakes:
 - `load_memory`: the customer's recent long-term memory, rendered by code from structured
   fields (services/memory.py). Background for the agents only: nothing that decides
   eligibility, amounts or validation is given it.
+- `load_owned_order_numbers`: the customer's own order numbers, for the output guardrail
+  (a reply may not name any other order).
 - `propose_refund`: store the refund proposal and its pending approval (services/proposals).
 - `load_approval_decision`: the reviewer's decision as stored in the database. After a pause
   for approval, this (not the value the run was resumed with) decides what happens next.
@@ -48,6 +50,8 @@ class CaseFacts:
 LoadCaseFacts = Callable[[UUID, str, datetime], Awaitable[CaseFacts]]
 # customer_id -> the customer's recent memory as plain lines ("" when there is none).
 LoadMemory = Callable[[UUID], Awaitable[str]]
+# customer_id -> the customer's own order numbers ("ORD-2001"), for the output guardrail.
+LoadOwnedOrderNumbers = Callable[[UUID], Awaitable[list[str]]]
 # (order_number, amount_minor) -> proposal id. Raises AppError if code refuses the proposal.
 ProposeRefund = Callable[[str, int], Awaitable[UUID]]
 # proposal id -> the stored approval's decision (None: no approval row).
@@ -76,6 +80,7 @@ class WorkflowDeps:
     branch_sessions: BranchSessions
     load_case_facts: LoadCaseFacts
     load_memory: LoadMemory
+    load_owned_order_numbers: LoadOwnedOrderNumbers
     propose_refund: ProposeRefund
     load_approval_decision: LoadApprovalDecision
     execute_refund: ExecuteRefund

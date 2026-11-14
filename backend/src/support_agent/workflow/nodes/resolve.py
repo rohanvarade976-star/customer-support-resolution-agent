@@ -31,6 +31,12 @@ NO_FINDINGS = PolicyFindings(
 )
 
 
+def owned_orders(state: WorkflowState) -> frozenset[str] | None:
+    """The customer's own order numbers, or None if the state has none (not checked)."""
+    numbers = state.get("owned_order_numbers")
+    return None if numbers is None else frozenset(numbers)
+
+
 async def resolve_case(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str, object]:
     investigation = state.get("investigation")
     eligibility = state.get("eligibility")
@@ -53,6 +59,7 @@ async def resolve_case(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str,
         eligibility=eligibility,
         delay_facts=state.get("delay_facts"),
         customer_memory=state.get("customer_memory", ""),
+        owned_order_numbers=owned_orders(state),
     )
     settings = deps.tool_context.settings
     tolerance = timedelta(hours=settings.delivery_date_tolerance_hours)
@@ -76,6 +83,7 @@ async def resolve_case(state: WorkflowState, *, deps: WorkflowDeps) -> dict[str,
             max_revisions=settings.resolution_max_revisions,
             delivery_tolerance=tolerance,
             critic_tier=settings.critic_tier,
+            critic_enabled=settings.critic_enabled,
         )
     update: dict[str, object] = {"outcome": outcome}
     if outcome.failure is not None:

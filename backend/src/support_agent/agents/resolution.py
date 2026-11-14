@@ -64,6 +64,17 @@ _CODE_HINTS: dict[ValidationCode, str] = {
     ValidationCode.UNVERIFIED_AMOUNT: "Remove every money figure from the message.",
     ValidationCode.MESSAGE_EMPTY: "Write a customer message.",
     ValidationCode.REQUEST_INFO_NO_QUESTION: "When you request information, ask it as a question.",
+    ValidationCode.REPLY_INTERNAL_ID: (
+        "The message contains an internal identifier (an id, a call id, a policy citation or "
+        "a system code). Say it in plain words instead, with no identifiers."
+    ),
+    ValidationCode.REPLY_FOREIGN_ORDER: (
+        "The message names an order number that is not this customer's. Name only the "
+        "order number for this case."
+    ),
+    ValidationCode.REPLY_CONTACT_DETAILS: (
+        "The message contains an email address or a phone number. Remove it."
+    ),
 }
 
 
@@ -102,6 +113,8 @@ class ResolutionInputs:
     # The customer's long-term memory, rendered by code (ADR-013). Shown to the drafting
     # model only, as untrusted background: not to the critic, and never to validation.
     customer_memory: str = ""
+    # The customer's own order numbers, for the output guardrail (None: not checked).
+    owned_order_numbers: frozenset[str] | None = None
 
 
 @cache

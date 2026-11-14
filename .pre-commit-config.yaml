@@ -17,7 +17,7 @@ repos:
         pass_filenames: false
       - id: mypy
         name: mypy
-        entry: uv run --directory backend mypy src tests scripts
+        entry: uv run --directory backend mypy src tests scripts evals
         language: system
         types: [python]
         pass_filenames: false

@@ -2,7 +2,8 @@
 
 Each log line is one JSON object, so logs are easy to search and filter.
 If a workflow `run_id` is set for the current task, it is added to every line,
-which lets us pull up all logs for one complaint together.
+which lets us pull up all logs for one complaint together. Inside a recorded trace span,
+`trace_id` is added too, so a log line can be matched to its trace (ADR-018).
 
 Usage:
     configure_logging("INFO")
@@ -16,6 +17,8 @@ import sys
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
+
+from support_agent.core.tracing import current_trace_id
 
 # A ContextVar is like a global, but each async task sees its own value.
 run_id_var: ContextVar[str | None] = ContextVar("run_id", default=None)
@@ -39,6 +42,9 @@ class JsonFormatter(logging.Formatter):
         run_id = run_id_var.get()
         if run_id is not None:
             entry["run_id"] = run_id
+        trace_id = current_trace_id()
+        if trace_id is not None:
+            entry["trace_id"] = trace_id
         for key, value in vars(record).items():
             if key not in _STANDARD_ATTRS:
                 entry[key] = value

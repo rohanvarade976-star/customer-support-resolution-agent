@@ -65,6 +65,7 @@ _GATHER_INSTRUCTION = (
     "When you are finished, reply with a short note and no tool call."
 )
 _DRAFT_INSTRUCTION = "Write the resolution now."
+_RESULTS_HEADING = "What your tool calls returned (each result names its call_id; cite it):"
 
 
 class BaselineFailure(StrEnum):
@@ -142,6 +143,21 @@ def grounded_findings(results: list[ToolResult]) -> PolicyFindings:
     return ground_rules(draft, results)
 
 
+def draft_messages(gathering: BaselineGathering, inputs: ResolutionInputs) -> list[ChatMessage]:
+    """The draft call's conversation: no tool-call history, the results as plain text.
+
+    The draft call binds only `resolution_draft`. Continuing the gathering conversation
+    would replay calls to tools that are not bound, which Gemini answers with plain text
+    instead of the forced call (ADR-016). Each result keeps its call_id and its
+    untrusted-data wrapper, so the draft can still cite it and the validator still checks it.
+    """
+    results = "\n\n".join(m.content for m in gathering.messages if m.role == "tool")
+    request = "\n\n".join(
+        [_RESULTS_HEADING, results or "(no tool call succeeded)", render_case(inputs)]
+    )
+    return [system_message(load_prompt()), user_message(request + "\n\n" + _DRAFT_INSTRUCTION)]
+
+
 async def decide(
     llm: LLMClient,
     gathering: BaselineGathering,
@@ -153,10 +169,7 @@ async def decide(
 ) -> ResolutionOutcome:
     """One draft, then the shared validator. No critic and no revision."""
     ctx = build_context(inputs, trace, results, delivery_tolerance)
-    messages = [
-        *gathering.messages,
-        user_message(render_case(inputs) + "\n\n" + _DRAFT_INSTRUCTION),
-    ]
+    messages = draft_messages(gathering, inputs)
     try:
         draft = normalize_draft(await draft_resolution(llm, messages))
     except LLMUnavailableError:

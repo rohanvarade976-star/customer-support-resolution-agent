@@ -39,9 +39,12 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.core.errors import AppError
+from support_agent.core.tracing import inject_traceparent
 from support_agent.db.models import Job
 from support_agent.db.models.jobs import OPEN_SWEEP_SQL
 from support_agent.domain.enums import SWEEP_JOB_TYPES, JobStatus, JobType
+
+TRACEPARENT_KEY = "traceparent"
 
 
 @dataclass(frozen=True)
@@ -65,7 +68,14 @@ async def enqueue(
     now: datetime,
     max_attempts: int,
 ) -> Job:
-    """Add a job in the caller's transaction (flushed, not committed). Payload: ids only."""
+    """Add a job in the caller's transaction (flushed, not committed). Payload: ids only.
+
+    Inside a recorded trace, the payload also gets the W3C `traceparent` (a trace id and a
+    span id), so the worker's spans join the request's trace (ADR-018).
+    """
+    traceparent = inject_traceparent()
+    if traceparent is not None:
+        payload = {**payload, TRACEPARENT_KEY: traceparent}
     job = Job(
         job_type=job_type,
         run_id=run_id,

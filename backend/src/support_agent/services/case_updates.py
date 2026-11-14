@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.core import metrics
 from support_agent.core.errors import AppError
 from support_agent.db.models import ActionProposal, Ticket, WorkflowRun
 from support_agent.domain.enums import RunStatus, TicketStatus
@@ -66,6 +67,9 @@ async def set_run_status(
     if run.status == status:
         return
     await workflow_runs.set_status(session, run, status, now)
+    if status in workflow_runs.FINISHED_STATUSES:
+        # Counted when set; a rolled-back transaction would over-count (ADR-018).
+        metrics.RUNS.labels(outcome=status.value).inc()
     event = _RUN_EVENTS.get(status)
     if event is not None:
         await audit.record(

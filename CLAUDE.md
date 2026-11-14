@@ -103,7 +103,7 @@ docker-compose.yml, .env.example, .gitignore, .pre-commit-config.yaml, LICENSE, 
 uv sync                          # install dependencies
 uv run pytest                    # run tests
 uv run ruff check . ; uv run ruff format .
-uv run mypy src tests scripts
+uv run mypy src tests scripts evals
 uv run alembic upgrade head      # apply migrations
 ```
 
@@ -118,4 +118,4 @@ From the repo root: `docker compose up -d` starts Postgres.
 
 ## Current milestone
 
-M8 — Money safety. See the master plan and PRD section "Milestones".
+M9 — Guardrails, observability and evaluation. See the master plan and PRD section "Milestones".
