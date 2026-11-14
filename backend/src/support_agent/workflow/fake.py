@@ -151,6 +151,8 @@ class FakeWorld:
         # The customer's rendered long-term memory ("" = none), and whose memory was asked for.
         self.memory = ""
         self.memory_loaded_for: list[UUID] = []
+        # The customer's own order numbers, which a fake reply may name.
+        self.owned_orders = ["ORD-1001", "ORD-1042"]
         self.sessions = BranchSessions()
         self.registry = self._build_registry()
 
@@ -164,6 +166,9 @@ class FakeWorld:
     async def load_memory(self, customer_id: UUID) -> str:
         self.memory_loaded_for.append(customer_id)
         return self.memory
+
+    async def load_owned_order_numbers(self, customer_id: UUID) -> list[str]:
+        return list(self.owned_orders)
 
     async def propose_refund(self, order_number: str, amount_minor: int) -> UUID:
         if self.refuse_proposal_with is not None:
@@ -278,6 +283,7 @@ def fake_deps(
         branch_sessions=world.sessions,
         load_case_facts=world.load_case_facts,
         load_memory=world.load_memory,
+        load_owned_order_numbers=world.load_owned_order_numbers,
         propose_refund=world.propose_refund,
         load_approval_decision=world.load_approval_decision,
         execute_refund=world.execute_refund,

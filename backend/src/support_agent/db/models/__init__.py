@@ -10,6 +10,7 @@ from support_agent.db.models.jobs import Job
 from support_agent.db.models.orders import Order, OrderItem, Return
 from support_agent.db.models.policies import PolicyChunk, PolicyDocument
 from support_agent.db.models.proposals import ActionProposal, Approval
+from support_agent.db.models.rate_limits import RateLimitCounter
 from support_agent.db.models.refunds import RefundOperation
 from support_agent.db.models.staff import StaffUser
 from support_agent.db.models.support import (
@@ -31,6 +32,7 @@ __all__ = [
     "OrderItem",
     "PolicyChunk",
     "PolicyDocument",
+    "RateLimitCounter",
     "RefundOperation",
     "Return",
     "StaffUser",

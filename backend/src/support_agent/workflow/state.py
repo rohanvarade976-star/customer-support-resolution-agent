@@ -38,6 +38,7 @@ from support_agent.domain.enums import (
     RunStatus,
     TicketStatus,
 )
+from support_agent.domain.injection import InjectionSignal, mark_suspicious
 from support_agent.domain.shipping import ShippingDelayFacts
 
 
@@ -96,6 +97,13 @@ class WorkflowState(TypedDict):
     # intake (services/memory.py, ADR-013). Background for the supervisor and the resolution
     # agent, always sent wrapped as untrusted data. Never read by eligibility or validation.
     customer_memory: NotRequired[str]
+    # The customer's own order numbers ("ORD-2001"), loaded at intake. Only the output
+    # guardrail reads them: a reply may not name any other order (ADR-017).
+    owned_order_numbers: NotRequired[list[str]]
+    # What the injection scan found in the text the latest node read (complaint at intake,
+    # one reply at a time after). Replaced, not accumulated: services/run_recording.py
+    # writes one audit event per batch, from what a segment wrote. Codes only.
+    injection_signals: NotRequired[list[InjectionSignal]]
     classification: NotRequired[Classification | None]  # None if the LLM call failed
     # The order the rest of the run works on: the ticket's, or a verified hint.
     order_number: NotRequired[str | None]
@@ -165,9 +173,15 @@ def restore_enums(values: dict[str, object]) -> WorkflowState:
 def customer_text(state: WorkflowState) -> str:
     """The complaint plus every reply so far: what the agents read as the customer's words.
 
-    Still untrusted data: each agent wraps it with `wrap_untrusted` before sending it.
+    Still untrusted data: each agent wraps it with `wrap_untrusted` before sending it. Sentences
+    that look like instructions are wrapped in markers (domain/injection.py); nothing is removed.
     """
     replies = state.get("customer_replies") or []
-    parts = [state["complaint_text"]]
-    parts += [f"Customer follow-up {i}: {reply}" for i, reply in enumerate(replies, start=1)]
+    # Each message is marked on its own, before its label is added: a marker never spans two
+    # messages, and a line-start pattern ("SYSTEM:") still sees the start of the reply.
+    parts = [mark_suspicious(state["complaint_text"])]
+    parts += [
+        f"Customer follow-up {i}: {mark_suspicious(reply)}"
+        for i, reply in enumerate(replies, start=1)
+    ]
     return "\n\n".join(parts)

@@ -124,6 +124,7 @@ def build_context(
         delivery_dates=_delivery_dates(results),
         delivery_tolerance=delivery_tolerance,
         delay_facts=inputs.delay_facts,
+        owned_order_numbers=inputs.owned_order_numbers,
     )
 
 

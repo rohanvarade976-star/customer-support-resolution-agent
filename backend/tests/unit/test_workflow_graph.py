@@ -218,6 +218,7 @@ async def test_nodes_return_only_the_fields_they_change() -> None:
         "status": RunStatus.INVESTIGATING,
         "order_number": "ORD-1001",
         "customer_memory": "",
+        "owned_order_numbers": world.owned_orders,
     }
     assert world.memory_loaded_for == [CUSTOMER]  # the state's customer, set by code
     assert await needs_clarification(state) == {

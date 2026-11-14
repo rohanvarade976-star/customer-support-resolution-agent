@@ -33,6 +33,7 @@ from support_agent.llm.providers import build_llm_client
 from support_agent.rag import embeddings
 from support_agent.schemas.auth import Principal
 from support_agent.services import auth as auth_service
+from support_agent.services import rate_limits as rate_limit_service
 from support_agent.services.runs import EnqueueEnv
 from support_agent.workflow.deps import BranchSessions
 from support_agent.workflow.graph import Checkpointer
@@ -147,4 +148,24 @@ def require_reviewer(principal: PrincipalDep) -> Principal:
 
 
 CustomerDep = Annotated[Principal, Depends(require_customer)]
+
+
+# Rate limits for the two customer actions that start model work (ADR-017). Used as route
+# dependencies: they run after the caller is authenticated and before any work is queued.
+async def limit_run_starts(
+    principal: CustomerDep, session: SessionDep, settings: SettingsDep, clock: ClockDep
+) -> None:
+    await rate_limit_service.check_run_start(
+        session, settings, customer_id=str(principal.id), now=clock()
+    )
+
+
+async def limit_customer_replies(
+    principal: CustomerDep, session: SessionDep, settings: SettingsDep, clock: ClockDep
+) -> None:
+    await rate_limit_service.check_customer_reply(
+        session, settings, customer_id=str(principal.id), now=clock()
+    )
+
+
 ReviewerDep = Annotated[Principal, Depends(require_reviewer)]

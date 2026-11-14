@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from support_agent.agents.resolve import ESCALATION_MESSAGE
 from support_agent.core.config import Settings
 from support_agent.core.errors import AppError, PermanentJobError
+from support_agent.core.ids import std_uuid
 from support_agent.db.models import Job, Ticket, WorkflowRun
 from support_agent.domain.enums import (
     ApprovalDecision,
@@ -67,6 +68,7 @@ from support_agent.repositories.tickets import TicketRecord
 from support_agent.schemas.auth import Principal
 from support_agent.schemas.runs import RunJob, RunResponse
 from support_agent.services import eligibility, memory, order_status, refund_execution
+from support_agent.services import orders as orders_service
 from support_agent.services import proposals as proposal_service
 from support_agent.services.case_updates import set_run_status, set_ticket_status
 from support_agent.services.orders import customer_owns_order
@@ -452,6 +454,9 @@ def _build_deps(
     async def load_memory(customer_id: UUID) -> str:
         return await memory.load_for_run(session, settings, customer_id, now=clock())
 
+    async def load_owned_order_numbers(customer_id: UUID) -> list[str]:
+        return await orders_service.list_order_numbers(session, customer_id)
+
     async def propose_refund(order_number: str, amount_minor: int) -> UUID:
         proposal_id = await proposal_service.create_proposal_for_run(
             session,
@@ -466,7 +471,7 @@ def _build_deps(
         # worker dying in between would leave a checkpoint pointing at a proposal that was
         # rolled back. A rerun of this step gets the same proposal back.
         await session.commit()
-        return proposal_id
+        return std_uuid(proposal_id)  # it goes into the workflow state
 
     async def load_approval_decision(proposal_id: UUID) -> ApprovalDecision | None:
         approval = await proposals.get_approval_for_proposal(session, proposal_id)
@@ -492,6 +497,7 @@ def _build_deps(
         branch_sessions=env.branch_sessions,
         load_case_facts=load_case_facts,
         load_memory=load_memory,
+        load_owned_order_numbers=load_owned_order_numbers,
         propose_refund=propose_refund,
         load_approval_decision=load_approval_decision,
         execute_refund=execute_refund,

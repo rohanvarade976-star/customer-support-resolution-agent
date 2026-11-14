@@ -11,8 +11,9 @@ results, policy text, the drafted message and the customer's replies are all lef
 Events: `run.classified`, `supervisor.decided`, `investigation.started`, one `tool.called`
 per call, `investigation.completed`, `policy.completed`, `resolution.completed`,
 `proposal.created` (written by services/proposals.py), `clarification.requested`,
-`run.paused`, the run's end event, and `run.usage`. Refund events come from the refund
-executor itself.
+`injection_suspected` (pattern codes of instruction-like customer text),
+`reply.guardrail_replaced` (codes of the output check that replaced a reply), `run.paused`,
+the run's end event, and `run.usage`. Refund events come from the refund executor itself.
 
 When the run has finished, its verified outcome is also remembered for the customer
 (services/memory.py, ADR-013): fixed codes derived from statuses, never text.
@@ -25,16 +26,19 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.agents.classifier import Classification
+from support_agent.agents.resolve import ESCALATION_MESSAGE
 from support_agent.core.config import Settings
 from support_agent.db.models import Ticket, WorkflowRun
 from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, TicketStatus
 from support_agent.domain.memory import memory_outcome
+from support_agent.domain.output_guard import check_reply
 from support_agent.llm.tool_loop import OUTCOME_OK, ToolCallRecord
 from support_agent.llm.usage import UsageMeter
 from support_agent.repositories import audit, refunds, tickets, workflow_runs
 from support_agent.services import memory
 from support_agent.services.case_updates import set_run_status, set_ticket_status
 from support_agent.workflow.graph import Segment
+from support_agent.workflow.nodes.placeholders import CLARIFY_MESSAGE
 from support_agent.workflow.state import AskedFor, OrderHint, WorkflowState
 
 # Where the ticket stands once the run stops at each state. Nodes that need something else
@@ -62,6 +66,7 @@ async def save_segment(
     if (status in _WAITING) != segment.paused:  # a graph bug: never leave a run half-open
         raise RuntimeError(f"run stopped as {status.value} with paused={segment.paused}")
 
+    await _record_injection(session, run, written)
     classification = written.get("classification")
     if classification is not None:  # the classifier ran in this segment
         await _record_classification(session, settings, run, ticket, written, classification)
@@ -95,13 +100,60 @@ async def save_segment(
             payload={"reason": _clarification_reason(final)},
         )
     if not superseded:
-        if reply := written.get("customer_reply"):
-            await tickets.set_reply(session, ticket, reply)
         # KeyError = a graph bug (a state with no ticket mapping) -> the run is marked failed.
         ticket_status = written.get("ticket_status") or _TICKET_STATUS_FOR_RUN[status]
+        if reply := written.get("customer_reply"):
+            safe = await guard_reply(session, run, final, status, reply)
+            if safe != reply:  # the reply was replaced: the ticket must not say "resolved"
+                reply = safe
+                if safe == ESCALATION_MESSAGE:
+                    ticket_status = TicketStatus.ESCALATED
+            await tickets.set_reply(session, ticket, reply)
         await set_ticket_status(session, ticket, ticket_status, run_id=run.id, actor="system")
     await _record_usage(session, run, meter)
     await _remember_outcome(session, settings, run, ticket, final, now)
+
+
+async def _record_injection(
+    session: AsyncSession, run: WorkflowRun, written: WorkflowState
+) -> None:
+    """One `injection_suspected` event per scanned text that matched. Pattern codes only:
+    the text itself is never stored here, and nothing about the run changes (ADR-017)."""
+    for signal in written.get("injection_signals") or []:
+        await audit.record(
+            session,
+            run_id=run.id,
+            actor="system",
+            event_type="injection_suspected",
+            payload={"run_id": str(run.id), "source": signal.source, "codes": signal.codes},
+        )
+
+
+async def guard_reply(
+    session: AsyncSession,
+    run: WorkflowRun,
+    final: WorkflowState,
+    status: RunStatus,
+    reply: str,
+) -> str:
+    """The output guardrail's last check, just before a reply is saved (ADR-017).
+
+    The resolution loop already revises a draft that fails these checks; this catches
+    anything that reached the state another way. A failing reply is replaced by a fixed
+    message and the codes are recorded (never the reply).
+    """
+    issues = check_reply(reply, final.get("owned_order_numbers"))
+    if not issues:
+        return reply
+    await audit.record(
+        session,
+        run_id=run.id,
+        actor="system",
+        event_type="reply.guardrail_replaced",
+        payload={"run_id": str(run.id), "codes": [issue.value for issue in issues]},
+    )
+    # A run that waits for the customer still needs to ask something; otherwise a person takes over.
+    return CLARIFY_MESSAGE if status == RunStatus.AWAITING_CUSTOMER else ESCALATION_MESSAGE
 
 
 async def _refund_superseded(

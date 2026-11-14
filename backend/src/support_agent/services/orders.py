@@ -65,6 +65,11 @@ async def customer_owns_order(session: AsyncSession, customer_id: UUID, order_nu
     return await orders.find_id_for_customer(session, customer_id, order_number) is not None
 
 
+async def list_order_numbers(session: AsyncSession, customer_id: UUID) -> list[str]:
+    """The customer's own order numbers: what a reply to them may name (output guardrail)."""
+    return [order.order_number for order in await orders.list_for_customer(session, customer_id)]
+
+
 async def get_my_order(
     session: AsyncSession, principal: Principal, order_number: str
 ) -> OrderResponse:

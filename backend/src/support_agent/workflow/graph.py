@@ -47,6 +47,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
+from support_agent.core.ids import std_uuid
 from support_agent.domain.enums import ApprovalDecision, ResolutionAction, RunMode, RunStatus
 from support_agent.workflow.deps import WorkflowDeps
 from support_agent.workflow.nodes import (
@@ -280,9 +281,10 @@ def initial_state(
     ticket_order_number: str | None,
 ) -> WorkflowState:
     return WorkflowState(
-        run_id=run_id,
-        ticket_id=ticket_id,
-        customer_id=customer_id,
+        # Plain uuid.UUID, never the database driver's subclass (core/ids.py, ADR-017).
+        run_id=std_uuid(run_id),
+        ticket_id=std_uuid(ticket_id),
+        customer_id=std_uuid(customer_id),
         complaint_text=complaint_text,
         ticket_order_number=ticket_order_number,
         status=RunStatus.CREATED,

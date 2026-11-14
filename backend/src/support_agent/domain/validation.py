@@ -9,7 +9,9 @@ the draft passed. It checks:
 - every policy citation is one the policy agent's grounded findings contain;
 - the structured tool outputs agree with each other (order vs carrier delivery time);
 - the customer message does not claim an outcome nobody has verified, and does not promise an
-  investigation, compensation or any other action that code-computed facts do not support.
+  investigation, compensation or any other action that code-computed facts do not support;
+- the customer message holds no internal identifier, no order number the customer does not
+  own, and no email address or phone number (the output guardrail, domain/output_guard.py).
 
 The message check is a best-effort keyword filter, not a proof: it catches the common ways
 of saying "the refund is done". The real protection is that no agent can move money, and
@@ -25,6 +27,7 @@ from enum import StrEnum
 
 from support_agent.domain.eligibility import EligibilityDecision
 from support_agent.domain.enums import ResolutionAction
+from support_agent.domain.output_guard import check_reply
 from support_agent.domain.shipping import ShippingDelayFacts
 
 OUTCOME_OK = "ok"  # a succeeded call's outcome in the tool trace (same value as the tool loop)
@@ -49,6 +52,10 @@ class ValidationCode(StrEnum):
     UNSUPPORTED_PROMISE = "UNSUPPORTED_PROMISE"  # promises an action no verified fact supports
     MESSAGE_EMPTY = "MESSAGE_EMPTY"
     REQUEST_INFO_NO_QUESTION = "REQUEST_INFO_NO_QUESTION"
+    # Output guardrail (domain/output_guard.py, ADR-017).
+    REPLY_INTERNAL_ID = "REPLY_INTERNAL_ID"
+    REPLY_FOREIGN_ORDER = "REPLY_FOREIGN_ORDER"
+    REPLY_CONTACT_DETAILS = "REPLY_CONTACT_DETAILS"
 
 
 # Problems a better draft cannot fix: the data or the policy itself is inconsistent.
@@ -89,6 +96,9 @@ class ValidationContext:
     delivery_tolerance: timedelta
     # Code-computed delay facts; None when there is no shipment to compute them from.
     delay_facts: ShippingDelayFacts | None = None
+    # The customer's own order numbers, for the output guardrail. None: that check is skipped
+    # (only callers with no customer context; the workflow always sets it).
+    owned_order_numbers: frozenset[str] | None = None
 
 
 def normalize_citation(citation: str) -> str:
@@ -303,6 +313,11 @@ def _check_message(claim: DraftClaim, ctx: ValidationContext) -> list[Validation
     allowed = {ctx.eligibility.refundable_amount_minor} if is_refund else set()
     if any(figure not in allowed for figure in _figures_minor(claim.message)):
         codes.append(ValidationCode.UNVERIFIED_AMOUNT)
+    internal = {*ctx.call_outcomes, *ctx.grounded_citations}
+    codes += [
+        ValidationCode(issue.value)
+        for issue in check_reply(claim.message, ctx.owned_order_numbers, internal)
+    ]
     return codes
 
 

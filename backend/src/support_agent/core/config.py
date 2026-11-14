@@ -189,6 +189,17 @@ class Settings(BaseSettings):
     # mistaken for a stuck one. Tests use 0.
     invariant_grace_seconds: int = Field(default=900, ge=0, le=86400)
 
+    # API rate limits, counted in Postgres so they hold across processes (ADR-017).
+    # Login attempts count whether or not the password was right. Set the switch to false
+    # only for load tests: it turns every limit off.
+    rate_limit_enabled: bool = True
+    rate_limit_login_per_email: int = Field(default=5, ge=1, le=1000)
+    rate_limit_login_per_ip: int = Field(default=20, ge=1, le=10000)
+    rate_limit_login_window_seconds: int = Field(default=900, ge=1, le=86400)
+    # Per customer, per hour: each run start and each reply can cost many model calls.
+    rate_limit_run_starts_per_hour: int = Field(default=10, ge=1, le=10000)
+    rate_limit_replies_per_hour: int = Field(default=30, ge=1, le=10000)
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
