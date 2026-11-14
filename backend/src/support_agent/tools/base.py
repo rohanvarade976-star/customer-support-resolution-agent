@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
+from support_agent.core.tracing import span
 from support_agent.integrations.errors import IntegrationError, ProviderUnavailableError
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.rag.embeddings import Embedder
@@ -136,6 +137,20 @@ class ToolRegistry:
         return subset
 
     async def execute(
+        self, name: str, ctx: ToolContext, arguments: Mapping[str, Any]
+    ) -> BaseModel | ToolError:
+        # The model chooses `name`, so only a registered name goes on the span.
+        traced_name = name if name in self._tools else "unknown"
+        with span("tool.call", {"tool.name": traced_name}) as tool_span:
+            result = await self._execute(name, ctx, arguments)
+            if isinstance(result, ToolError):
+                tool_span.set("tool.outcome", "error")
+                tool_span.set("error.code", result.error_code)
+            else:
+                tool_span.set("tool.outcome", "ok")
+            return result
+
+    async def _execute(
         self, name: str, ctx: ToolContext, arguments: Mapping[str, Any]
     ) -> BaseModel | ToolError:
         tool = self._tools.get(name)

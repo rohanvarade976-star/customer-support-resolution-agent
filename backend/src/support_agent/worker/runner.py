@@ -27,12 +27,14 @@ import logging
 from contextlib import suppress
 from datetime import timedelta
 
+from support_agent.core import metrics
 from support_agent.core.errors import PermanentJobError
 from support_agent.core.logging import run_id_var
+from support_agent.core.tracing import SafeSpan, extract_traceparent, span
 from support_agent.domain.enums import JobType
 from support_agent.worker import queue
 from support_agent.worker.handlers import HANDLERS, WorkerDeps, escalate_dead_job
-from support_agent.worker.queue import ClaimedJob
+from support_agent.worker.queue import TRACEPARENT_KEY, ClaimedJob
 
 log = logging.getLogger(__name__)
 
@@ -54,49 +56,79 @@ async def claim_next(deps: WorkerDeps) -> ClaimedJob | None:
 async def execute(job: ClaimedJob, deps: WorkerDeps, *, heartbeat: bool = True) -> None:
     """Run one claimed job and record how it went. Never raises, except on cancellation."""
     token = run_id_var.set(None if job.run_id is None else str(job.run_id))
+    attributes: dict[str, str | int] = {
+        "job.id": str(job.id),
+        "job.type": job.job_type.value,
+        "job.attempt": job.attempt,
+    }
+    if job.run_id is not None:
+        attributes["run.id"] = str(job.run_id)
+    # The span is a child of the API request that queued the job, when the payload says so.
+    parent = extract_traceparent(job.payload.get(TRACEPARENT_KEY))
     try:
-        if job.attempt > job.max_attempts:
-            # Its last attempt was claimed, then its worker died; the lease ran out since.
-            await _bury(job, deps, "ATTEMPTS_EXHAUSTED")
-            return
-        log.info("job_started", extra=_fields(job))
-        beat = asyncio.create_task(_heartbeat(job, deps)) if heartbeat else None
-        try:
-            async with deps.sessions() as session:
-                await HANDLERS[job.job_type](session, job, deps)
-        except asyncio.CancelledError:
-            await asyncio.shield(_release(job, deps))
-            raise
-        except PermanentJobError as exc:
-            await _bury(job, deps, exc.code)
-        except Exception as exc:
-            await _fail(job, deps, exc)
-        else:
-            await _complete(job, deps)
-        finally:
-            if beat is not None:
-                beat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await beat
+        with span("worker.job", attributes, parent=parent) as job_span:
+            await _execute_in_span(job, deps, job_span, heartbeat=heartbeat)
     finally:
         run_id_var.reset(token)
 
 
-async def _complete(job: ClaimedJob, deps: WorkerDeps) -> None:
+def _outcome(job: ClaimedJob, job_span: SafeSpan, outcome: str) -> None:
+    job_span.set("job.outcome", outcome)
+    metrics.JOBS.labels(job_type=job.job_type.value, outcome=outcome).inc()
+
+
+async def _execute_in_span(
+    job: ClaimedJob, deps: WorkerDeps, job_span: SafeSpan, *, heartbeat: bool
+) -> None:
+    if job.attempt > job.max_attempts:
+        # Its last attempt was claimed, then its worker died; the lease ran out since.
+        await _bury(job, deps, "ATTEMPTS_EXHAUSTED")
+        _outcome(job, job_span, "dead")
+        return
+    log.info("job_started", extra=_fields(job))
+    beat = asyncio.create_task(_heartbeat(job, deps)) if heartbeat else None
+    try:
+        async with deps.sessions() as session:
+            await HANDLERS[job.job_type](session, job, deps)
+    except asyncio.CancelledError:
+        await asyncio.shield(_release(job, deps))
+        _outcome(job, job_span, "released")
+        raise
+    except PermanentJobError as exc:
+        job_span.set("error.code", exc.code)
+        await _bury(job, deps, exc.code)
+        _outcome(job, job_span, "dead")
+    except Exception as exc:
+        job_span.set("error.code", queue.error_code(exc))
+        _outcome(job, job_span, await _fail(job, deps, exc))
+    else:
+        _outcome(job, job_span, "succeeded" if await _complete(job, deps) else "lost_lease")
+    finally:
+        if beat is not None:
+            beat.cancel()
+            with suppress(asyncio.CancelledError):
+                await beat
+
+
+async def _complete(job: ClaimedJob, deps: WorkerDeps) -> bool:
+    """True if this worker still held the job and marked it done."""
     async with deps.sessions() as session:
         if await queue.complete(session, job):
             log.info("job_succeeded", extra=_fields(job))
-        else:  # another worker took it over; its result stands
-            log.warning("job_lost_lease", extra=_fields(job))
+            return True
+        # another worker took it over; its result stands
+        log.warning("job_lost_lease", extra=_fields(job))
+        return False
 
 
-async def _fail(job: ClaimedJob, deps: WorkerDeps, exc: Exception) -> None:
+async def _fail(job: ClaimedJob, deps: WorkerDeps, exc: Exception) -> str:
+    """Retry or bury a failed job. Returns the outcome: "retried" or "dead"."""
     code = queue.error_code(exc)
     # The code only: an exception's message or traceback can hold customer text.
     log.warning("job_failed", extra={**_fields(job), "error_code": code})
     if job.attempt >= job.max_attempts:
         await _bury(job, deps, code)
-        return
+        return "dead"
     delay = queue.backoff_delay(
         job.attempt,
         base_seconds=deps.settings.job_backoff_base_seconds,
@@ -104,6 +136,7 @@ async def _fail(job: ClaimedJob, deps: WorkerDeps, exc: Exception) -> None:
     )
     async with deps.sessions() as session:
         await queue.retry(session, job, now=deps.clock(), delay_seconds=delay, code=code)
+    return "retried"
 
 
 async def _bury(job: ClaimedJob, deps: WorkerDeps, code: str) -> None:

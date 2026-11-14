@@ -20,5 +20,17 @@ services:
       timeout: 5s
       retries: 10
 
+  # Optional trace viewer. A profile keeps it out of a plain `docker compose up -d`:
+  #   docker compose --profile tracing up -d jaeger
+  # Then set OTEL_EXPORTER=otlp and open http://localhost:16686 (README, "Tracing").
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["tracing"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # the web UI
+      - "4318:4318"    # OTLP over HTTP: where the API and the worker send spans
+
 volumes:
   pgdata:

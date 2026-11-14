@@ -1481,7 +1481,7 @@ The golden expected answers are not changed by this ADR.
 - **Changing `JWT_SECRET` resets the counters,** because the keys are derived from it.
 - **Counting costs a write per request** to the checked endpoints, plus one cheap indexed
   delete of expired rows. That is fine at this scale and would need revisiting under load.
-- **No tracing yet.** Observability is M9 Task 3.
+- **No tracing in this ADR.** Tracing and metrics are ADR-018.
 
 ### Consequences
 
@@ -1494,3 +1494,144 @@ The golden expected answers are not changed by this ADR.
 - New migration `d9a3b7c1e5f2` (the counters table); no data to convert.
 - Anything else that puts a database id into the workflow state must go through `std_uuid`.
   The integration test is the safety net.
+
+
+---
+
+## ADR-018: Observability: tracing, metrics, privacy rules and what to alert on
+
+- **Date:** 2026-11-14
+- **Status:** Accepted
+- **Milestone:** M9
+
+### Context
+
+Until now the only view into a running system was the JSON log and the audit trail. Neither
+answers "where did the time go in this run?" or "is the queue backing up?". The PRD asks for a
+trace of every agent step, tool call, token count and latency. It also forbids customer text
+outside the places built to hold it (CLAUDE.md rule 9, PRD "Privacy"), and a trace is exactly the
+kind of data that gets copied to a third-party service.
+
+### Decision
+
+1. **OpenTelemetry for traces, written by hand.** Packages: `opentelemetry-api` and `-sdk` (the
+   span API and the thing that creates and exports spans), `opentelemetry-exporter-otlp-proto-http`
+   (ships spans to Jaeger or any collector; imported only when `OTEL_EXPORTER=otlp`).
+   `core/tracing.py` holds a small `span(name, attributes, parent=)` helper. Spans exist for:
+   - `api.request`: method, route template (`/runs/{run_id}`, never the real URL), status.
+   - `worker.job`: job id and type, attempt, run id, outcome (`succeeded`, `retried`, `dead`,
+     `released`, `lost_lease`) and error code.
+   - `workflow.node`: node name and run id. A pause (a LangGraph interrupt) is recorded as
+     `workflow.outcome=paused`, not as a failure.
+   - `llm.call`, one per provider attempt: provider, model, tier, attempt, outcome, input,
+     output and reasoning tokens, latency.
+   - `tool.call`: tool name (a name the model made up is recorded as `unknown`), outcome, error code.
+   - `reconcile.sweep` and `reconcile.check`: refund operation id, what the provider reported,
+     error code, how many were checked.
+2. **Exporter setting `OTEL_EXPORTER`:** `off` (default; spans are no-ops and cost nothing),
+   `console` (development) or `otlp` (`OTEL_OTLP_ENDPOINT`). The tracer provider is our own
+   object, not OpenTelemetry's process-global one, because the global can be set only once and
+   tests must swap exporters. Optional Jaeger runs under the compose profile `tracing`.
+3. **The API request and its job are one trace.** When `queue.enqueue` runs inside a recorded span,
+   it adds the W3C `traceparent` (version, trace id, span id, flags) to the job payload. The worker
+   starts `worker.job` as a child of it. A missing, damaged or forged value starts a new trace and
+   never fails the job. The payload still holds ids only. With tracing off nothing is added.
+4. **Logs get `trace_id`** inside any recorded span (`core/logging.py`), so a log line can be
+   matched to its trace and the reverse.
+5. **Prometheus metrics (`prometheus-client`), two registries.**
+   - *In-process* (API and worker each expose their own, and a dashboard may sum them): runs by
+     outcome, LLM calls by provider, model, tier and outcome, tokens by provider, model and kind,
+     an LLM latency histogram, jobs by type and outcome, `injection_suspected` by source,
+     `reply.guardrail_replaced` by code, and 429 responses by scope.
+   - *Database-derived* (**the API only**): jobs queued, age of the oldest due queued job, dead
+     jobs, reconciliation backlog (operations whose next check is due), and refunds by status
+     (every status always has a series). They are computed at scrape time from the tables, so
+     every process would report the same numbers. If both the API and the worker served them, a
+     dashboard that sums the two would count each row twice. The worker serves its in-process
+     counters only (`core/metrics.py` keeps them in a separate registry, and a test fails if a
+     database gauge appears in the worker's).
+6. **`/metrics` is protected by a bearer token, not by a network rule.** `METRICS_TOKEN` (at least
+   16 characters, compared in constant time). Unset: the route answers 404, so a forgotten secret
+   never means an open endpoint. Wrong or missing: 401. A separate internal port was the
+   alternative: it needs a second server and listener, and on a host with one public port (Render)
+   it cannot be done at all. The worker has no public listener, so its metrics server is off unless
+   `WORKER_METRICS_PORT` is set and listens on `127.0.0.1` unless `WORKER_METRICS_HOST` is changed.
+   It has no token: do not bind it to a public address.
+
+### Privacy rules
+
+Spans and metrics carry only ids, codes, counts, model names, route templates and timings.
+
+- **A fixed list of attribute names** (`ALLOWED_ATTRIBUTES`). Any other name raises, so adding one
+  is a reviewed change, and no name suggests free text.
+- **String values must look like tokens:** letters, digits and `_ . : / { } -`, at most 80
+  characters, no spaces. A sentence is dropped, with a warning that names the attribute and never
+  the value. Numbers and booleans are always allowed.
+- **Failures record the exception class only,** as an error type, never its message and never a
+  recorded exception event, because messages can echo customer or model text.
+- **No automatic instrumentation** of FastAPI, httpx or SQLAlchemy. They record full URLs, query
+  strings and SQL, which can hold customer text. The request span is written by hand.
+- **Metric labels are small fixed sets.** Never a run, customer, order or job id.
+- **Values the model chooses are not trusted:** a tool name outside the registry becomes `unknown`.
+- **Tests** run a complaint and a draft reply holding unique marker strings through the real path
+  and assert the markers appear in no span (name, attributes, status or events) and not in
+  `/metrics`.
+- LangSmith (named in the PRD) is not used: it would send prompts and answers to a third party,
+  which this design keeps out of traces. OpenTelemetry is vendor-neutral, and a collector can
+  still forward ids and timings anywhere.
+
+### What to alert on
+
+| Signal | Why |
+|---|---|
+| `support_jobs_dead` increases | A run was escalated because its job failed every attempt. Always look. |
+| `support_jobs_oldest_queued_age_seconds` above a few minutes | No worker, a stuck worker or too few workers. Runs are waiting. |
+| `support_reconciliation_backlog` stays above 0 or grows | Refunds with an unknown outcome are not being resolved. Money is in doubt. |
+| `support_refunds{status="pending_reconciliation"}` or `reserved` not draining | Same, seen from the other side. |
+| `support_runs_total{outcome="failed"}` increases, or `escalated` jumps | The workflow is breaking, or the models are. |
+| `support_llm_calls_total{outcome="error"}` rate, and the share of calls to the fallback provider | The main provider is down or rate limited. |
+| p95 of `support_llm_latency_seconds` | Slow models make every run slow. |
+| `support_llm_tokens_total` rate | Free-tier quota burn. |
+| `support_rate_limited_total{scope="login_*"}` spikes | Password guessing. |
+| `support_rate_limited_total{scope="run_start"/"customer_reply"}` spikes | Someone burning the model quota. |
+| `support_injection_suspected_total` spikes | An attack campaign (a signal only: the pattern list has false positives). |
+| `support_reply_guardrail_replaced_total` above 0 | A reply that would have leaked something was replaced. Find out how it got there. |
+| The money invariant checker (ADR-015) reports a violation | Not a metric: page a person at once. |
+
+### Alternatives considered
+
+- **LangSmith:** the PRD's choice, but a third party would receive prompts, answers and customer
+  text unless filtered, and filtering has to be proved. Spans we write ourselves can be tested.
+- **Auto-instrumentation:** less code, but it records URLs and SQL (see the privacy rules).
+- **Database gauges from both processes with a `process` label:** dashboards would need to
+  remember to pick one. Serving them from one place makes double counting impossible.
+- **A Prometheus pushgateway for the worker:** an extra service for a process that already can
+  serve its own port.
+- **A separate internal port for the API's `/metrics`:** see decision 6.
+- **The process-global OpenTelemetry provider:** can be set once, so tests could not use their own.
+
+### Limits
+
+- **Metrics reset when a process restarts.** Counters start from zero (Prometheus handles that
+  with `rate()`). Database gauges do not reset.
+- **`support_runs_total` counts when the status is set,** before the transaction commits. A
+  rollback after it would over-count by one. The audit trail remains the record.
+- **Dead jobs are a gauge of rows,** and a dead job stays dead, so alert on its increase.
+- **No sampling.** Every request is traced when tracing is on. That is fine at this scale. A
+  sampler would be a setting, not a redesign.
+- **A multi-process API** (several uvicorn workers) would need Prometheus multiprocess mode,
+  since each process would hold its own counters. We run one.
+- **Span text filtering is shape-based,** like the output guard: a short token that is itself
+  customer text (a one-word complaint) would pass. No code path puts customer text on a span.
+  The allowlist and the tests exist to keep it that way.
+- **Not built:** dashboards, alert rules, Grafana. They are listed above as a spec.
+
+### Consequences
+
+- Three new runtime dependencies (the OpenTelemetry API, SDK and OTLP HTTP exporter) and
+  `prometheus-client`.
+- New settings: `OTEL_EXPORTER`, `OTEL_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `METRICS_TOKEN`,
+  `WORKER_METRICS_PORT`, `WORKER_METRICS_HOST`.
+- Job payloads may now hold a `traceparent` key. Handlers ignore keys they do not read.
+- Any new span attribute must be added to `ALLOWED_ATTRIBUTES`, and any new metric label must be a
+  small fixed set.

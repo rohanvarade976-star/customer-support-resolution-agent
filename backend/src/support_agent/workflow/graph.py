@@ -43,11 +43,13 @@ from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
 from support_agent.core.ids import std_uuid
+from support_agent.core.tracing import span
 from support_agent.domain.enums import ApprovalDecision, ResolutionAction, RunMode, RunStatus
 from support_agent.workflow.deps import WorkflowDeps
 from support_agent.workflow.nodes import (
@@ -98,6 +100,23 @@ _NODE_FOR_ACTION = {
     ResolutionAction.REQUEST_INFO: "request_info",
     ResolutionAction.ESCALATE: "escalate",
 }
+
+
+def traced(name: str, node: NodeFn) -> NodeFn:
+    """Run a node inside a `workflow.node` span: its name and the run id, nothing from the state."""
+
+    async def run_node(state: WorkflowState) -> dict[str, object]:
+        with span(
+            "workflow.node", {"workflow.node": name, "run.id": str(state.get("run_id"))}
+        ) as sp:
+            try:
+                return await node(state)
+            except GraphBubbleUp:  # a pause (interrupt) is normal control flow, not a failure
+                sp.set("workflow.outcome", "paused")
+                sp.expected_exit = True
+                raise
+
+    return run_node
 
 
 def route_after_classify(
@@ -197,21 +216,25 @@ def build_graph(
         return route_after_customer(state, gathering_entry)
 
     graph = StateGraph(WorkflowState)
-    graph.add_node("intake", bind(intake))
-    graph.add_node("classify", classify_node)
-    graph.add_node("needs_clarification", needs_clarification)
-    graph.add_node("ask_for_order", ask_for_order)
-    graph.add_node("gather", bind(gather.gather))
-    graph.add_node("resolve_case", bind(resolve.resolve_case))
-    graph.add_node("propose_refund", bind(finish.propose_refund))
-    graph.add_node("explain", finish.explain)
-    graph.add_node("request_info", finish.request_info)
-    graph.add_node("escalate", finish.escalate)
-    graph.add_node("wait_for_approval", pauses.wait_for_approval)
-    graph.add_node("check_approval", bind(approval.check_approval))
-    graph.add_node("execute_refund", bind(approval.execute_refund))
-    graph.add_node("reopen_ticket", approval.reopen_ticket)
-    graph.add_node("wait_for_customer", pauses.wait_for_customer)
+
+    def add_node(name: str, node: NodeFn) -> None:
+        graph.add_node(name, traced(name, node))
+
+    add_node("intake", bind(intake))
+    add_node("classify", classify_node)
+    add_node("needs_clarification", needs_clarification)
+    add_node("ask_for_order", ask_for_order)
+    add_node("gather", bind(gather.gather))
+    add_node("resolve_case", bind(resolve.resolve_case))
+    add_node("propose_refund", bind(finish.propose_refund))
+    add_node("explain", finish.explain)
+    add_node("request_info", finish.request_info)
+    add_node("escalate", finish.escalate)
+    add_node("wait_for_approval", pauses.wait_for_approval)
+    add_node("check_approval", bind(approval.check_approval))
+    add_node("execute_refund", bind(approval.execute_refund))
+    add_node("reopen_ticket", approval.reopen_ticket)
+    add_node("wait_for_customer", pauses.wait_for_customer)
 
     graph.add_edge(START, "intake")
     graph.add_edge("intake", "classify")
@@ -223,13 +246,13 @@ def build_graph(
     )
 
     if baseline:
-        graph.add_node("baseline_agent", bind(specialists.baseline_agent))
+        add_node("baseline_agent", bind(specialists.baseline_agent))
         graph.add_edge("baseline_agent", "gather")
     else:
-        graph.add_node("supervise", bind(supervise.supervise))
-        graph.add_node("investigate", bind(specialists.investigate))
-        graph.add_node("policy", bind(specialists.policy))
-        graph.add_node("reinvestigate", bind(specialists.reinvestigate))
+        add_node("supervise", bind(supervise.supervise))
+        add_node("investigate", bind(specialists.investigate))
+        add_node("policy", bind(specialists.policy))
+        add_node("reinvestigate", bind(specialists.reinvestigate))
         graph.add_conditional_edges(
             "supervise", route_after_supervise, _targets("investigate", "policy", "escalate")
         )

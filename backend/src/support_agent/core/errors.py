@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from support_agent.core import metrics
+
 log = logging.getLogger(__name__)
 
 
@@ -72,6 +74,9 @@ def error_response(
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
+        if exc.status_code == 429:
+            scope = (exc.details or {}).get("scope", "unknown")
+            metrics.RATE_LIMITED.labels(scope=str(scope)).inc()
         return error_response(
             exc.status_code, exc.error_code, exc.message, exc.headers, exc.details
         )

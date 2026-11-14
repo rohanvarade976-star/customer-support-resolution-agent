@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.agents.classifier import Classification
 from support_agent.agents.resolve import ESCALATION_MESSAGE
+from support_agent.core import metrics
 from support_agent.core.config import Settings
 from support_agent.db.models import Ticket, WorkflowRun
 from support_agent.domain.enums import RunMode, RunStatus, TicketCategory, TicketStatus
@@ -120,6 +121,9 @@ async def _record_injection(
     """One `injection_suspected` event per scanned text that matched. Pattern codes only:
     the text itself is never stored here, and nothing about the run changes (ADR-017)."""
     for signal in written.get("injection_signals") or []:
+        metrics.INJECTION_SUSPECTED.labels(
+            source="complaint" if signal.source == "complaint" else "reply"
+        ).inc()
         await audit.record(
             session,
             run_id=run.id,
@@ -145,6 +149,8 @@ async def guard_reply(
     issues = check_reply(reply, final.get("owned_order_numbers"))
     if not issues:
         return reply
+    for issue in issues:
+        metrics.REPLY_GUARDRAIL_REPLACED.labels(code=issue.value).inc()
     await audit.record(
         session,
         run_id=run.id,

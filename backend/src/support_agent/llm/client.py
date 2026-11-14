@@ -25,6 +25,8 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from support_agent.core import metrics
+from support_agent.core.tracing import SafeSpan, span
 from support_agent.llm import structured
 from support_agent.llm.errors import (
     LLMError,
@@ -179,19 +181,32 @@ class RoutedLLMClient:
         attempt = 1
         while True:
             started = time.perf_counter()
-            try:
-                reply = await provider.generate(request)
-            except Exception as exc:
-                _log_usage(provider.name, model, request.tier, attempt, started, error=exc)
-                if not isinstance(exc, RETRYABLE_ERRORS) or attempt >= self._retry.max_attempts:
-                    raise
+            failure: Exception | None = None
+            reply: ProviderReply | None = None
+            attributes: dict[str, str | int] = {
+                "llm.provider": provider.name,
+                "llm.model": model,
+                "llm.tier": request.tier,
+                "llm.attempt": attempt,
+            }
+            with span("llm.call", attributes) as llm_span:
+                try:
+                    reply = await provider.generate(request)
+                except Exception as exc:
+                    failure = exc
+                _record_attempt(
+                    llm_span, provider.name, model, request.tier, attempt, started, reply, failure
+                )
+            if reply is None:
+                failure = failure or LLMError("the provider returned no reply")
+                if not isinstance(failure, RETRYABLE_ERRORS) or attempt >= self._retry.max_attempts:
+                    raise failure
                 retry_after = (
-                    exc.retry_after_seconds if isinstance(exc, LLMRateLimitError) else None
+                    failure.retry_after_seconds if isinstance(failure, LLMRateLimitError) else None
                 )
                 await self._sleep(backoff_delay(attempt, self._retry, retry_after))
                 attempt += 1
                 continue
-            _log_usage(provider.name, model, request.tier, attempt, started, reply=reply)
             record_usage(reply.usage)
             return LLMResult(
                 content=reply.content,
@@ -202,23 +217,56 @@ class RoutedLLMClient:
             )
 
 
-def _log_usage(
+def _record_attempt(
+    llm_span: SafeSpan,
     provider: str,
     model: str,
     tier: ModelTier,
     attempt: int,
     started: float,
-    *,
-    reply: ProviderReply | None = None,
-    error: Exception | None = None,
+    reply: ProviderReply | None,
+    error: Exception | None,
 ) -> None:
-    """One line per attempt. Only numbers and names: no prompt, response or key."""
+    """One log line, one set of span attributes and the metrics for one attempt.
+
+    Only numbers and names: no prompt, response or key.
+    """
+    elapsed = time.perf_counter() - started
+    outcome = "ok" if reply is not None else "error"
+    llm_span.set("llm.outcome", outcome)
+    llm_span.set("llm.latency_ms", round(elapsed * 1000))
+    metrics.LLM_CALLS.labels(provider=provider, model=model, tier=tier, outcome=outcome).inc()
+    metrics.LLM_LATENCY.labels(provider=provider, model=model, tier=tier).observe(elapsed)
+    if reply is not None:
+        llm_span.set("llm.input_tokens", reply.usage.input_tokens)
+        llm_span.set("llm.output_tokens", reply.usage.output_tokens)
+        llm_span.set("llm.reasoning_tokens", reply.usage.reasoning_tokens)
+        metrics.LLM_TOKENS.labels(provider=provider, model=model, kind="input").inc(
+            reply.usage.input_tokens
+        )
+        metrics.LLM_TOKENS.labels(provider=provider, model=model, kind="output").inc(
+            reply.usage.output_tokens
+        )
+    elif error is not None:
+        llm_span.fail(type(error).__name__)
+    _log_usage(provider, model, tier, attempt, round(elapsed * 1000), reply, error)
+
+
+def _log_usage(
+    provider: str,
+    model: str,
+    tier: ModelTier,
+    attempt: int,
+    latency_ms: int,
+    reply: ProviderReply | None,
+    error: Exception | None,
+) -> None:
     fields: dict[str, object] = {
         "provider": provider,
         "model": model,
         "tier": tier,
         "attempt": attempt,
-        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "latency_ms": latency_ms,
     }
     if reply is not None:
         fields["outcome"] = "ok"

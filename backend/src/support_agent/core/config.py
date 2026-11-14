@@ -15,6 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 MIN_JWT_SECRET_LENGTH = 32  # HS256 needs a 256-bit key to be safe
+MIN_METRICS_TOKEN_LENGTH = 16
 
 
 class Settings(BaseSettings):
@@ -200,6 +201,19 @@ class Settings(BaseSettings):
     rate_limit_run_starts_per_hour: int = Field(default=10, ge=1, le=10000)
     rate_limit_replies_per_hour: int = Field(default=30, ge=1, le=10000)
 
+    # Observability (core/tracing.py, core/metrics.py, ADR-018).
+    # Tracing is off unless asked for: "console" prints spans (development), "otlp" sends
+    # them to a collector such as Jaeger.
+    otel_exporter: Literal["off", "console", "otlp"] = "off"
+    otel_otlp_endpoint: str = "http://localhost:4318/v1/traces"
+    otel_service_name: str = "support-agent"
+    # Bearer token for GET /metrics. Unset: the endpoint answers 404, so it is closed by default.
+    metrics_token: SecretStr | None = None
+    # The worker's own metrics port. Unset: the worker exposes no metrics. It has no token,
+    # so it listens on loopback unless you change the host on purpose.
+    worker_metrics_port: int | None = Field(default=None, ge=1, le=65535)
+    worker_metrics_host: str = "127.0.0.1"
+
     @field_validator("payments_base_url", "shipping_base_url", "ticketing_base_url")
     @classmethod
     def _require_http_url(cls, value: str) -> str:
@@ -208,13 +222,28 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "groq_api_key", "gemini_api_key", "groq_reasoning_effort", "demo_anchor_date", mode="before"
+        "groq_api_key",
+        "gemini_api_key",
+        "groq_reasoning_effort",
+        "demo_anchor_date",
+        "metrics_token",
+        "worker_metrics_port",
+        mode="before",
     )
     @classmethod
     def _blank_means_unset(cls, value: object) -> object:
         # `GEMINI_API_KEY=` (blank, as in .env.example) means "not configured".
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("metrics_token")
+    @classmethod
+    def _metrics_token_not_trivial(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < MIN_METRICS_TOKEN_LENGTH:
+            raise ValueError(
+                f"METRICS_TOKEN must be at least {MIN_METRICS_TOKEN_LENGTH} characters"
+            )
         return value
 
     @model_validator(mode="after")

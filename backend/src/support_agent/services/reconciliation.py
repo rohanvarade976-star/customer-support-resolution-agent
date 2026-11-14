@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.agents.resolve import ESCALATION_MESSAGE
 from support_agent.core.config import Settings
+from support_agent.core.tracing import span
 from support_agent.db.models import ActionProposal, RefundOperation, Ticket, WorkflowRun
 from support_agent.domain.enums import (
     ApprovalDecision,
@@ -98,18 +99,26 @@ async def reconcile_due_refunds(
     (a very short backoff): its checks are meant to be spread out over time.
     """
     checked: set[UUID] = set()
-    while len(checked) < settings.reconcile_batch_size:
-        claim = await refunds.claim_for_reconciliation(
-            session,
-            now=clock(),
-            lease_seconds=settings.reconcile_lease_seconds,
-            skip=checked,
-        )
-        if claim is None:
-            break
-        finding = await check_claim(session, payments, claim, clock())
-        await settle_claim(session, settings, claim, finding, clock())
-        checked.add(claim.id)
+    with span("reconcile.sweep") as sweep_span:
+        while len(checked) < settings.reconcile_batch_size:
+            claim = await refunds.claim_for_reconciliation(
+                session,
+                now=clock(),
+                lease_seconds=settings.reconcile_lease_seconds,
+                skip=checked,
+            )
+            if claim is None:
+                break
+            with span("reconcile.check", {"reconcile.refund_id": str(claim.id)}) as check_span:
+                finding = await check_claim(session, payments, claim, clock())
+                check_span.set(
+                    "reconcile.reported", finding.reported.value if finding.reported else "none"
+                )
+                if finding.error_code is not None:
+                    check_span.set("error.code", finding.error_code)
+            await settle_claim(session, settings, claim, finding, clock())
+            checked.add(claim.id)
+        sweep_span.set("reconcile.checked", len(checked))
     return len(checked)
 
 
