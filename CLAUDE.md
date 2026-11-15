@@ -51,7 +51,7 @@ General rules:
 - LangGraph for orchestration with the Postgres checkpointer.
 - LangChain model layer only (ChatGroq, Gemini, `bind_tools`, `with_structured_output`) behind our own `LLMClient` interface. Tool execution happens in our own loop. No LangChain prebuilt agents, no LangGraph `ToolNode` for customer data or money.
 - Groq free tier (main LLM), Gemini free tier (fallback). fastembed for local embeddings.
-- PyJWT for auth. LangSmith free tier for tracing.
+- PyJWT for auth. OpenTelemetry for traces (optional Jaeger) and `prometheus-client` for metrics. LangSmith is not used: it would send prompts and customer text to a third party (ADR-018 in `docs/decisions.md`, which also lists the privacy rules for spans and metrics).
 - Frontend: React + TypeScript + Vite + Tailwind (built in M10).
 - Tests: pytest, pytest-asyncio. Quality: Ruff, mypy, pre-commit.
 

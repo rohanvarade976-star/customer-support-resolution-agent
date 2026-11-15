@@ -45,6 +45,15 @@ const CASE: EscalationCase = {
   governing_policy: { policy_key: "refund_policy", version: "v2", title: "Refund Policy", refund_window_days: 30 },
 };
 
+// Puts text in a field with one paste, not one keystroke per character. Every keystroke
+// re-renders the whole page in jsdom, so typing a sentence made the first test slow enough to
+// hit the 5 s limit on a busy machine. A timed-out test keeps running against the next test's
+// page, which then failed with "multiple elements" errors.
+async function fill(user: ReturnType<typeof userEvent.setup>, field: HTMLElement, text: string): Promise<void> {
+  await user.click(field);
+  await user.paste(text);
+}
+
 const ROUTES = {
   "GET /reviewer/escalations": () => json({ items: [ITEM] }),
   "GET /runs/run-9/analysis": () => json({ ...ANALYSIS, run_id: "run-9" }),
@@ -91,10 +100,10 @@ describe("Escalations", () => {
 
     // Resolving needs a reply first.
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("Resolve the ticket"), "Called the warehouse");
+    await fill(user, screen.getByLabelText("Resolve the ticket"), "Called the warehouse");
     expect(screen.getByRole("button", { name: "Resolve ticket" })).toBeDisabled();
 
-    await user.type(screen.getByLabelText("Reply to the customer"), "We checked your return with the warehouse.");
+    await fill(user, screen.getByLabelText("Reply to the customer"), "We checked your return with the warehouse.");
     await user.click(screen.getByRole("button", { name: "Send reply" }));
     const dialog = await screen.findByRole("dialog", { name: "Send this reply to the customer?" });
     expect(dialog).toHaveTextContent("We checked your return with the warehouse.");
@@ -141,7 +150,7 @@ describe("Escalations", () => {
     renderApp("/escalations/t-9");
 
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText("Reply to the customer"), "Mail me at a@b.com");
+    await fill(user, await screen.findByLabelText("Reply to the customer"), "Mail me at a@b.com");
     await user.click(screen.getByRole("button", { name: "Send reply" }));
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Send reply" }));
 

@@ -559,7 +559,7 @@ error_details, final_response</code></pre>
       <tr><td>Bounded execution</td><td>Step limits on every agent loop and the supervisor; bounded retries with exponential backoff</td></tr>
       <tr><td>Performance</td><td>Active execution time measured per case, separately from time waiting for reviewers or customers</td></tr>
       <tr><td>Cost</td><td>Runs within free-tier limits; token usage and estimated cost recorded per run</td></tr>
-      <tr><td>Observability</td><td>Trace of every agent step, tool call, token count and latency (LangSmith free tier)</td></tr>
+      <tr><td>Observability</td><td>Trace of every agent step, tool call, token count and latency (OpenTelemetry traces and Prometheus metrics, ADR-018)</td></tr>
       <tr><td>Privacy</td><td>Synthetic data only; audit payloads redacted; memory scoped per customer</td></tr>
       <tr><td>Portability</td><td>LLM provider and models swappable through configuration</td></tr>
       <tr><td>Reproducibility</td><td>Pinned lockfile, migrations, seed scripts, one-command Docker Compose startup</td></tr>
@@ -651,7 +651,7 @@ error_details, final_response</code></pre>
       <tr><td>Embeddings</td><td>fastembed, local</td></tr>
       <tr><td>Auth</td><td>JWT (PyJWT)</td></tr>
       <tr><td>Frontend</td><td>React, TypeScript, Vite, Tailwind, Server-Sent Events</td></tr>
-      <tr><td>Observability</td><td>LangSmith free tier</td></tr>
+      <tr><td>Observability</td><td>OpenTelemetry tracing and Prometheus metrics (ADR-018)</td></tr>
       <tr><td>Testing</td><td>pytest and the eval harness</td></tr>
       <tr><td>Code quality</td><td>Ruff (lint and format), mypy, pre-commit</td></tr>
       <tr><td>Config and logging</td><td>pydantic-settings, structured JSON logs tagged with <code>run_id</code></td></tr>
@@ -753,7 +753,7 @@ error_details, final_response</code></pre>
       <tr><td>Database</td><td>Supabase free</td><td>500 MB, pgvector included, pauses after 7 days of inactivity</td></tr>
       <tr><td>Frontend</td><td>Vercel or Cloudflare Pages</td><td>Static hosting; free for non-commercial portfolio use</td></tr>
       <tr><td>LLM</td><td>Groq free, Gemini fallback</td><td>Daily request caps</td></tr>
-      <tr><td>Tracing</td><td>LangSmith free</td><td>Sufficient for demo traffic</td></tr>
+      <tr><td>Tracing</td><td>OpenTelemetry (optional Jaeger) and Prometheus metrics</td><td>Vendor-neutral, and no customer text leaves our systems (ADR-018)</td></tr>
     </tbody>
   </table></div>
   <h3>Design consequences</h3>

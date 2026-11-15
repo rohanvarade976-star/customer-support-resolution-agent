@@ -5,7 +5,7 @@
 #   docker compose --profile app up -d --build    # everything: migrate, api, worker, mocks
 #   docker compose run --rm seed                  # one-shot: ingest policies + seed demo data
 #
-# See README, "Run everything with Docker".
+# See docs/docker.md (and the README quick start, "Run it locally").
 
 # Shared by every service built from backend/Dockerfile.
 x-app: &app
@@ -173,7 +173,7 @@ services:
 
   # Optional trace viewer. A profile keeps it out of a plain `docker compose up -d`:
   #   docker compose --profile tracing up -d jaeger
-  # Then set OTEL_EXPORTER=otlp and open http://localhost:16686 (README, "Tracing").
+  # Then set OTEL_EXPORTER=otlp and open http://localhost:16686 (docs/observability.md).
   jaeger:
     image: jaegertracing/all-in-one:1.62.0
     profiles: ["tracing"]
