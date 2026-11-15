@@ -1,8 +1,8 @@
 """Login and token checking. The only place that turns credentials or a token into an identity.
 
-Identity rules (CLAUDE.md): it comes only from a verified token, and the user row
-is re-read from the database on every request, so a deleted user or a changed role
-stops working immediately instead of when the token expires.
+Identity rules (engineering rule 2 in docs/engineering-rules.md): it comes only from a verified
+token, and the user row is re-read from the database on every request, so a deleted user or a
+changed role stops working immediately instead of when the token expires.
 """
 
 import asyncio

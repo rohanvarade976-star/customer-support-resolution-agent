@@ -1,4 +1,4 @@
-// Displays an amount the API computed. Integer arithmetic only, no floats (CLAUDE.md rule 6):
+// Displays an amount the API computed. Integer arithmetic only, no floats (engineering rule 6 in docs/engineering-rules.md):
 // this formats a number for people, it never calculates one.
 
 const SYMBOLS: Record<string, string> = { INR: "₹" };

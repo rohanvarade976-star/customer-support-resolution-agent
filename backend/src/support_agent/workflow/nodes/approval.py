@@ -1,4 +1,5 @@
-"""After the reviewer's decision: fixed code only, no model (CLAUDE.md rules 1 and 5).
+"""After the reviewer's decision: fixed code only, no model
+(engineering rules 1 and 5 in docs/engineering-rules.md).
 
     wait_for_approval (pauses.py) -> check_approval -> execute_refund   (approved)
                                                     -> reopen_ticket    (rejected)

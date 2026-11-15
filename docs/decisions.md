@@ -696,7 +696,7 @@ and retention rules, is planned for the UI milestone (M10), where the conversati
   do not control as tightly as a committed row; a stored, locked, hashed approval is the
   only thing allowed to authorise money.
 - Locking the run row for the whole resume: simpler, but it would hold a database lock
-  during LLM and provider calls (CLAUDE.md rule 7).
+  during LLM and provider calls (engineering rule 7 in docs/engineering-rules.md).
 - LangGraph's permissive default serializer: it imports any class named in a checkpoint and
   warns that this will be blocked in a future version.
 
@@ -747,7 +747,7 @@ never create a second proposal, a second refund, or answer a question twice.
    worker is claiming is skipped, not waited for, so two workers never take the same job.
    The claim sets `status = running`, adds one to `attempts`, sets `lease_expires_at`, and
    commits at once, so the row lock lasts milliseconds and is never held during model or
-   provider calls (CLAUDE.md rule 7). While it works, the worker renews the lease with a
+   provider calls (engineering rule 7 in docs/engineering-rules.md). While it works, the worker renews the lease with a
    heartbeat on its own session. `claim` also takes a `running` job whose lease has run out:
    that is how a crashed worker's job comes back.
 3. **The attempt number is a fencing token.** A worker that stalls (a long pause, a lost
@@ -1029,7 +1029,7 @@ FR-19).
 4. **Three short steps, and fencing.** Like the job queue (ADR-012):
    1. *claim*: `SELECT … FOR UPDATE SKIP LOCKED`, add one to `reconcile_checks`, move
       `next_reconcile_at` to the end of a lease (`RECONCILE_LEASE_SECONDS`), commit;
-   2. *ask the provider* with no transaction open (CLAUDE.md rule 7);
+   2. *ask the provider* with no transaction open (engineering rule 7 in docs/engineering-rules.md);
    3. *settle*: lock the row **only if `reconcile_checks` and the status are unchanged since
       the claim**, record everything, commit.
 
@@ -1473,7 +1473,7 @@ The golden expected answers are not changed by this ADR.
 - **Block or escalate a run when injection is suspected:** a pattern list has false positives,
   and an attacker could force every victim's case to a human.
 - **An LLM-based injection classifier:** it is itself injectable, costs a model call on every
-  message, and cannot be tested without a real model (CLAUDE.md: no real calls in tests).
+  message, and cannot be tested without a real model (project testing rule: no real LLM calls in tests).
 - **Rate limits in process memory or Redis:** memory does not hold across processes, and Redis
   is a new dependency. Postgres is already there.
 - **A sliding window or token bucket:** more accurate at the window edge, but needs a read,
@@ -1545,7 +1545,7 @@ The golden expected answers are not changed by this ADR.
 Until now the only view into a running system was the JSON log and the audit trail. Neither
 answers "where did the time go in this run?" or "is the queue backing up?". The PRD asks for a
 trace of every agent step, tool call, token count and latency. It also forbids customer text
-outside the places built to hold it (CLAUDE.md rule 9, PRD "Privacy"), and a trace is exactly the
+outside the places built to hold it (engineering rule 9 in docs/engineering-rules.md; PRD "Privacy"), and a trace is exactly the
 kind of data that gets copied to a third-party service.
 
 ### Decision
@@ -1719,7 +1719,7 @@ a browser keeps the token, and how a live stream is authenticated.
    - **Polling, not LISTEN/NOTIFY.** The stream sends the snapshot, then checks the database every
      `SSE_POLL_INTERVAL_SECONDS` (1 s) and sends only what changed, with a comment line every
      `SSE_HEARTBEAT_SECONDS` so proxies keep the connection open. Each poll opens and closes its own
-     session (no transaction or connection is held while waiting, CLAUDE.md rule 7) and re-checks
+     session (no transaction or connection is held while waiting, engineering rule 7 in docs/engineering-rules.md) and re-checks
      ownership. The authentication session is function-scoped (`ShortSessionDep`), so it is closed
      before the first byte is streamed. LISTEN/NOTIFY would be faster, but needs one dedicated
      connection per listener and does not work through Supabase's transaction pooler.
@@ -1904,7 +1904,7 @@ work was in the audit trail, but nobody could see it. We want reviewers to see w
 and customers to see that an assistant checked their records, without weakening the rules that make
 the system safe:
 
-- the LLM proposes, code decides, a person approves money (CLAUDE.md rule 1);
+- the LLM proposes, code decides, a person approves money (engineering rule 1 in docs/engineering-rules.md);
 - customer-facing messages state only verified outcomes (rule 8);
 - the reviewer's case view rests on verified records, not model text (ADR-019 decision 5).
 
@@ -2031,7 +2031,7 @@ although most cases pass every check. Escalated cases had no place a person coul
 ticket said "a person will follow up", and nothing in the product let a person do so. The aim:
 
 - a normal case is decided in seconds; attention goes only where code found a problem;
-- escalations get a working inbox, without weakening the money rules (CLAUDE.md rules 1, 5, 8).
+- escalations get a working inbox, without weakening the money rules (engineering rules 1, 5, 8 in docs/engineering-rules.md).
 
 ### Decision
 
@@ -2171,7 +2171,7 @@ showed six entries all "2 minutes ago", with "Your ticket has been updated" afte
 nothing moved while the AI worked; the three stat cards looked identical; and escalations left
 behind by the eval harness appeared in the demo. The rules did not change: the UI only displays
 what the API returns (ADR-019), the strict CSP stays (ADR-020), customer messages state only
-verified outcomes (CLAUDE.md rule 8), and no money rule is touched.
+verified outcomes (engineering rule 8 in docs/engineering-rules.md), and no money rule is touched.
 
 ### Decision
 
