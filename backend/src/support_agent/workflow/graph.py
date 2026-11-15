@@ -51,6 +51,7 @@ from langgraph.types import Command
 from support_agent.core.ids import std_uuid
 from support_agent.core.tracing import span
 from support_agent.domain.enums import ApprovalDecision, ResolutionAction, RunMode, RunStatus
+from support_agent.llm.usage import timed
 from support_agent.workflow.deps import WorkflowDeps
 from support_agent.workflow.nodes import (
     approval,
@@ -103,12 +104,15 @@ _NODE_FOR_ACTION = {
 
 
 def traced(name: str, node: NodeFn) -> NodeFn:
-    """Run a node inside a `workflow.node` span: its name and the run id, nothing from the state."""
+    """Run a node inside a `workflow.node` span: its name and the run id, nothing from the state.
+
+    The node's time is also added to the segment's meter (llm/usage.py), so the audit trail
+    can say how long each agent took (ADR-021).
+    """
 
     async def run_node(state: WorkflowState) -> dict[str, object]:
-        with span(
-            "workflow.node", {"workflow.node": name, "run.id": str(state.get("run_id"))}
-        ) as sp:
+        attributes = {"workflow.node": name, "run.id": str(state.get("run_id"))}
+        with timed(name), span("workflow.node", attributes) as sp:
             try:
                 return await node(state)
             except GraphBubbleUp:  # a pause (interrupt) is normal control flow, not a failure
@@ -364,6 +368,41 @@ async def latest_checkpoint_id(checkpointer: Checkpointer, thread_id: str) -> st
         return None
     checkpoint_id: str = saved.config["configurable"]["checkpoint_id"]
     return checkpoint_id
+
+
+async def cited_policy_keys(checkpointer: Checkpointer, thread_id: str) -> list[str]:
+    """The policy citations (chunk keys) the run's latest checkpoint holds, for the reviewer.
+
+    From the policy agent's grounded rules and the accepted resolution draft. These are
+    model-chosen strings: the caller must keep only keys that exist in `policy_chunks`
+    (services/approvals.py does) and show our own policy text, never the model's wording.
+    A run with no checkpoint (a manual M3 run) has none.
+    """
+    saved = await checkpointer.aget_tuple(thread_config(thread_id))
+    if saved is None:
+        return []
+    values = saved.checkpoint.get("channel_values", {})
+    keys: list[str] = []
+    findings = getattr(values.get("policy"), "findings", None)
+    keys.extend(rule.citation for rule in getattr(findings, "rules", []))
+    draft = getattr(values.get("outcome"), "draft", None)
+    keys.extend(getattr(draft, "policy_citations", []))
+    return list(dict.fromkeys(key for key in keys if isinstance(key, str)))  # unique, in order
+
+
+async def accepted_rationale(checkpointer: Checkpointer, thread_id: str) -> str | None:
+    """The accepted resolution draft's rationale, from the run's latest checkpoint (ADR-021).
+
+    Model-written and unverified: reviewers only, shown as plain text and labelled as AI
+    output. None when no draft was accepted (it was rejected and replaced by an escalation),
+    when the resolution never ran, or for a run with no checkpoint.
+    """
+    saved = await checkpointer.aget_tuple(thread_config(thread_id))
+    if saved is None:
+        return None
+    draft = getattr(saved.checkpoint.get("channel_values", {}).get("outcome"), "draft", None)
+    rationale = getattr(draft, "rationale", None)
+    return rationale if isinstance(rationale, str) and rationale.strip() else None
 
 
 async def advance_workflow(

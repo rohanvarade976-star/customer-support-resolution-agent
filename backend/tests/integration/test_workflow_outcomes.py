@@ -140,6 +140,17 @@ def payloads(rows: list[AuditEvent], event_type: str) -> list[dict[str, Any]]:
     return [row.redacted_payload for row in rows if row.event_type == event_type]
 
 
+TIMING_KEYS = ("duration_ms", "critic_ms", "active_ms")  # measured, so never exact (ADR-021)
+
+
+def without_timing(payload: dict[str, Any]) -> dict[str, Any]:
+    """The payload minus its measured times, after checking each is a whole number of ms."""
+    for key in TIMING_KEYS:
+        if key in payload:
+            assert isinstance(payload[key], int) and payload[key] >= 0
+    return {key: value for key, value in payload.items() if key not in TIMING_KEYS}
+
+
 async def count(session: AsyncSession, model: Any, *where: Any) -> int:
     stmt = select(func.count()).select_from(model).where(*where)
     return int(await session.scalar(stmt) or 0)
@@ -247,7 +258,7 @@ async def test_the_audit_trail_has_every_step_and_no_content(
         "ticket.updated",
         "run.usage",
     }
-    assert payloads(rows, "supervisor.decided") == [
+    assert [without_timing(p) for p in payloads(rows, "supervisor.decided")] == [
         {
             "run_investigator": True,
             "run_policy": True,
@@ -286,13 +297,16 @@ async def test_the_run_records_its_llm_calls_and_tokens(
     assert run.llm_calls == len(fake.requests) > 0
     assert run.input_tokens > 0 and run.output_tokens > 0
     rows = await audit_rows(session, run_id)
-    assert payloads(rows, "run.usage") == [
+    assert [without_timing(p) for p in payloads(rows, "run.usage")] == [
         {
             "llm_calls": run.llm_calls,
             "input_tokens": run.input_tokens,
             "output_tokens": run.output_tokens,
+            "fallback_calls": 0,
         }
     ]
+    (usage,) = payloads(rows, "run.usage")
+    assert "active_ms" in usage  # the segment's time, for the reviewer's cost view
 
 
 async def test_a_refund_for_an_order_that_is_not_eligible_creates_no_proposal(

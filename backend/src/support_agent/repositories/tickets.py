@@ -11,7 +11,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.db.models import Customer, Order, Ticket
-from support_agent.domain.enums import TicketCategory, TicketStatus
+from support_agent.domain.enums import ReplyAuthor, TicketCategory, TicketStatus
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,34 @@ async def set_status(session: AsyncSession, ticket: Ticket, status: TicketStatus
     await session.flush()
 
 
-async def set_reply(session: AsyncSession, ticket: Ticket, reply: str) -> None:
+async def set_reply(
+    session: AsyncSession,
+    ticket: Ticket,
+    reply: str,
+    author: ReplyAuthor = ReplyAuthor.ASSISTANT,
+) -> None:
+    """Every reply a run writes is the assistant's; only a reviewer's reply is a specialist's."""
     ticket.customer_reply = reply
+    ticket.reply_author = author
     await session.flush()
+
+
+# The escalations inbox is a working list, not an archive: this caps one response.
+MAX_ESCALATIONS = 200
+
+
+async def list_escalated(session: AsyncSession) -> list[TicketRecord]:
+    """Tickets that are escalated and not resolved. The service orders them by escalation time."""
+    stmt = _newest_first(_select_records().where(Ticket.status == TicketStatus.ESCALATED))
+    return await _fetch(session, stmt.limit(MAX_ESCALATIONS))
+
+
+async def lock(session: AsyncSession, ticket_id: UUID) -> Ticket | None:
+    """The ticket row, locked until the transaction ends, re-read so its values are current."""
+    stmt = (
+        select(Ticket)
+        .where(Ticket.id == ticket_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return await session.scalar(stmt)

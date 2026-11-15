@@ -48,6 +48,7 @@ from support_agent.api.deps import (
     get_llm_client,
     get_payment_client,
     get_session,
+    get_session_factory,
     get_shipping_client,
 )
 from support_agent.core.config import Settings, get_settings
@@ -262,6 +263,8 @@ def app(
     application.dependency_overrides[get_shipping_client] = test_shipping_client
     application.dependency_overrides[get_embedder] = lambda: FakeEmbedder()
     application.dependency_overrides[get_branch_sessions] = lambda: branch_sessions
+    # A live stream's polls (ADR-019) also see the rolled-back test session.
+    application.dependency_overrides[get_session_factory] = lambda: branch_sessions
     application.dependency_overrides[get_checkpointer] = lambda: checkpointer
     return application
 
@@ -351,6 +354,32 @@ def auth_headers(
         return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
     return headers_for
+
+
+@pytest.fixture
+def proposer_email() -> str:
+    """The reviewer who proposes a refund by hand (ADR-022: may not decide their own proposal)."""
+    return "anita@example.com"
+
+
+@pytest.fixture
+def decider_email() -> str:
+    """A different seeded reviewer: the one who approves or rejects a manual proposal."""
+    return "karan@example.com"
+
+
+@pytest.fixture
+async def proposer_headers(
+    auth_headers: Callable[[str], Awaitable[dict[str, str]]], proposer_email: str
+) -> dict[str, str]:
+    return await auth_headers(proposer_email)
+
+
+@pytest.fixture
+async def decider_headers(
+    auth_headers: Callable[[str], Awaitable[dict[str, str]]], decider_email: str
+) -> dict[str, str]:
+    return await auth_headers(decider_email)
 
 
 # ---------------------------------------------------------------- the worker, in tests

@@ -161,7 +161,8 @@ class Chaos:
     drain: Drain
     use_agents: UseAgents
     customer: dict[str, str]  # Priya's Authorization header (logging in is slow on purpose)
-    reviewer: dict[str, str]  # Anita's
+    proposer: dict[str, str]  # the reviewer who proposes refunds by hand
+    reviewer: dict[str, str]  # a different reviewer, who decides every approval
     citation: str
     log: list[str] = field(default_factory=list)
 
@@ -257,7 +258,7 @@ async def open_manual_case(chaos: Chaos) -> None:
         "/tickets", json={"message": "Refund please", "order_number": order}, headers=chaos.customer
     )
     proposed = await chaos.client.post(
-        f"/tickets/{ticket.json()['id']}/refund-proposals", headers=chaos.reviewer
+        f"/tickets/{ticket.json()['id']}/refund-proposals", headers=chaos.proposer
     )
     chaos.log.append(f"    manual {order}: {proposed.status_code}")
 
@@ -411,6 +412,8 @@ async def test_money_chaos(
     settings: Settings,
     drain_jobs: Drain,
     auth_headers: HeadersFor,
+    proposer_email: str,
+    decider_email: str,
     use_agents: UseAgents,
     demo_password_hash: str,
     ingested_policies: None,
@@ -431,7 +434,8 @@ async def test_money_chaos(
         drain=drain_jobs,
         use_agents=use_agents,
         customer=await auth_headers("priya@example.com"),
-        reviewer=await auth_headers("anita@example.com"),
+        proposer=await auth_headers(proposer_email),
+        reviewer=await auth_headers(decider_email),
         citation=citation,
         log=log,
     )

@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from evals.cases import EVAL_SEED_FILE
 from mock_providers.payments.storage import SCHEMA as PAYMENTS_SCHEMA
 from mock_providers.payments.storage import metadata as payments_metadata
 from mock_providers.ticketing.storage import SCHEMA as TICKETING_SCHEMA
@@ -23,6 +24,7 @@ from support_agent.db.models import (
     Approval,
     AuditEvent,
     Customer,
+    Job,
     Order,
     RefundOperation,
     Return,
@@ -34,6 +36,8 @@ from support_agent.domain.enums import (
     ActionType,
     ApprovalDecision,
     InspectionStatus,
+    JobStatus,
+    JobType,
     ProposalStatus,
     RefundOperationStatus,
     ReturnStatus,
@@ -236,3 +240,41 @@ async def test_reset_demo_refuses_to_run_in_production(
 
     assert await count(session, WorkflowRun) == 2  # the demo run and Kavya's history
     assert await count(session, AuditEvent) == 2
+
+
+async def test_reset_removes_eval_only_data_so_no_eval_escalation_shows_in_the_demo(
+    session: AsyncSession, data: SeedData
+) -> None:
+    eval_data = load_scenarios(EVAL_SEED_FILE)
+    await seed(session, data, NOW, PASSWORD_HASH)
+    await seed(session, eval_data, NOW, PASSWORD_HASH)  # what the eval harness leaves behind
+    eval_email = eval_data.customers[0].email
+    eval_order_number = eval_data.customers[0].orders[0].order_number
+    eval_order = await order_by_number(session, eval_order_number)
+    await add_demo_run(session, eval_order)
+    escalated = await session.scalar(select(Ticket).where(Ticket.order_id == eval_order.id))
+    assert escalated is not None
+    escalated.status = TicketStatus.ESCALATED
+    run = await session.scalar(select(WorkflowRun).where(WorkflowRun.ticket_id == escalated.id))
+    assert run is not None
+    run.status = RunStatus.ESCALATED
+    session.add(Job(job_type=JobType.START_RUN, run_id=run.id, status=JobStatus.QUEUED))
+    await session.flush()
+
+    await reset_demo(session, data, NOW, PASSWORD_HASH, leftovers=[eval_data])
+
+    # Database state: nothing of the eval's is left, and the demo's own data is.
+    eval_emails = [customer.email for customer in eval_data.customers]
+    assert await session.scalar(select(func.count()).where(Customer.email.in_(eval_emails))) == 0
+    eval_orders = [o.order_number for c in eval_data.customers for o in c.orders]
+    assert (
+        await session.scalar(select(func.count()).where(Order.order_number.in_(eval_orders))) == 0
+    )
+    assert (
+        await session.scalar(select(func.count()).where(Ticket.status == TicketStatus.ESCALATED))
+        == 0
+    )
+    assert await count(session, Job) == 0
+    assert await session.scalar(select(Customer.id).where(Customer.email == eval_email)) is None
+    assert await count(session, Customer) == len(data.customers)
+    assert await order_by_number(session, "ORD-1001") is not None

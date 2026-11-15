@@ -20,6 +20,7 @@ htmlcov/
 # --- Node / frontend ---
 node_modules/
 frontend/dist/
+frontend/screenshots/
 npm-debug.log*
 yarn-error.log*
 pnpm-debug.log*

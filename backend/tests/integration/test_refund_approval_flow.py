@@ -48,7 +48,6 @@ from support_agent.services.refund_execution import execute_approved_refund
 Headers = dict[str, str]
 AuthHeaders = Callable[[str], Awaitable[Headers]]
 
-REVIEWER = "anita@example.com"
 PRIYA_AMOUNT = 249900  # ORD-1001, paise
 
 
@@ -174,9 +173,12 @@ async def decide(
     return await client.post(f"/approvals/{approval_id}/decision", json=body, headers=headers)
 
 
-async def priya_proposal(client: httpx.AsyncClient, auth_headers: AuthHeaders) -> dict[str, Any]:
+async def priya_proposal(
+    client: httpx.AsyncClient, auth_headers: AuthHeaders, proposer: Headers
+) -> dict[str, Any]:
+    """A reviewer (the proposer) proposes Priya's refund; a different reviewer must decide it."""
     ticket_id = await open_ticket(client, auth_headers, "priya@example.com", "ORD-1001")
-    response = await propose(client, await auth_headers(REVIEWER), ticket_id)
+    response = await propose(client, proposer, ticket_id)
     assert response.status_code == 201
     body: dict[str, Any] = response.json()
     return body
@@ -213,10 +215,16 @@ def assert_error(response: httpx.Response, status: int, code: str) -> dict[str, 
 
 
 async def test_priya_refund_flows_end_to_end(
-    client: httpx.AsyncClient, session: AsyncSession, payments: Payments, auth_headers: AuthHeaders
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    payments: Payments,
+    auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
+    decider_email: str,
 ) -> None:
-    reviewer = await auth_headers(REVIEWER)
-    proposal = await priya_proposal(client, auth_headers)
+    reviewer = decider_headers
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
     assert proposal["amount_minor"] == PRIYA_AMOUNT
     assert proposal["status"] == "pending_approval"
 
@@ -242,11 +250,11 @@ async def test_priya_refund_flows_end_to_end(
     assert rows[0].provider_reference is not None
     assert await payments.refund_count() == 1
 
-    # Who decided comes from the token.
-    anita_id = await session.scalar(select(StaffUser.id).where(StaffUser.email == REVIEWER))
+    # Who decided comes from the token: the second reviewer, not the proposer.
+    decider_id = await session.scalar(select(StaffUser.id).where(StaffUser.email == decider_email))
     approval = await reload(session, Approval, proposal["approval_id"])
     assert approval.decision == ApprovalDecision.APPROVED
-    assert approval.reviewer_id == str(anita_id)
+    assert approval.reviewer_id == str(decider_id)
     assert approval.decided_at is not None
 
     assert (await reload(session, ActionProposal, proposal["proposal_id"])).status == (
@@ -275,13 +283,13 @@ async def test_priya_refund_flows_end_to_end(
 
 
 async def test_amount_in_the_request_is_ignored(
-    client: httpx.AsyncClient, auth_headers: AuthHeaders
+    client: httpx.AsyncClient, auth_headers: AuthHeaders, proposer_headers: Headers
 ) -> None:
     ticket_id = await open_ticket(client, auth_headers, "priya@example.com", "ORD-1001")
     response = await client.post(
         f"/tickets/{ticket_id}/refund-proposals",
         json={"amount_minor": 1},
-        headers=await auth_headers(REVIEWER),
+        headers=proposer_headers,
     )
     assert response.status_code == 201
     assert response.json()["amount_minor"] == PRIYA_AMOUNT
@@ -305,10 +313,11 @@ async def test_ineligible_orders_get_no_proposal(
     email: str,
     order_number: str,
     reasons: list[str],
+    proposer_headers: Headers,
 ) -> None:
     ticket_id = await open_ticket(client, auth_headers, email, order_number)
 
-    response = await propose(client, await auth_headers(REVIEWER), ticket_id)
+    response = await propose(client, proposer_headers, ticket_id)
 
     body = assert_error(response, 409, "NOT_ELIGIBLE")
     assert body["details"]["reasons"] == reasons
@@ -323,7 +332,10 @@ async def test_ineligible_orders_get_no_proposal(
 
 
 async def test_order_without_an_applicable_policy_gets_no_proposal(
-    client: httpx.AsyncClient, session: AsyncSession, auth_headers: AuthHeaders
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    auth_headers: AuthHeaders,
+    proposer_headers: Headers,
 ) -> None:
     # Priya's ORD-1001 is eligible today. Move its placed_at before refund policy v1
     # (2025-01-01): no refund policy governs it, so no proposal and no refund may exist.
@@ -336,7 +348,7 @@ async def test_order_without_an_applicable_policy_gets_no_proposal(
     proposals_before = len((await session.scalars(select(ActionProposal.id))).all())
     refunds_before = await all_refunds(session)
 
-    response = await propose(client, await auth_headers(REVIEWER), ticket_id)
+    response = await propose(client, proposer_headers, ticket_id)
 
     body = assert_error(response, 409, "NOT_ELIGIBLE")
     assert body["details"]["reasons"] == ["NO_APPLICABLE_POLICY"]
@@ -349,25 +361,28 @@ async def test_order_without_an_applicable_policy_gets_no_proposal(
 
 
 async def test_ticket_without_an_order_cannot_be_proposed(
-    client: httpx.AsyncClient, auth_headers: AuthHeaders
+    client: httpx.AsyncClient, auth_headers: AuthHeaders, proposer_headers: Headers
 ) -> None:
     ticket_id = await open_ticket(client, auth_headers, "priya@example.com", None)
-    response = await propose(client, await auth_headers(REVIEWER), ticket_id)
+    response = await propose(client, proposer_headers, ticket_id)
     assert_error(response, 409, "TICKET_HAS_NO_ORDER")
 
 
 async def test_second_proposal_while_one_is_pending_is_refused(
-    client: httpx.AsyncClient, auth_headers: AuthHeaders
+    client: httpx.AsyncClient, auth_headers: AuthHeaders, proposer_headers: Headers
 ) -> None:
-    proposal = await priya_proposal(client, auth_headers)
-    response = await propose(client, await auth_headers(REVIEWER), proposal["ticket_id"])
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
+    response = await propose(client, proposer_headers, proposal["ticket_id"])
     assert_error(response, 409, "PROPOSAL_ALREADY_PENDING")
 
 
 async def test_customers_cannot_propose_list_or_decide(
-    client: httpx.AsyncClient, session: AsyncSession, auth_headers: AuthHeaders
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    auth_headers: AuthHeaders,
+    proposer_headers: Headers,
 ) -> None:
-    proposal = await priya_proposal(client, auth_headers)
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
     priya = await auth_headers("priya@example.com")
 
     assert_error(await propose(client, priya, proposal["ticket_id"]), 403, "FORBIDDEN")
@@ -386,9 +401,11 @@ async def test_expired_approval_cannot_be_approved(
     payments: Payments,
     clock: MutableClock,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
 ) -> None:
-    reviewer = await auth_headers(REVIEWER)
-    proposal = await priya_proposal(client, auth_headers)
+    reviewer = decider_headers
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
     clock.now += timedelta(minutes=get_settings().approval_ttl_minutes, seconds=1)
 
     response = await decide(client, reviewer, proposal["approval_id"], "approve")
@@ -401,13 +418,18 @@ async def test_expired_approval_cannot_be_approved(
     assert (await reload(session, Ticket, proposal["ticket_id"])).status == TicketStatus.OPEN
     assert "approval.expired" in await event_types(session, proposal["run_id"])
     # A fresh proposal is allowed now.
-    assert (await propose(client, reviewer, proposal["ticket_id"])).status_code == 201
+    assert (await propose(client, proposer_headers, proposal["ticket_id"])).status_code == 201
 
 
 async def test_tampered_proposal_is_refused(
-    client: httpx.AsyncClient, session: AsyncSession, payments: Payments, auth_headers: AuthHeaders
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    payments: Payments,
+    auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
 ) -> None:
-    proposal = await priya_proposal(client, auth_headers)
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
     # Someone edits the stored payload behind the API's back.
     await session.execute(
         text(
@@ -417,9 +439,7 @@ async def test_tampered_proposal_is_refused(
         {"id": proposal["proposal_id"]},
     )
 
-    response = await decide(
-        client, await auth_headers(REVIEWER), proposal["approval_id"], "approve"
-    )
+    response = await decide(client, decider_headers, proposal["approval_id"], "approve")
 
     assert_error(response, 409, "PROPOSAL_CHANGED")
     assert await refunds_for(session, proposal["proposal_id"]) == []
@@ -438,9 +458,11 @@ async def test_approving_twice_still_yields_one_refund(
     payments: Payments,
     clock: MutableClock,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
 ) -> None:
-    reviewer = await auth_headers(REVIEWER)
-    proposal = await priya_proposal(client, auth_headers)
+    reviewer = decider_headers
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
     assert (await decide(client, reviewer, proposal["approval_id"], "approve")).status_code == 200
 
     second = await decide(client, reviewer, proposal["approval_id"], "approve")
@@ -461,12 +483,17 @@ async def test_approving_twice_still_yields_one_refund(
 
 
 async def test_rejecting_moves_no_money_and_reopens_the_ticket(
-    client: httpx.AsyncClient, session: AsyncSession, payments: Payments, auth_headers: AuthHeaders
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    payments: Payments,
+    auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
 ) -> None:
-    proposal = await priya_proposal(client, auth_headers)
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
 
     response = await decide(
-        client, await auth_headers(REVIEWER), proposal["approval_id"], "reject", "Check photos"
+        client, decider_headers, proposal["approval_id"], "reject", "Check photos"
     )
 
     assert response.status_code == 200
@@ -492,14 +519,17 @@ async def test_rejecting_moves_no_money_and_reopens_the_ticket(
 
 
 async def test_dropped_response_marks_refund_for_reconciliation(
-    client: httpx.AsyncClient, session: AsyncSession, payments: Payments, auth_headers: AuthHeaders
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    payments: Payments,
+    auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
 ) -> None:
-    proposal = await priya_proposal(client, auth_headers)
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
     await payments.set_fault(mode="drop_response", count=1)
 
-    response = await decide(
-        client, await auth_headers(REVIEWER), proposal["approval_id"], "approve"
-    )
+    response = await decide(client, decider_headers, proposal["approval_id"], "approve")
 
     assert response.status_code == 200
     assert response.json()["refund"]["status"] == "pending_reconciliation"
@@ -525,13 +555,13 @@ async def test_unreachable_provider_fails_the_refund_without_sending(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
 ) -> None:
-    proposal = await priya_proposal(client, auth_headers)
+    proposal = await priya_proposal(client, auth_headers, proposer_headers)
     use_payment_transport(app, payments, RefusingTransport())
 
-    response = await decide(
-        client, await auth_headers(REVIEWER), proposal["approval_id"], "approve"
-    )
+    response = await decide(client, decider_headers, proposal["approval_id"], "approve")
 
     assert response.status_code == 200
     [row] = await refunds_for(session, proposal["proposal_id"])

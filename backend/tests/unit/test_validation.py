@@ -67,6 +67,39 @@ def test_an_eligible_refund_for_the_exact_amount_passes() -> None:
     assert validate_resolution(claim(), context()) == []
 
 
+# ---------------------------------------------------------------- warm, complete replies (ADR-023)
+
+# The reply shapes the resolution prompt asks for: acknowledge, state the verified outcome, say
+# what happens next. They must still pass every rule, so a warmer prompt never loosens them.
+WARM_REFUND = (
+    "Thanks for getting in touch about your returned headphones. Your order was delivered, and "
+    "we've confirmed that the return arrived and passed inspection, which falls within our "
+    "refund window. That means a refund has been proposed, and it now needs approval from our "
+    "team before it can go ahead. You'll see the outcome on this page."
+)
+WARM_STATUS = (
+    "Thanks for checking on your order. It's still on its way with the carrier, and the "
+    "expected delivery date hasn't passed yet, so there's nothing for you to do right now. If "
+    "it hasn't arrived by that date, write back here and we'll take another look."
+)
+
+
+def test_a_warm_complete_refund_reply_passes_the_validator() -> None:
+    assert validate_resolution(claim(message=WARM_REFUND), context()) == []
+
+
+def test_a_warm_complete_status_reply_passes_the_validator() -> None:
+    explain = claim(action=ResolutionAction.EXPLAIN_STATUS, amount_minor=None, message=WARM_STATUS)
+    assert validate_resolution(explain, context()) == []
+
+
+def test_warmth_does_not_buy_an_unverified_outcome() -> None:
+    warm_but_false = WARM_REFUND + " Your refund has been processed."
+    assert ValidationCode.UNVERIFIED_CLAIM in validate_resolution(
+        claim(message=warm_but_false), context()
+    )
+
+
 # ---------------------------------------------------------------- amount and eligibility
 
 

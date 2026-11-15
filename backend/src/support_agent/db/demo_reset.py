@@ -6,7 +6,9 @@ refund that already went through also lowers an order's refundable balance, so a
 can no longer be repeated. This module:
 
 1. deletes everything the seeded customers own (runs and refunds included), through
-   `seed.reset`, children before parents, with no cascade deletes;
+   `seed.reset`, children before parents, with no cascade deletes. The same is done for any
+   `leftovers` data sets: the eval harness's own customers, whose escalations and approvals
+   must never show up in a demo (ADR-023);
 2. deletes audit events that belong to no run;
 3. empties the mock providers' tables (their own Postgres schemas);
 4. seeds the scenarios again from the anchor date, so every order, return and refund
@@ -16,6 +18,7 @@ Like `seed()`, it only flushes: the caller owns the transaction. It refuses to r
 APP_ENV is "production" (`seed.reset` checks too, before anything is deleted).
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -50,12 +53,20 @@ async def _empty_mock_table(session: AsyncSession, table: str) -> int:
 
 
 async def reset_demo(
-    session: AsyncSession, data: SeedData, now: datetime, password_hash: str
+    session: AsyncSession,
+    data: SeedData,
+    now: datetime,
+    password_hash: str,
+    leftovers: Sequence[SeedData] = (),
 ) -> DemoResetReport:
+    """Reset the demo data. `leftovers` are other seed sets to delete and NOT seed again."""
     if get_settings().app_env == "production":
         raise ResetRefusedError("Refusing to reset demo data: APP_ENV is 'production'.")
 
     deleted = await reset(session, data)
+    for other in leftovers:
+        for table, count in (await reset(session, other)).items():
+            deleted[table] += count
     orphans = await session.execute(delete(AuditEvent).where(AuditEvent.run_id.is_(None)))
     deleted[AuditEvent.__tablename__] += int(orphans.rowcount)  # type: ignore[attr-defined]
     for table in MOCK_TABLES:

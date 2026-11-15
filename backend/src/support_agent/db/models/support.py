@@ -21,6 +21,7 @@ from support_agent.db.models._columns import CreatedAt, UpdatedAt, UUIDPrimaryKe
 from support_agent.domain.enums import (
     MemoryKind,
     MemoryOutcome,
+    ReplyAuthor,
     RunMode,
     RunStatus,
     TicketCategory,
@@ -55,6 +56,12 @@ class Ticket(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
     # The latest message shown to the customer by a run (an explanation, a question, or a
     # fixed "awaiting approval" / "passed to our team" line). NULL until a run sets one.
     customer_reply: Mapped[str | None] = mapped_column(Text)
+    # Who wrote customer_reply: a run ("assistant") or a reviewer ("specialist", ADR-022).
+    reply_author: Mapped[ReplyAuthor] = mapped_column(
+        str_enum(ReplyAuthor, "reply_author"),
+        default=ReplyAuthor.ASSISTANT,
+        server_default=ReplyAuthor.ASSISTANT.value,
+    )
 
 
 class WorkflowRun(UUIDPrimaryKey, UpdatedAt, Base):

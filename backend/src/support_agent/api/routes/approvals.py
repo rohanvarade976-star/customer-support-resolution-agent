@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Response
 
 from support_agent.api.deps import (
+    CheckpointerDep,
     ClockDep,
     EnqueueEnvDep,
     PaymentClientDep,
@@ -17,11 +18,13 @@ from support_agent.api.deps import (
     SettingsDep,
 )
 from support_agent.schemas.approvals import (
+    ApprovalCaseResponse,
     ApprovalListResponse,
     DecisionRequest,
     DecisionResponse,
     ProposalResponse,
 )
+from support_agent.services import approval_cases
 from support_agent.services import approvals as approvals_service
 from support_agent.services import proposals as proposals_service
 
@@ -44,13 +47,29 @@ async def create_refund_proposal(
 
 @router.get("/approvals")
 async def list_approvals(
-    _reviewer: ReviewerDep, session: SessionDep, clock: ClockDep
+    reviewer: ReviewerDep, session: SessionDep, settings: SettingsDep, clock: ClockDep
 ) -> ApprovalListResponse:
-    return await approvals_service.list_pending(session, clock())
+    return await approvals_service.list_pending(session, settings, reviewer, clock())
+
+
+# One approval's case: evidence, citations, the stored amount and, later, the refund's status.
+@router.get("/approvals/{approval_id}")
+async def get_approval_case(
+    approval_id: UUID,
+    reviewer: ReviewerDep,
+    session: SessionDep,
+    checkpointer: CheckpointerDep,
+    settings: SettingsDep,
+    clock: ClockDep,
+) -> ApprovalCaseResponse:
+    return await approval_cases.get_case(
+        session, checkpointer, settings, reviewer, approval_id, clock()
+    )
 
 
 # Manual (M3) runs: decided and executed here, 200. Workflow runs: the decision is stored and
-# the worker resumes the run (fixed code only, no model), so the answer is 202.
+# the worker resumes the run (fixed code only, no model), so the answer is 202. The reviewer
+# who proposed a refund by hand may not decide it: 409 SELF_DECISION_FORBIDDEN (ADR-022).
 @router.post("/approvals/{approval_id}/decision")
 async def decide_approval(
     approval_id: UUID,

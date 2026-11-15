@@ -1,0 +1,28 @@
+# Serves the built single-page app. ${API_ORIGIN} is filled in when the container starts.
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    server_tokens off;
+
+    # Security headers on every response. The CSP allows only our own scripts and styles, and
+    # API calls to the one API origin, which limits what an injected script could do.
+    # (No add_header inside the locations below: that would drop these.)
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ${API_ORIGIN}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+
+    # Built assets have content hashes in their names: cache them for a long time.
+    location /assets/ {
+        try_files $uri =404;
+        expires 1y;
+    }
+
+    # Every other path is a page of the app (/runs/123, /approvals/...): serve index.html and
+    # let the router show it. Never cached, so a new build shows at once.
+    location / {
+        try_files $uri /index.html;
+        expires -1;
+    }
+}

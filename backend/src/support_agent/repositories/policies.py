@@ -148,3 +148,19 @@ async def keyword_search(
         ScoredChunk(chunk, document, similarity=1.0 - float(dist), keyword_rank=float(score))
         for chunk, document, score, dist in rows
     ]
+
+
+async def get_chunks_by_keys(
+    session: AsyncSession, chunk_keys: Sequence[str]
+) -> list[tuple[PolicyChunk, PolicyDocument]]:
+    """The chunks with these exact keys and their documents. Unknown keys are left out."""
+    if not chunk_keys:
+        return []
+    stmt = (
+        select(PolicyChunk, PolicyDocument)
+        .join(PolicyDocument, PolicyDocument.id == PolicyChunk.document_id)
+        .where(PolicyChunk.chunk_key.in_(list(chunk_keys)))
+    )
+    rows = (await session.execute(stmt)).all()
+    by_key = {chunk.chunk_key: (chunk, document) for chunk, document in rows}
+    return [by_key[key] for key in chunk_keys if key in by_key]  # in the caller's order

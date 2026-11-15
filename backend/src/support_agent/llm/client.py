@@ -163,9 +163,9 @@ class RoutedLLMClient:
         """Run one request through the providers in order. Used by chat and structured."""
         check_message_order(request.messages)
         last_error: LLMError | None = None
-        for provider in self._providers:
+        for index, provider in enumerate(self._providers):
             try:
-                return await self._call_with_retries(provider, request)
+                return await self._call_with_retries(provider, request, fallback=index > 0)
             except RETRYABLE_ERRORS as exc:
                 log.warning(
                     "llm_provider_failed",
@@ -176,7 +176,9 @@ class RoutedLLMClient:
             "No LLM provider is available right now (rate limited or failing). Try again later."
         ) from last_error
 
-    async def _call_with_retries(self, provider: ChatProvider, request: LLMRequest) -> LLMResult:
+    async def _call_with_retries(
+        self, provider: ChatProvider, request: LLMRequest, *, fallback: bool
+    ) -> LLMResult:
         model = provider.model_for(request.tier)
         attempt = 1
         while True:
@@ -207,7 +209,7 @@ class RoutedLLMClient:
                 await self._sleep(backoff_delay(attempt, self._retry, retry_after))
                 attempt += 1
                 continue
-            record_usage(reply.usage)
+            record_usage(reply.usage, fallback=fallback)  # fallback: not the first provider
             return LLMResult(
                 content=reply.content,
                 tool_calls=reply.tool_calls,

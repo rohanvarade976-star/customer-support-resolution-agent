@@ -49,6 +49,7 @@ from support_agent.llm.client import LLMClient
 from support_agent.llm.errors import LLMUnavailableError, StructuredOutputError
 from support_agent.llm.tool_loop import ToolCallRecord, ToolResult
 from support_agent.llm.types import ModelTier
+from support_agent.llm.usage import timed
 from support_agent.schemas.orders import OrderResponse
 
 log = logging.getLogger(__name__)
@@ -230,7 +231,8 @@ async def resolve(
             verdict: CriticVerdict | None = None
             if critic_enabled and not codes and draft.action != ResolutionAction.ESCALATE:
                 failure = ResolutionFailure.CRITIC_OUTPUT_INVALID
-                verdict = await review_draft(llm, inputs, draft, tier=critic_tier)
+                with timed("critic"):  # reported apart from the resolution agent's own time
+                    verdict = await review_draft(llm, inputs, draft, tier=critic_tier)
             attempts.append(Attempt(draft, codes, verdict))
 
             objected = verdict is not None and verdict.verdict == "revise"

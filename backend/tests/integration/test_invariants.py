@@ -108,6 +108,8 @@ async def world(
     payments: Payments,
     clock: MutableClock,
     auth_headers: AuthHeaders,
+    proposer_email: str,
+    decider_email: str,
     demo_password_hash: str,
     ingested_policies: None,
 ) -> World:
@@ -126,13 +128,15 @@ async def world(
         json={"message": "Refund please", "order_number": "ORD-1001"},
         headers=await auth_headers("priya@example.com"),
     )
-    reviewer = await auth_headers("anita@example.com")
     proposed = await client.post(
-        f"/tickets/{ticket.json()['id']}/refund-proposals", headers=reviewer
+        f"/tickets/{ticket.json()['id']}/refund-proposals",
+        headers=await auth_headers(proposer_email),
     )
     body = proposed.json()
     decided = await client.post(
-        f"/approvals/{body['approval_id']}/decision", json={"decision": "approve"}, headers=reviewer
+        f"/approvals/{body['approval_id']}/decision",
+        json={"decision": "approve"},
+        headers=await auth_headers(decider_email),
     )
     assert decided.status_code == 200
 

@@ -10,14 +10,18 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from support_agent.api.routes import (
     approvals,
     auth,
+    escalations,
     health,
     memory,
     metrics,
     orders,
+    run_analysis,
+    run_events,
     runs,
     tickets,
 )
@@ -69,5 +73,21 @@ def create_app() -> FastAPI:
     app.include_router(memory.router)
     app.include_router(tickets.router)
     app.include_router(runs.router)
+    app.include_router(run_events.router)
+    app.include_router(run_analysis.router)
     app.include_router(approvals.router)
+    app.include_router(escalations.router)
+
+    # Added last, so it is the outermost layer: a browser's preflight (OPTIONS) is answered
+    # here. Only the listed origins (ADR-019). No cookies are used (the token travels in the
+    # Authorization header), so credentials stay off.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_settings().cors_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["Retry-After"],  # so the UI can say how long to wait after a 429
+        max_age=600,
+    )
     return app

@@ -1671,3 +1671,612 @@ Spans and metrics carry only ids, codes, counts, model names, route templates an
 - Job payloads may now hold a `traceparent` key. Handlers ignore keys they do not read.
 - Any new span attribute must be added to `ALLOWED_ATTRIBUTES`, and any new metric label must be a
   small fixed set.
+
+---
+
+## ADR-019: The React frontend: live status over SSE, token storage, CORS and the reviewer case view
+
+- **Date:** 2026-11-14
+- **Status:** Accepted ("no UI kit" in decision 1 superseded by ADR-020; "no model rationales for
+  reviewers" in the alternatives superseded by ADR-021)
+- **Milestone:** M10
+
+### Context
+
+The PRD asks for a thin client with two role-based areas (PRD "User interface"). Customers raise a
+complaint, follow it live (FR-22), answer the run's question and manage their memory. Reviewers work
+the approval queue with the evidence in front of them. The API already had the routes for actions,
+but not for watching a run, for the verified reply, or for the evidence behind an approval. A
+browser client also brings three questions the API never had: how a browser may call it (CORS), how
+a browser keeps the token, and how a live stream is authenticated.
+
+### Decision
+
+1. **A static React app that only displays.** React + TypeScript (strict) + Vite + Tailwind, with
+   `react-router-dom` for URLs and role-guarded pages. No data-fetching library, no UI kit, no SSE
+   library. The UI never computes eligibility, amounts or decisions: amounts are integer paise from
+   the API, formatted with integer arithmetic (`lib/money.ts`). The role comes from `GET /me`, never
+   from the login form. Route guards only keep people on the right pages; the API checks again.
+2. **Live status: Server-Sent Events read with `fetch()`, token in the `Authorization` header.**
+   - `GET /runs/{id}/stream` (`text/event-stream`) and `GET /runs/{id}/events` (the same snapshot as
+     JSON). Owner or staff only, through the same `load_visible_run` check as `GET /runs/{id}`:
+     anyone else gets 404.
+   - The browser's `EventSource` cannot send headers, so the token would have to go in the URL,
+     where it lands in proxy and server logs and in browser history. Instead the client reads the
+     stream with `fetch()` and a 40-line parser (`api/sse.ts`).
+   - Rejected: a short-lived single-use stream ticket (`POST /runs/{id}/stream-ticket`, then
+     `EventSource(...?ticket=...)`). It works with `EventSource`, but adds a table or cache, an extra
+     round trip, and a credential in the URL (short-lived, but still logged). Our client needs none
+     of what `EventSource` adds (its automatic reconnection is a few lines in `useRunStream`).
+   - Events: `status` (run status, ticket status, `finished`, and the ticket's `customer_reply`),
+     `step` (one per audit event), `end` (`finished` or `timeout`). Customers get only the PRD's
+     customer-visible event types and no payload: the browser turns each type into a fixed
+     sentence. Reviewers get every type plus payload fields from `REVIEWER_PAYLOAD_KEYS` whose values
+     look like ids or codes (`domain/run_events.py`), the same allowlist idea as tracing (ADR-018).
+     The reviewer's free-text note, staff ids and the idempotency key are never sent.
+   - The only free text is the verified reply, which the output guardrail checked before it was
+     saved (ADR-017) and which states only verified outcomes (FR-19).
+   - **Polling, not LISTEN/NOTIFY.** The stream sends the snapshot, then checks the database every
+     `SSE_POLL_INTERVAL_SECONDS` (1 s) and sends only what changed, with a comment line every
+     `SSE_HEARTBEAT_SECONDS` so proxies keep the connection open. Each poll opens and closes its own
+     session (no transaction or connection is held while waiting, CLAUDE.md rule 7) and re-checks
+     ownership. The authentication session is function-scoped (`ShortSessionDep`), so it is closed
+     before the first byte is streamed. LISTEN/NOTIFY would be faster, but needs one dedicated
+     connection per listener and does not work through Supabase's transaction pooler.
+   - **Bounded streams.** A stream ends when the run is finished (a finished run whose ticket is
+     still `in_progress` has a refund in flight, so its stream stays open), or after
+     `SSE_MAX_STREAM_SECONDS` (300 s). The client then reconnects with its current token, so an
+     expired or revoked token can never keep a stream alive.
+   - **Fallback.** If the stream fails, or drops without an `end` event, the client polls `/events`
+     every 3 s and retries the stream after a doubling delay (capped at 30 s). 401, 403 and 404 are
+     final.
+3. **Tokens: in memory, mirrored to `sessionStorage`.** The in-memory copy is what requests send; the
+   `sessionStorage` copy survives a reload of the same tab, is gone when the tab closes, is never
+   shared across tabs and is never sent by the browser on its own. Logout and any 401 clear both.
+   The trade-off: script running on the page could read it, so an XSS bug would expose a token
+   valid for up to an hour. Mitigations: React escapes all text and nothing renders raw HTML; the
+   container serves a strict Content-Security-Policy (only our own scripts and styles, network
+   access only to the API origin, no framing); tokens expire after `ACCESS_TOKEN_MINUTES`.
+   Rejected: `localStorage` (shared by all tabs and kept indefinitely, so a longer exposure) and an
+   httpOnly cookie (invisible to scripts, but needs CSRF protection, SameSite and cross-site cookie
+   rules between the frontend and API hosts, and a new login flow; it is the upgrade path).
+4. **CORS: an explicit allowlist from settings.** `CORS_ALLOWED_ORIGINS` (comma-separated; default
+   the Vite dev server and the frontend container). A validator refuses `*`, wildcards, paths and
+   anything without a scheme, so a typo cannot open the API to every site. Credentials are off
+   (bearer tokens, not cookies). Methods GET, POST and DELETE; headers `Authorization` and
+   `Content-Type`; `Retry-After` is exposed so the UI can say how long to wait after a 429.
+5. **The reviewer case view: `GET /approvals/{approval_id}`.** Reviewers only (403 for customers).
+   Everything is stored or computed by code: the proposal payload as stored and hashed, the order's
+   facts read now through the eligibility service with the rules applied now, the refund policy
+   version in force on the order's date, and the refund operation's status once one exists. The
+   policy citations are the chunk keys the run cited (read from its checkpoint), **kept only if they
+   exist in `policy_chunks`** and shown with our own section text, never the model's paraphrase.
+   Model-written facts and rationales are not shown, because they are not verified. The complaint is
+   the customer's own text, shown as plain text.
+6. **"My tickets".** `TicketResponse` gains `latest_run_id` and `latest_run_status`, read only for
+   the tickets already listed for the caller (one `DISTINCT ON` query), so they are scoped exactly
+   like the tickets themselves.
+7. **The container.** A Node stage builds the static files; `nginxinc/nginx-unprivileged` serves
+   them as a non-root user, with the security headers, long caching for hashed assets, no caching
+   for `index.html`, and the single-page fallback. `VITE_API_BASE_URL` is built into the bundle (it
+   is public, never a secret), and the same origin fills the CSP's `connect-src` at startup.
+
+### Alternatives considered
+
+- **WebSockets:** two-way, which we do not need, and a second protocol for proxies and auth.
+- **The API serving the frontend's files (same origin):** no CORS at all, but couples the two
+  deployments, and the PRD deploys the frontend separately (Vercel or Cloudflare Pages).
+- **A data-fetching library (React Query, SWR):** caching and retries we do not need at this size;
+  a 40-line hook is easier to read.
+- **Showing model rationales to reviewers:** useful context, but unverified model text in the view
+  that approves money. The facts and our own policy text are what a decision should rest on.
+
+### Limits
+
+- **Event order before migration `e2b6c9d4a1f3`.** `audit_events.created_at` used to default to
+  `now()`, the transaction's start time, so every event of one saved segment of a run shared a
+  timestamp and the tie-break (a random UUID) shuffled them: a timeline could show
+  `run.escalated` before `run.classified`. The column now defaults to `clock_timestamp()`, read at
+  each insert, so new events keep the order they were written in
+  (`tests/integration/test_audit_order.py`, which fails under the old default). Events stored
+  before the migration keep their shared timestamps, and their order among themselves stays
+  arbitrary.
+- **One open connection per watching browser.** Polling costs one small query per second per open
+  stream. Fine for a demo; a busy system would want LISTEN/NOTIFY on a direct connection, or a
+  broker.
+- **No per-user limit on concurrent streams.** A client could open many; each is bounded in time.
+- **A token is readable by page scripts** (decision 3).
+- **The API URL is fixed per frontend build.** A different API means a rebuild.
+- **The case view re-reads the facts each time,** so after an approval the refund counts as "in
+  progress" and "eligible now" turns false. That is correct (the money is committed).
+
+### Consequences
+
+- New settings: `CORS_ALLOWED_ORIGINS`, `SSE_POLL_INTERVAL_SECONDS`, `SSE_MAX_STREAM_SECONDS`,
+  `SSE_HEARTBEAT_SECONDS`.
+- New routes: `GET /runs/{id}/events`, `GET /runs/{id}/stream`, `GET /approvals/{approval_id}`.
+  `TicketResponse` has two new optional fields.
+- New migration `e2b6c9d4a1f3`: `audit_events.created_at` defaults to `clock_timestamp()` (only the
+  default changes; no data is converted). Other tables keep `now()`, where one time per
+  transaction is what we want.
+- `services/runs.load_visible_run` is the one ownership check for anything about a run.
+- Any new audit payload key a reviewer should see must be added to `REVIEWER_PAYLOAD_KEYS`; any new
+  customer-facing event type to `CUSTOMER_EVENT_TYPES` and to the browser's labels.
+- CI gains a `frontend` job (lint, type check, tests, build).
+
+---
+
+## ADR-020: The frontend design system, and keeping it inside a strict Content-Security-Policy
+
+- **Date:** 2026-11-14
+- **Status:** Accepted
+- **Milestone:** M10
+
+### Context
+
+The first frontend (ADR-019) worked but looked like a prototype: plain links for navigation,
+uneven spacing, no loading or empty states, and actions with no confirmation. A portfolio product
+should feel like a professional SaaS dashboard and stay easy to use from a 375 px phone to a wide
+desktop. Two constraints shape every choice:
+
+- **The UI only displays.** It never computes eligibility, amounts or decisions (ADR-019).
+- **The strict CSP stays.** nginx sends `style-src 'self'` and `script-src 'self'`: no inline
+  `<style>` or `<script>`. Many UI libraries add a `<style>` tag at runtime, which this blocks.
+
+### Decision
+
+1. **Design tokens in `src/index.css` (Tailwind `@theme`), and nothing else.** Tailwind's default
+   palette is removed (`--color-*: initial`), so a class can only use our colours:
+   - a calm indigo-blue `primary` scale (50–950; 600 is the action colour, 5.5:1 on white);
+   - slate `gray` neutrals; `success`, `warning`, `danger`, `info` for meaning;
+   - Inter (self-hosted, bundled by Vite), a 12–30 px type scale, a 4 px spacing grid, radii of
+     6/8/12 px, three shadows, and one `:focus-visible` ring for every control.
+   Light theme only. The tokens are CSS variables, so dark mode is a later, contained change.
+2. **shadcn/ui-style components, written into `src/components/ui/`.** shadcn/ui is source code
+   copied into the project, not a package: button, badge, card, form controls, table, alert,
+   skeleton. They use `class-variance-authority` (variants), `clsx` and `tailwind-merge` (`cn()`).
+   Radix is used only where it earns its place: `DropdownMenu` (the user menu's keyboard
+   behaviour) and `Slot` (a button that renders as a router link).
+3. **CSP-safe replacements for the parts that inject styles:**
+   - **Dialogs and the mobile menu use the native `<dialog>` element**, not Radix Dialog, whose
+     scroll lock adds a `<style>` tag. `showModal()` gives focus trapping, Esc to close, an inert
+     background and focus return natively; a CSS rule (`html:has(dialog[open])`) stops the page
+     from scrolling.
+   - **The dropdown menu is always non-modal** (`modal={false}`), which skips the same scroll lock.
+   - **Toasts are our own** (`ui/toast.tsx`, ~70 lines, an `aria-live` region). shadcn's toast,
+     Sonner, adds its CSS at runtime.
+   - Inline `style` *properties* set by React and Radix (through the DOM, not HTML attributes) are
+     allowed by `style-src 'self'`, so positioning the menu works.
+4. **One app shell and one page pattern:** a role-based sidebar (a slide-over below 1024 px), a top
+   bar with breadcrumbs and the user menu, a content column of at most 1152 px, and a `PageHeader`
+   (title, one line, primary action) on every page. Every page uses the shared states: skeletons
+   while loading, an empty state with a next step, an error state with a retry button.
+5. **Money actions are confirmed.** Approve and reject open a dialog that states the stored amount
+   before anything is sent; "Delete all" memory is confirmed the same way.
+6. **Display-only helpers stay display-only.** The run stepper is a fixed lookup from the run's
+   status (`lib/runStages.ts`); home-page counts tally the statuses returned; the queue sorts the
+   rows returned (amounts compared as integers); "expires in" is the stored expiry minus now.
+7. **The wizard sends only what the API accepts.** `POST /tickets` takes `message` and an optional
+   `order_number` (extra fields are refused). Step 2 ("what went wrong") only starts the
+   description with an editable sentence; the backend's classifier still decides the category.
+8. **Screenshots under the real CSP.** `npm run screenshots` builds, serves the build with
+   `vite preview` (which now sends the nginx CSP), answers every API call from fixed fake data,
+   and captures each page at 375 px and 1440 px with Playwright (a dev dependency). It fails on any
+   CSP violation, console error, unknown API call or horizontal overflow.
+
+### Alternatives considered
+
+- **A full component kit (MUI, Chakra, Mantine):** heavier, its own styling system next to
+  Tailwind, and several inject styles at runtime (blocked by our CSP).
+- **Radix Dialog with a CSP nonce:** needs a per-request nonce, which a static nginx site cannot
+  generate without extra machinery.
+- **`'unsafe-inline'` for styles:** weakens the CSP for the whole app to save a few lines.
+- **System fonts only:** zero bytes, but text renders differently per OS; Inter costs ~48 KB (Latin)
+  plus ~85 KB (Latin Extended, which holds the ₹ sign), cached for a year.
+
+### Consequences
+
+- New runtime dependencies: `@radix-ui/react-dropdown-menu`, `@radix-ui/react-slot`,
+  `class-variance-authority`, `clsx`, `tailwind-merge`, `lucide-react`, `@fontsource-variable/inter`.
+  New dev dependency: `playwright` (its browser is downloaded separately and never shipped).
+- Bundle: JavaScript 290 KB → 475 KB (91 KB → 148 KB gzip), CSS 13 KB → 43 KB (4 KB → 9 KB gzip),
+  plus the font files.
+- Customers land on `/home` after logging in (it was `/orders`).
+- A new component must use the tokens (other colours do not compile) and must not add `<style>`
+  tags at runtime; `npm run screenshots` catches the latter.
+- jsdom has no `<dialog>.showModal()` or `ResizeObserver`; `src/test/setup.ts` adds small
+  stand-ins, so dialog tests check behaviour, not the browser's focus trapping.
+
+
+---
+
+## ADR-021: Making the AI's work visible, without mixing it up with verified facts
+
+- **Date:** 2026-11-14
+- **Status:** Accepted (supersedes "Showing model rationales to reviewers" in ADR-019's alternatives; decision 4 refined by ADR-022)
+- **Milestone:** M10
+
+### Context
+
+The reviewer saw only the result of a case (the stored amount, the checks passed, the facts and the
+policy text), so the product looked like "a customer complains and a person approves". The agents'
+work was in the audit trail, but nobody could see it. We want reviewers to see what the agents did,
+and customers to see that an assistant checked their records, without weakening the rules that make
+the system safe:
+
+- the LLM proposes, code decides, a person approves money (CLAUDE.md rule 1);
+- customer-facing messages state only verified outcomes (rule 8);
+- the reviewer's case view rests on verified records, not model text (ADR-019 decision 5).
+
+### Decision
+
+1. **The analysis is computed by code from the audit trail.** `domain/run_analysis.py` is a pure
+   function over a run's audit events, which already hold only ids, codes, counts and times. It
+   returns:
+   - **agent activity:** classifier, supervisor (with the specialists it chose), investigator,
+     policy agent, resolution agent, critic (or the baseline agent), in the order their results
+     were recorded, each with its duration and a few counts. The browser turns the counts into a
+     short sentence ("4 tools called, 3 facts grounded, 1 added by code"), so even that sentence
+     is written by code;
+   - **tools used:** tool names and outcome codes. Lookups that code made itself (the required
+     evidence step, call ids starting `required_`) are marked "by code";
+   - **quality checks:** the validator's result on the last draft, revisions, the critic's verdict,
+     facts grounded versus dropped, policy citations verified versus dropped, and whether the output
+     guardrail replaced a reply;
+   - **risk flags**, fixed rules that no model can raise or clear:
+     - `DELIVERY_DATE_CONFLICT`: the validator's `EVIDENCE_CONFLICT`, which only the delivery-date
+       check raises;
+     - `INJECTION_SUSPECTED`: the pattern codes from `injection_suspected` events;
+     - `MISSING_REQUIRED_EVIDENCE`: required lookups with no successful call after gathering;
+     - `LOW_CLASSIFIER_CONFIDENCE`: "unclear", or below `CLASSIFIER_CONFIDENCE_THRESHOLD`;
+     - `PROVIDER_FALLBACK`: answers from a provider other than the first;
+   - **cost:** LLM calls, tokens and active time, summed over the run's segments.
+2. **New measurements, codes and numbers only.** Durations, fallbacks and active time were not
+   recorded before:
+   - `traced()` times every graph node and the critic is timed inside `resolve`, into the
+     segment's `UsageMeter` (a context variable, so parallel branches add to one meter);
+   - `RoutedLLMClient` counts answers that came from a fallback provider;
+   - `run_recording` adds `duration_ms` to each agent's audit event, `critic_ms` to
+     `resolution.completed`, `missing_required` to `investigation.completed`, and `active_ms` and
+     `fallback_calls` to `run.usage`.
+   No migration is needed: these are new keys in JSON payloads, and they are added to
+   `REVIEWER_PAYLOAD_KEYS`. Runs recorded earlier show "—" for durations and active time.
+3. **One piece of model text, for reviewers only: the accepted draft's rationale.**
+   `GET /runs/{id}/analysis` returns it under `recommendation.rationale`, with
+   `source: "ai_generated"` and `verified: false`. It is read from the run's latest checkpoint
+   (`workflow/graph.accepted_rationale`), like the cited policy keys. Controls:
+   - only an *accepted* draft's rationale; a draft that code rejected is replaced by the escalation
+     reason codes, because the case does not rest on it;
+   - reviewers only (`ReviewerDep`: 403 for customers, even for their own run);
+   - rendered as plain text (React escapes it; nothing renders HTML);
+   - shown in its own card with a purple `ai` colour token, a Sparkles icon and an
+     "AI-generated · not verified" label. Verified cards carry a "Verified from records" label,
+     and code-computed cards carry "Computed by code";
+   - nothing reads it: amounts, proposals, approvals and refunds use none of the analysis.
+4. **The review queue shows codes only, from the audit trail.** Each row gains `run_id`,
+   `ai_action` (the resolution agent's latest action) and `risk_flags` (codes). These are read with
+   one query for all rows (`audit.list_of_types_for_runs`) and **no checkpoint reads**, so the queue
+   stays one cheap call however long it grows. The full rationale is on the case page only, where a
+   reviewer reads it next to the evidence.
+5. **The automation summary:** `GET /reviewer/automation-summary` (reviewers only), for runs
+   started in the last 7 days:
+   - resolved automatically: completed with no refund proposal;
+   - sent for approval: runs with a refund proposal;
+   - escalated;
+   - median time to outcome: start to the first of completed, escalated, failed or approval
+     requested. This measures the system, not how long a reviewer took.
+   The definitions live next to the SQL (`repositories/automation.py`).
+6. **Customers: "What we checked" and a visible assistant.** The run status gains `checked`: fixed
+   codes (`order`, `return`, `payment`, `shipment`, `policy`), mapped by code from successful tool
+   calls (`domain/run_events.checked_sources`). The browser shows plain words for each code and
+   drops unknown ones. The customer's timeline names the assistant ("Our assistant is checking your
+   order details"). Customers never get the rationale, tool names, risk flags or internal codes.
+7. **Layout.** On phones, the case page puts the decision panel right after the verified evidence
+   and the AI analysis after it. On wide screens the decision panel spans both and stays in view.
+
+### Alternatives considered
+
+- **No rationale at all (ADR-019's choice):** safest, but it hides what the agents reasoned, which
+  is what a reviewer needs to spot a wrong recommendation. With the controls in decision 3, it is
+  context, not evidence.
+- **The rationale in every queue row:** one checkpoint read per pending approval, and model text in
+  a list where it is read quickly and out of context. Rejected: the queue shows the action and the
+  flags; the case page shows the text.
+- **Model-written summaries of each agent's work:** more fluent, but unverified text in every row.
+  Code-written sentences from counts say less, but are always true.
+- **Risk scores from a model ("how risky is this case?"):** a model would decide what a reviewer
+  worries about. Fixed rules are explainable and testable.
+- **A new table for agent timings:** more structure, but a migration for numbers that fit in the
+  audit payloads we already write per agent.
+
+### Limits
+
+- **Durations are per segment, not exact per call.** Parallel specialists overlap, so durations do
+  not add up to the active time. The critic's time is subtracted from the resolution agent's.
+- **`DELIVERY_DATE_CONFLICT` relies on `EVIDENCE_CONFLICT` meaning a delivery-date conflict.** That
+  is true today (`domain/validation.py`). A new evidence conflict would need its own code.
+- **A rationale can be persuasive and wrong.** The label, the colour and the "context only" line
+  say so, but they cannot stop a reviewer from trusting it. The amount still comes only from the
+  refund rules, and every approval is confirmed in a dialog that states that amount.
+- **The rationale is the latest checkpoint's.** A run that looped back after a customer reply
+  shows the latest accepted draft's rationale.
+- **The summary counts every run**, including manual runs and eval customers' runs, if they are in
+  the same database.
+
+### Consequences
+
+- New routes: `GET /runs/{id}/analysis`, `GET /reviewer/automation-summary`.
+- `PendingApproval` gains `run_id`, `ai_action` and `risk_flags`; `RunStatusEvent` gains `checked`.
+- New audit payload keys: `duration_ms`, `critic_ms`, `missing_required`, `active_ms`,
+  `fallback_calls`.
+- New design token: the `ai` colour scale (purple), used only for AI-generated content, plus a
+  matching `ai` badge tone.
+- Customer event labels now name the assistant.
+
+
+---
+
+## ADR-022: Readiness computed by code, progressive disclosure, and an escalations inbox
+
+- **Date:** 2026-11-14
+- **Status:** Accepted (refines ADR-021 decision 4: the queue's risk column becomes a readiness
+  verdict; the AI analysis moves into collapsible sections)
+- **Milestone:** M10
+
+### Context
+
+After ADR-021 a reviewer saw everything at equal weight: the AI analysis, agent timings, tool
+calls and raw audit events with ids and hashes. It felt as if every case had to be read in full,
+although most cases pass every check. Escalated cases had no place a person could see them: the
+ticket said "a person will follow up", and nothing in the product let a person do so. The aim:
+
+- a normal case is decided in seconds; attention goes only where code found a problem;
+- escalations get a working inbox, without weakening the money rules (CLAUDE.md rules 1, 5, 8).
+
+### Decision
+
+1. **Readiness is a pure function of facts code already has** (`domain/readiness.py`).
+   "Ready to approve" only when all of these hold; otherwise "needs attention" with one reason
+   code per failed rule, most serious first:
+   - the approval is pending and not expired (`APPROVAL_NOT_PENDING`, `APPROVAL_EXPIRED`);
+   - the order can be read now, is still eligible now, and the rules still give the stored amount
+     (`ORDER_UNAVAILABLE`, `NOT_ELIGIBLE_NOW`, `AMOUNT_CHANGED`);
+   - no risk flags (`RISK_FLAG`, carrying the flag codes);
+   - the AI recommended a refund, its draft was accepted and passed the validator, the critic
+     approved, and code dropped no citation (`AI_DID_NOT_RECOMMEND_REFUND`,
+     `VALIDATOR_NOT_PASSED`, `CRITIC_NOT_APPROVED`, `CITATIONS_DROPPED`);
+   - the workflow proposed it: a manual proposal had no AI checks, so it is never "ready"
+     (`REVIEWER_PROPOSED`);
+   - more than 10 minutes left (`EXPIRING_SOON`, the screen's existing "urgent" cut-off).
+   No model is asked and no model text is read. The case endpoint and every queue row call the
+   same function through `services/case_readiness.assess_approval`, so they cannot disagree.
+   Readiness changes nothing: it only orders a reviewer's attention. The amount, the hash check
+   and the confirmation dialog are exactly as before.
+2. **The queue re-reads each row's order.** "Still eligible now" needs the order's current facts,
+   so `GET /approvals` loads them for every pending row (a few small queries each), plus one audit
+   query for all rows. It still reads no checkpoints. Dropped citations come from the audit
+   trail's `dropped_rules` count on both views.
+3. **Progressive disclosure on the case page.** A verdict banner at the top (green with a one-line
+   summary, or amber with the reasons as buttons); key facts (amount, order, checks passed,
+   eligible now, risk, AI action) and the complaint next to the sticky decision panel; then the AI
+   analysis, agent activity, tools used, cited policy and order facts as collapsible sections,
+   closed by default. A reason opens its section and scrolls to it. Sections use the native
+   `<details>` element: keyboard and screen-reader support from the browser, no new dependency,
+   and no injected styles under the strict CSP (ADR-020). The case response gains `readiness`,
+   `ai_action`, `risk_flags`, `proposed_by_reviewer` and `proposed_by_you`.
+4. **The reviewer's run page.** The timeline uses plain words for every event type
+   (`reviewerEventLabel`). Event codes and payload fields (ids, hashes, millisecond timings) move
+   into a collapsed "Technical details" section.
+5. **The queue** has "Ready to approve" and "Needs attention" tabs with counts (ready first,
+   unless empty), a readiness badge per row with its most serious reason, and the automation
+   summary cards as before.
+6. **The escalations inbox** (reviewers only; customers get 403 from `ReviewerDep`):
+   - `GET /reviewer/escalations`: tickets that are escalated and whose latest run escalated,
+     newest escalation first, with customer, order, age and reason codes. The codes are computed
+     by code from the audit trail (`domain/escalations.py`: the AI's own choice, drafts code
+     rejected, an LLM outage, a step's error codes, a refused proposal or refund, an expired
+     approval, a dead job, a blocked reply, risk flags; `UNKNOWN` if none was recorded);
+   - `GET /reviewer/escalations/{ticket_id}`: the same, plus the current reply and the order's
+     facts with the rules applied now;
+   - `POST .../reply`: the reviewer's message to the customer. It passes the same output
+     guardrail as every run's reply (`check_reply`). A failing reply is **refused** with 422
+     `REPLY_REJECTED` and the issue codes, not silently replaced, so the reviewer can fix it.
+     It is stored as the ticket's verified reply with `reply_author = "specialist"` and audited
+     as `ticket.specialist_replied` with ids and its length only. It is never sent to a model;
+   - `POST .../resolve`: needs a specialist reply first (409 `REPLY_REQUIRED`), so the customer
+     is never left with "a person will follow up" on a closed ticket. The note goes only into the
+     `ticket.resolved` audit payload; `note` is not in `REVIEWER_PAYLOAD_KEYS`, so it is never
+     streamed or shown;
+   - a manual refund proposal uses the existing `POST /tickets/{id}/refund-proposals`, with the
+     same eligibility, approval and hash rules. The ticket then leaves the inbox and the approval
+     appears in the queue as "needs attention: proposed by a reviewer";
+   - reply and resolve lock the ticket row, and need it to be still escalated (409
+     `TICKET_NOT_ESCALATED`).
+   The sidebar's "Escalations" item shows the count, re-read on navigation and every minute.
+7. **Separation of duties for manual proposals.** `action_proposals.proposed_by` records the
+   reviewer who created a manual proposal (NULL for the workflow's). That reviewer cannot approve
+   or reject it: 409 `SELF_DECISION_FORBIDDEN`, an `approval.decision_refused` audit event (ids
+   and the code), and the approval stays pending for a colleague. The check runs inside the
+   locked decision transaction, after the "already decided" checks. The UI hides the buttons and
+   says why ("Another reviewer must decide"); the queue marks the row "Proposed by you".
+8. **The customer's side.** `TicketResponse` gains `reply` and `reply_from`; `RunStatusEvent`
+   gains `reply_from`. An escalated ticket shows "A specialist is looking at this" and what to
+   expect; the specialist's reply appears on the run page and the ticket list, labelled as from
+   the support team. The run has finished, so its stream has ended (ADR-019's rules are
+   unchanged): while the ticket is escalated the run page checks `/events` every 30 seconds.
+   New customer-visible event types: `ticket.specialist_replied`, `ticket.resolved`.
+9. **Migration `b7d4e1a9c3f6`**: `tickets.reply_author` (`assistant` | `specialist`, default
+   `assistant`, CHECK constraint) and `action_proposals.proposed_by` (nullable FK to
+   `staff_users`). Existing rows need no conversion.
+
+### Alternatives considered
+
+- **A readiness score from a model ("how safe is this case?"):** a model would decide what a
+  reviewer looks at. Fixed rules are explainable, testable and cannot be talked into "ready".
+- **Readiness computed in the browser:** the browser has the same data, but two copies of the
+  rules drift. One backend function serves both views.
+- **Replacing a guardrail-failing specialist reply with a fixed message** (what runs do): hides
+  the problem from the person who could fix it. Refusing with the codes is clearer.
+- **Keeping the stream open while a ticket is escalated:** a connection per customer for hours or
+  days. A 30-second poll on a finished run costs less and needs no change to ADR-019.
+- **Resolving without a reply:** a closed ticket whose last message promises a follow-up breaks
+  "state only verified outcomes" (rule 8).
+- **A UI kit's accordion:** a dependency and, for some, injected styles. `<details>` does the job.
+
+### Limits
+
+- **The queue does one order read per pending approval.** Fine for a demo-sized queue; a large
+  one would want a batched facts query.
+- **Readiness is advice, not a gate.** A reviewer can still approve a "needs attention" case
+  after reading it; the confirmation dialog states the amount either way.
+- **Separation of duties covers manual proposals only.** Workflow proposals have no human
+  proposer. Two reviewer accounts held by one person defeat it; that is an identity problem.
+- **A specialist reply reaches an open run page within 30 seconds**, not instantly.
+- **The escalation reasons depend on the audit trail.** Runs recorded before an event type
+  existed show fewer reasons, or `UNKNOWN`.
+- **The inbox lists at most 200 tickets** per response.
+- **The bundle crossed Vite's 500 KB warning** (about 525 KB, 160 KB gzipped). Code-splitting the
+  reviewer pages is the obvious fix when it matters.
+
+### Consequences
+
+- New routes: `GET /reviewer/escalations`, `GET /reviewer/escalations/{ticket_id}`,
+  `POST /reviewer/escalations/{ticket_id}/reply`, `POST /reviewer/escalations/{ticket_id}/resolve`.
+- New fields: `PendingApproval.readiness` and `proposed_by_you`; on the case response,
+  `readiness`, `ai_action`, `risk_flags`, `proposed_by_reviewer` and `proposed_by_you`;
+  `TicketResponse.reply` and `reply_from`; `RunStatusEvent.reply_from`.
+- New error codes: `SELF_DECISION_FORBIDDEN`, `REPLY_REJECTED`, `REPLY_REQUIRED`,
+  `TICKET_NOT_ESCALATED`, `ESCALATION_NOT_FOUND`.
+- New audit events: `approval.decision_refused`, `ticket.specialist_replied`, `ticket.resolved`.
+- `QUEUE_EVENT_TYPES` gains `policy.completed` and `reply.guardrail_replaced`.
+- New frontend pieces: `ui/collapsible.tsx`, `case/` (verdict banner, key facts, order facts),
+  `lib/readiness.ts`, the escalations pages and `useEscalationCount`. The screenshots cover the
+  new pages at 375 px and 1440 px.
+
+
+---
+
+## ADR-023: A product that feels alive: live checks, verified facts, next steps and a warmer reply
+
+- **Date:** 2026-11-15
+- **Status:** Accepted (extends ADR-019's run status and ADR-020's design system; the escalated-ticket
+  card of ADR-022 decision 8 becomes a "next step")
+- **Milestone:** M10
+
+### Context
+
+After ADR-020 to ADR-022 the product worked but felt basic. A finished run showed one line ("Your
+order has been delivered on November 3, 2026.") with no context or next step; the Activity list
+showed six entries all "2 minutes ago", with "Your ticket has been updated" after "Resolved";
+nothing moved while the AI worked; the three stat cards looked identical; and escalations left
+behind by the eval harness appeared in the demo. The rules did not change: the UI only displays
+what the API returns (ADR-019), the strict CSP stays (ADR-020), customer messages state only
+verified outcomes (CLAUDE.md rule 8), and no money rule is touched.
+
+### Decision
+
+1. **Verified facts in the customer run status.** `RunStatusEvent` gains `facts` (and
+   `specialist_reply_business_days`, decision 5): `order_number`, `order_status`, `delivered_at`,
+   `return_status` (the latest return), `refund_status` and `shipment`. They are read from our own
+   records at each snapshot, **owner-scoped** (the order is looked up by the ticket's customer id,
+   never from text), and contain no model text, no internal ids or codes and no amounts.
+   - `refund_status` is three words (`in_progress`, `succeeded`, `failed`), mapped by code from the
+     refund operation of this run's proposals (`domain/run_events.customer_refund_status`);
+     reserved, submitted, processing and pending-reconciliation all read as "in progress".
+   - `shipment` (the carrier's status and expected date) is fetched only for an order that is in
+     transit, through `order_status.get_shipment` (ownership checked first). A provider error
+     leaves it out; an unknown carrier word is never shown. An open stream asks the carrier once
+     (the first snapshot) and reuses the answer, so a stream does not call the provider every
+     second.
+   - Reviewers receive the same field (it is the order's own facts; the case page already shows
+     more).
+2. **A live "assistant at work" card** (`AssistantWorkCard`, `lib/runChecks.ts`) while the run is
+   `created` or `investigating`. It shows up to five checks (understanding, order, delivery
+   tracking, policy, preparing an answer). A check appears when its event arrives, shows a spinner,
+   and becomes a tick with a short detail ("Delivered 3 Nov", "In transit · expected 18 Nov") from
+   `facts` once the kinds of records the run checked (`checked`) include it. Delivery tracking is
+   dropped if the run never looked at it. Customers only; reviewers keep the plain timeline.
+   Finished states are a tinted `RunHero` (success, waiting on approval, waiting on you, with a
+   specialist, failed) with a gentle pop. While the card is showing, "What we checked" is hidden
+   so the page does not say the same thing twice.
+3. **A structured reply and code-chosen next steps.** `ReplyCard`: a greeting (the first name from
+   `/me`, not from model text), the verified reply, and "What we found" built from `facts` by fixed
+   wording (`lib/foundFacts.ts`). `NextSteps` come from `lib/nextSteps.ts`, which reads only
+   statuses: a completed run on a delivered order with no refund offers "Report a problem with this
+   item" (the New request wizard at `?order=...&issue=damaged`, which now preselects the problem);
+   awaiting approval explains what happens next; a refund in progress explains that; a resolved
+   ticket offers "Start another request". There is no "Track delivery" button (there is no tracking
+   page): an order in transit shows the carrier's status and expected date in "What we found"
+   instead. No AI text chooses an action, and a test feeds it a reply full of instructions to
+   prove it.
+4. **A better reply prompt, inside the same validator.** `resolution.md` now asks for three to five
+   sentences: acknowledge the request, state the verified outcome with specifics, say what
+   happens next using only what the system really does, with two examples. `domain/validation.py`
+   is unchanged: no money figure, no claim that a refund is done, no promise of an investigation,
+   compensation or a specialist the facts do not support. Tests (`test_validation.py`,
+   `test_resolution.py`) show that a well-formed reply passes untouched, and that warmth does not
+   buy an unverified claim.
+5. **The specialist reply time is a setting.** `SPECIALIST_REPLY_BUSINESS_DAYS` (default 1, 1-10)
+   is sent as `specialist_reply_business_days`, and the page words it as an expectation: "Our
+   specialists usually reply within one business day. Their reply will appear here." It is not a
+   guarantee and no deadline is enforced by code.
+6. **The activity list tells a story.** `lib/timeline.ts` groups events into Understanding,
+   Checking, Deciding and Done, oldest first; orders by time, then (for events stored at the same
+   instant, as before the `clock_timestamp()` fix of ADR-019) by where the event belongs in a run;
+   drops a "ticket updated" within 10 seconds of a run's end or an approval request (it restates
+   it); counts identical consecutive sentences ("x2"); and shows the exact time next to the
+   relative one. Entries slide in.
+7. **Visual polish, CSS only.** Animations are CSS keyframes in `index.css` (slide-up, pop, pulse
+   ring, shimmer, float, sweep, page-in) and Tailwind. Stat cards have their own accent colour,
+   icon and an animated counter (`ui/count-up.tsx`); cards have hover and focus states; skeletons
+   shimmer; the empty state floats; pages ease in. No motion library was added.
+   - **`prefers-reduced-motion`:** the global rule turns every CSS animation and transition off, and
+     the counter checks the preference itself (it also treats a browser that cannot answer as
+     "reduced"). `npm run screenshots` verifies both in a real browser: with reduced motion the
+     sweep bar has no duration; with motion allowed the animations run under the strict CSP.
+8. **Demo data.** `scripts/reset_demo.py` now also deletes the eval harness's customers, orders,
+   tickets, runs, proposals, approvals, refunds, audit events and jobs (`reset_demo(...,
+   leftovers=[eval seed])`), so a leftover eval escalation can never show in the demo. The eval
+   data is deleted, not seeded again.
+
+### Alternatives considered
+
+- **A motion library (Framer Motion):** richer, but it injects styles and adds weight; CSS covered
+  every effect here and the CSP check is simple.
+- **Putting the facts in the reply text:** the model would be the source of "what we found". The
+  panel is built from records, so it is true even if the reply is vague.
+- **Letting the model suggest the next step:** nicer phrasing, but unverified text deciding what a
+  customer is invited to do. Statuses decide, and the wording is fixed.
+- **Calling the carrier on every stream poll:** simpler, but one provider call per second per open
+  page.
+- **A `GET /runs/{id}/facts` endpoint:** an extra round trip and a second place to keep in step
+  with the status. The status already changes when the facts do.
+
+### Limits
+
+- **Eval results recorded before this change were measured on the old resolution prompt.** The
+  committed `evals/reports/` (and any earlier run in `resolution_results.jsonl`) describe the
+  previous wording. They are not evidence about the new prompt until the eval is run again with
+  the real LLM; this ADR does not claim any change in the scores.
+- **A warmer reply is still bounded by the validator,** so a reply may be revised or replaced by
+  the fixed escalation message more often than before. That is a quality trade the eval should
+  measure.
+- **The shipment fact is fetched once per stream** (and once per `/events` call). A change at the
+  carrier shows up on the next connection or reload.
+- **The checks card is inferred from events and `checked`.** A run that skips a step (for example,
+  no policy search) shows fewer checks; it never shows a tick for something that was not checked.
+- **The facts are the order's state now,** not at the time of the reply, so a reply written before a
+  refund completed sits next to "Refund completed". That is accurate, and the timeline shows the
+  order of events.
+- **The expected reply time is an expectation.** Nothing measures or enforces it.
+
+### Consequences
+
+- New setting: `SPECIALIST_REPLY_BUSINESS_DAYS`. New customer-visible fields: `facts`,
+  `specialist_reply_business_days`. No migration.
+- `load_snapshot` takes `settings` and an optional shipping client, so the run routes depend on the
+  shipping client (closed before a stream's body is sent).
+- New frontend pieces: `components/run/` (`RunHero`, `AssistantWorkCard`, `ReplyCard`,
+  `NextSteps`), `ui/count-up.tsx`, `hooks/usePrefersReducedMotion.ts`, `lib/runChecks.ts`,
+  `foundFacts.ts`, `nextSteps.ts`, `timeline.ts`, `dates.ts`. The screenshot run covers an
+  in-progress run, an approval wait and a delivered order with next steps, at 375 px and 1440 px.

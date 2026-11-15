@@ -135,7 +135,9 @@ async def test_confident_run_is_classified_and_saved(
         "run.usage",
     }
     assert recorded["run.escalated"]["error_codes"] == ["LLM_UNAVAILABLE"]
-    assert recorded["run.classified"] == {
+    classified = dict(recorded["run.classified"])
+    assert isinstance(classified.pop("duration_ms"), int)  # measured, so never exact (ADR-021)
+    assert classified == {
         "category": "refund",
         "confidence": 0.95,
         "order_hint": "none",  # the model extracted no order number

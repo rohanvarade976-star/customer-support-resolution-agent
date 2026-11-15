@@ -61,7 +61,7 @@ from support_agent.domain.enums import (
 from support_agent.integrations.payments import PaymentClient
 from support_agent.integrations.shipping import ShippingClient
 from support_agent.llm.client import LLMClient
-from support_agent.llm.usage import metered
+from support_agent.llm.usage import SEGMENT, metered, timed
 from support_agent.rag.embeddings import Embedder
 from support_agent.repositories import audit, customer_messages, proposals, tickets, workflow_runs
 from support_agent.repositories.tickets import TicketRecord
@@ -375,7 +375,7 @@ async def _advance(
     """
     deps = _build_deps(session, env, run, ticket)
     try:
-        with metered() as meter:
+        with metered() as meter, timed(SEGMENT):  # timed exits first, while the meter is set
             segment = await advance_workflow(
                 deps, env.checkpointer, run.thread_id, initial=initial, resume=resume
             )
@@ -509,7 +509,13 @@ def _build_deps(
 # ---------------------------------------------------------------- reading
 
 
-async def get_run(session: AsyncSession, principal: Principal, run_id: UUID) -> RunResponse:
+async def load_visible_run(
+    session: AsyncSession, principal: Principal, run_id: UUID
+) -> tuple[WorkflowRun, Ticket]:
+    """The run and its ticket, if the caller may see them: the ticket's owner, or staff.
+
+    Anyone else gets the same 404 as for a run that does not exist.
+    """
     run = await workflow_runs.get(session, run_id)
     record = None if run is None else await tickets.get_by_id(session, run.ticket_id)
     if run is None or record is None:
@@ -518,4 +524,9 @@ async def get_run(session: AsyncSession, principal: Principal, run_id: UUID) -> 
     is_staff = principal.role in (Role.REVIEWER, Role.ADMIN)
     if not (owns_it or is_staff):
         raise run_not_found()  # same answer as "no such run"
-    return _to_response(run, record.ticket, await queue.latest_for_run(session, run.id))
+    return run, record.ticket
+
+
+async def get_run(session: AsyncSession, principal: Principal, run_id: UUID) -> RunResponse:
+    run, ticket = await load_visible_run(session, principal, run_id)
+    return _to_response(run, ticket, await queue.latest_for_run(session, run.id))

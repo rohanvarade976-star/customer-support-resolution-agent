@@ -1,0 +1,812 @@
+// Screenshots of every page at phone (375 px) and desktop (1440 px) width, for reviewing the
+// layout. Dev-only; run with `npm run screenshots` (it builds first).
+//
+// - Serves the production build with `vite preview`, which sends the real Content-Security-
+//   Policy (vite.config.ts), so a CSP violation shows up here as it would in production.
+// - No backend needed: every API call is answered from the fixed fake data below.
+// - Fails (exit code 1) on any CSP violation, console error, page error, unknown API call,
+//   or a page wider than the screen (horizontal scrolling).
+// Images go to screenshots/ (git-ignored).
+//
+// First time only: `npx playwright install chromium` downloads the browser.
+
+import { createServer } from "node:http";
+import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+
+import { chromium } from "playwright";
+import { preview } from "vite";
+
+const API = "http://localhost:8000";
+const OUT = fileURLToPath(new URL("../screenshots/", import.meta.url));
+const MIN = 60_000;
+const now = Date.now();
+const at = (offsetMs) => new Date(now + offsetMs).toISOString();
+
+// ------------------------------------------------------------------ fake data
+
+const PRIYA = { id: "c-1", role: "customer", name: "Priya Sharma", email: "priya@example.com" };
+const ANITA = { id: "s-1", role: "reviewer", name: "Anita Desai", email: "anita@example.com" };
+
+const ORDERS = [
+  {
+    order_number: "ORD-1001",
+    status: "delivered",
+    currency: "INR",
+    paid_amount_minor: 249900,
+    placed_at: at(-20 * 1440 * MIN),
+    delivered_at: at(-17 * 1440 * MIN),
+    items: [{ product_id: "p-1", product_name: "Wireless Noise-Cancelling Headphones", quantity: 1, paid_amount_minor: 249900 }],
+    returns: [{ status: "received", requested_at: at(-8 * 1440 * MIN), received_at: at(-5 * 1440 * MIN) }],
+  },
+  {
+    order_number: "ORD-1002",
+    status: "shipped",
+    currency: "INR",
+    paid_amount_minor: 179800,
+    placed_at: at(-3 * 1440 * MIN),
+    delivered_at: null,
+    items: [
+      { product_id: "p-2", product_name: "Smart Fitness Band", quantity: 1, paid_amount_minor: 129900 },
+      { product_id: "p-3", product_name: "USB-C Charging Cable", quantity: 2, paid_amount_minor: 49900 },
+    ],
+    returns: [],
+  },
+  {
+    order_number: "ORD-1003",
+    status: "delivered",
+    currency: "INR",
+    paid_amount_minor: 89900,
+    placed_at: at(-40 * 1440 * MIN),
+    delivered_at: at(-37 * 1440 * MIN),
+    items: [{ product_id: "p-4", product_name: "Bluetooth Speaker", quantity: 1, paid_amount_minor: 89900 }],
+    returns: [],
+  },
+];
+
+const TICKETS = {
+  limit: 50,
+  offset: 0,
+  items: [
+    {
+      id: "t-1",
+      order_number: "ORD-1002",
+      category: "order_status",
+      status: "awaiting_customer",
+      summary: "My fitness band order hasn't arrived and the tracking hasn't changed in three days.",
+      created_at: at(-25 * MIN),
+      latest_run_id: "run-1",
+      latest_run_status: "awaiting_customer",
+      reply: null,
+      reply_from: "assistant",
+    },
+    {
+      id: "t-2",
+      order_number: "ORD-1001",
+      category: "refund_request",
+      status: "in_progress",
+      summary: "I returned my headphones last week but still haven't got my refund.",
+      created_at: at(-3 * 60 * MIN),
+      latest_run_id: "run-3",
+      latest_run_status: "awaiting_approval",
+      reply: null,
+      reply_from: "assistant",
+    },
+    {
+      id: "t-3",
+      order_number: "ORD-1003",
+      category: "refund_request",
+      status: "resolved",
+      summary: "The speaker crackles at high volume. I'd like a refund please.",
+      created_at: at(-12 * 1440 * MIN),
+      latest_run_id: "run-2",
+      latest_run_status: "completed",
+      reply: null,
+      reply_from: "assistant",
+    },
+    {
+      id: "t-4",
+      order_number: null,
+      category: null,
+      status: "escalated",
+      summary: "Can I change the delivery address on an order that has already shipped?",
+      created_at: at(-2 * 1440 * MIN),
+      latest_run_id: "run-6",
+      latest_run_status: "escalated",
+      reply: "Hi Priya, I've checked with the courier. The address can't be changed once an order has shipped, but you can collect it from the nearest pickup point. I've asked them to hold it there for you.",
+      reply_from: "specialist",
+    },
+    {
+      id: "t-5",
+      order_number: "ORD-1042",
+      category: "damaged_item",
+      status: "escalated",
+      summary: "The blender jar arrived cracked. The photos are attached to my earlier email.",
+      created_at: at(-90 * MIN),
+      latest_run_id: "run-7",
+      latest_run_status: "escalated",
+      reply: "Your case needs a closer look from a member of our support team. We are passing it to them and they will follow up with you.",
+      reply_from: "assistant",
+    },
+  ],
+};
+
+const MEMORY = [
+  { kind: "case_outcome", outcome_code: "refund_succeeded", category: "refund_request", order_number: "ORD-1003", created_at: at(-12 * 1440 * MIN), expires_at: at(78 * 1440 * MIN) },
+  { kind: "case_outcome", outcome_code: "status_explained", category: "order_status", order_number: "ORD-0999", created_at: at(-30 * 1440 * MIN), expires_at: at(60 * 1440 * MIN) },
+  { kind: "case_outcome", outcome_code: "escalated", category: null, order_number: null, created_at: at(-2 * 1440 * MIN), expires_at: at(88 * 1440 * MIN) },
+];
+
+const step = (id, type, minutesAgo, details = {}) => ({ id, type, actor: "system", at: at(-minutesAgo * MIN), details });
+
+const DELIVERED_FACTS = {
+  order_number: "ORD-1001",
+  order_status: "delivered",
+  delivered_at: at(-12 * 1440 * MIN),
+  return_status: "received",
+  refund_status: null,
+  shipment: null,
+};
+
+const IN_TRANSIT_FACTS = {
+  order_number: "ORD-1002",
+  order_status: "shipped",
+  delivered_at: null,
+  return_status: null,
+  refund_status: null,
+  shipment: { status: "in_transit", expected_delivery: new Date(now + 3 * 1440 * MIN).toISOString().slice(0, 10) },
+};
+
+const RUN_AWAITING = {
+  run: {
+    run_id: "run-1",
+    ticket_id: "t-1",
+    status: "awaiting_customer",
+    ticket_status: "awaiting_customer",
+    reply:
+      "Thanks for reaching out. I can see order ORD-1002 was shipped 3 days ago. To check with the courier, could you confirm the PIN code it is being delivered to?",
+    reply_from: "assistant",
+    finished: false,
+    checked: ["order", "shipment"],
+    facts: IN_TRANSIT_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [
+    step("e1", "run.created", 25),
+    step("e2", "run.classified", 24),
+    step("e3", "investigation.started", 24),
+    step("e4", "clarification.requested", 23),
+  ],
+};
+
+const RUN_COMPLETED = {
+  run: {
+    run_id: "run-2",
+    ticket_id: "t-3",
+    status: "completed",
+    ticket_status: "resolved",
+    reply:
+      "Thanks for getting in touch about your returned speaker. We confirmed that your return arrived and passed inspection, and your refund has now been completed by our payment service. You can see it on this page, and there is nothing more you need to do.",
+    reply_from: "assistant",
+    finished: true,
+    checked: ["order", "return", "payment", "policy"],
+    facts: { ...DELIVERED_FACTS, order_number: "ORD-1003", refund_status: "succeeded" },
+    specialist_reply_business_days: 1,
+  },
+  steps: [
+    step("f1", "run.created", 900, { ticket_id: "t-3" }),
+    step("f2", "run.classified", 899, { category: "refund_request" }),
+    step("f3", "investigation.started", 899),
+    step("f4", "policy.completed", 898, { citations: ["refund_policy_v2:section_3"] }),
+    step("f5", "proposal.created", 898, { proposal_id: "p-2", amount_minor: 89900 }),
+    step("f6", "validation.passed", 898),
+    step("f7", "approval.requested", 897, { approval_id: "a-2" }),
+    step("f8", "approval.approved", 860, { approval_id: "a-2" }),
+    step("f9", "refund.submitted", 859, { refund_id: "r-2" }),
+    step("f10", "refund.succeeded", 855, { refund_id: "r-2", status: "succeeded" }),
+    step("f11", "run.completed", 855),
+  ],
+};
+
+const RUN_WITH_SPECIALIST = {
+  run: {
+    run_id: "run-7",
+    ticket_id: "t-5",
+    status: "escalated",
+    ticket_status: "escalated",
+    reply: "Your case needs a closer look from a member of our support team. We are passing it to them and they will follow up with you.",
+    reply_from: "assistant",
+    finished: true,
+    checked: ["order", "shipment"],
+    facts: IN_TRANSIT_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [
+    step("g1", "run.created", 90),
+    step("g2", "run.classified", 89),
+    step("g3", "investigation.started", 89),
+    step("g4", "run.escalated", 88),
+  ],
+};
+
+const RUN_SPECIALIST_REPLIED = {
+  run: {
+    ...RUN_WITH_SPECIALIST.run,
+    run_id: "run-6",
+    ticket_id: "t-4",
+    reply: TICKETS.items[3].reply,
+    reply_from: "specialist",
+  },
+  steps: [...RUN_WITH_SPECIALIST.steps, step("g5", "ticket.specialist_replied", 20)],
+};
+
+// A refund waiting for a person's approval.
+const RUN_APPROVAL = {
+  run: {
+    run_id: "run-8",
+    ticket_id: "t-6",
+    status: "awaiting_approval",
+    ticket_status: "in_progress",
+    reply:
+      "Thanks for getting in touch about your returned headphones. Your order was delivered, and we've confirmed that the return arrived and passed inspection, which falls within our refund window. That means a refund has been proposed, and it now needs approval from our team before it can go ahead. You'll see the outcome on this page.",
+    reply_from: "assistant",
+    finished: false,
+    checked: ["order", "return", "payment", "policy"],
+    facts: DELIVERED_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [
+    step("h1", "run.created", 12),
+    step("h2", "run.classified", 12),
+    step("h3", "investigation.started", 11),
+    step("h4", "policy.completed", 11),
+    step("h5", "resolution.completed", 10),
+    step("h6", "proposal.created", 10),
+    step("h7", "approval.requested", 10),
+    step("h8", "ticket.updated", 10),
+  ],
+};
+
+// In progress: the assistant has understood the request and is checking the order.
+const RUN_PROGRESS = {
+  run: {
+    run_id: "run-9",
+    ticket_id: "t-8",
+    status: "investigating",
+    ticket_status: "in_progress",
+    reply: null,
+    reply_from: "assistant",
+    finished: false,
+    checked: ["order", "shipment"],
+    facts: DELIVERED_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [step("i1", "run.created", 0.2), step("i2", "run.classified", 0.15), step("i3", "investigation.started", 0.1)],
+};
+
+// Finished, a delivered order and no refund: the customer may report a problem with the item.
+const RUN_DELIVERED = {
+  run: {
+    run_id: "run-10",
+    ticket_id: "t-9",
+    status: "completed",
+    ticket_status: "resolved",
+    reply:
+      "Thanks for checking on your order. It was delivered on the date shown below, and the carrier's records agree. There is nothing outstanding on it right now. If something is wrong with the item, you can tell us about it and we'll take a look.",
+    reply_from: "assistant",
+    finished: true,
+    checked: ["order", "shipment", "policy"],
+    facts: DELIVERED_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [
+    step("j1", "run.created", 5),
+    step("j2", "run.classified", 5),
+    step("j3", "investigation.started", 5),
+    step("j4", "policy.completed", 4),
+    step("j5", "resolution.completed", 4),
+    step("j6", "validation.passed", 4),
+    step("j7", "run.completed", 4),
+    step("j8", "ticket.updated", 4),
+  ],
+};
+
+const ready = { status: "ready_to_approve", reasons: [] };
+
+const APPROVALS = {
+  items: [
+    { approval_id: "a-1", proposal_id: "p-1", ticket_id: "t-2", order_number: "ORD-1001", customer_name: "Priya Sharma", amount_minor: 249900, currency: "INR", reason: "Return received and inspection passed; no refund issued yet", reasons: [], created_at: at(-50 * MIN), expires_at: at(7 * MIN), run_id: "run-3", ai_action: "refund", risk_flags: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"], proposed_by_you: false, readiness: { status: "needs_attention", reasons: [{ code: "RISK_FLAG", codes: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"] }, { code: "CITATIONS_DROPPED", codes: ["1"] }, { code: "EXPIRING_SOON", codes: [] }] } },
+    { approval_id: "a-3", proposal_id: "p-3", ticket_id: "t-7", order_number: "ORD-1042", customer_name: "Arjun Mehta", amount_minor: 54900, currency: "INR", reason: "Item damaged on arrival; photos verified", reasons: [], created_at: at(-35 * MIN), expires_at: at(24 * MIN), run_id: "run-4", ai_action: "refund", risk_flags: [], proposed_by_you: false, readiness: ready },
+    { approval_id: "a-5", proposal_id: "p-5", ticket_id: "t-10", order_number: "ORD-1093", customer_name: "Kavya Nair", amount_minor: 189900, currency: "INR", reason: "Return received and inspection passed", reasons: [], created_at: at(-20 * MIN), expires_at: at(40 * MIN), run_id: "run-8", ai_action: "refund", risk_flags: [], proposed_by_you: false, readiness: ready },
+    { approval_id: "a-6", proposal_id: "p-6", ticket_id: "t-9", order_number: "ORD-1050", customer_name: "Rahul Verma", amount_minor: 79900, currency: "INR", reason: "Return received and inspection passed", reasons: [], created_at: at(-3 * MIN), expires_at: at(57 * MIN), run_id: "run-10", ai_action: "escalate", risk_flags: [], proposed_by_you: true, readiness: { status: "needs_attention", reasons: [{ code: "REVIEWER_PROPOSED", codes: [] }] } },
+    { approval_id: "a-4", proposal_id: "p-4", ticket_id: "t-8", order_number: "ORD-1077", customer_name: "Meera Iyer", amount_minor: 1299900, currency: "INR", reason: "Wrong item delivered; return received", reasons: [], created_at: at(-5 * MIN), expires_at: at(55 * MIN), run_id: "run-5", ai_action: "refund", risk_flags: ["LOW_CLASSIFIER_CONFIDENCE"], proposed_by_you: false, readiness: { status: "needs_attention", reasons: [{ code: "RISK_FLAG", codes: ["LOW_CLASSIFIER_CONFIDENCE"] }] } },
+  ],
+};
+
+const CASE_PENDING = {
+  approval_id: "a-1",
+  proposal_id: "p-1",
+  run_id: "run-3",
+  ticket_id: "t-2",
+  approval_status: "pending",
+  created_at: at(-50 * MIN),
+  expires_at: at(7 * MIN),
+  decided_at: null,
+  customer_name: "Priya Sharma",
+  complaint: "I returned my headphones last week but still haven't got my refund. The courier said it was delivered to your warehouse on Monday.",
+  ticket_status: "in_progress",
+  proposal: {
+    order_number: "ORD-1001",
+    amount_minor: 249900,
+    currency: "INR",
+    reason: "Return received and inspection passed; no refund issued yet",
+    checks_passed: ["OWNERSHIP_VERIFIED", "RETURN_RECEIVED", "INSPECTION_PASSED", "WITHIN_REFUND_WINDOW", "AMOUNT_WITHIN_BALANCE"],
+    payload_hash: "9f2c4e1ab07d3c58e6f1a2b4c9d0e7f3a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    status: "pending_approval",
+  },
+  facts: {
+    order_status: "delivered",
+    delivered_at: at(-17 * 1440 * MIN),
+    return_status: "received",
+    return_requested_at: at(-8 * 1440 * MIN),
+    return_received_at: at(-5 * 1440 * MIN),
+    inspection_status: "passed",
+    paid_amount_minor: 249900,
+    succeeded_refunds_minor: 0,
+    in_progress_refunds_minor: 0,
+    refundable_balance_minor: 249900,
+    refund_window_days: 30,
+    eligible_now: true,
+    reasons_now: [],
+  },
+  governing_policy: { policy_key: "refund_policy", version: "v2", title: "Refund Policy", refund_window_days: 30 },
+  citations: [
+    { citation: "refund_policy_v2:section_3", policy_title: "Refund Policy", version: "v2", section_title: "Refunds after a return", text: "Once a returned item is received and passes inspection, the amount paid for it is refunded to the original payment method. Refunds are issued within 7 business days of the inspection." },
+    { citation: "refund_policy_v2:section_2", policy_title: "Refund Policy", version: "v2", section_title: "Return window", text: "Items can be returned within 30 days of delivery, unused and in their original packaging." },
+  ],
+  refund: null,
+  readiness: APPROVALS.items[0].readiness,
+  ai_action: "refund",
+  risk_flags: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"],
+  proposed_by_reviewer: false,
+  proposed_by_you: false,
+};
+
+// A normal case: every check passed, nothing flagged. Decided in seconds.
+const CASE_READY = {
+  ...CASE_PENDING,
+  approval_id: "a-3",
+  proposal_id: "p-3",
+  run_id: "run-4",
+  ticket_id: "t-7",
+  customer_name: "Arjun Mehta",
+  expires_at: at(24 * MIN),
+  complaint: "The blender jar arrived with a crack down the side. I sent it back the same day.",
+  proposal: { ...CASE_PENDING.proposal, order_number: "ORD-1042", amount_minor: 54900, reason: "Item damaged on arrival; return received and inspected" },
+  facts: { ...CASE_PENDING.facts, paid_amount_minor: 54900, refundable_balance_minor: 54900 },
+  citations: CASE_PENDING.citations.slice(0, 1),
+  readiness: ready,
+  risk_flags: [],
+};
+
+const CASE_APPROVED = {
+  ...CASE_PENDING,
+  approval_id: "a-2",
+  approval_status: "approved",
+  readiness: { status: "needs_attention", reasons: [{ code: "APPROVAL_NOT_PENDING", codes: ["approved"] }] },
+  decided_at: at(-10 * MIN),
+  refund: { refund_id: "r-1", status: "succeeded", amount_minor: 249900, provider_reference: "pay_ref_7f3a91c2" },
+  facts: { ...CASE_PENDING.facts, succeeded_refunds_minor: 249900, refundable_balance_minor: 0, eligible_now: false, reasons_now: ["ALREADY_REFUNDED"] },
+};
+
+// The reviewer's AI analysis (ADR-021): codes and counts, plus the AI's rationale.
+const ANALYSIS = {
+  run_id: "run-3",
+  mode: "multi_agent",
+  status: "awaiting_approval",
+  recommendation: {
+    action: "refund",
+    accepted: true,
+    reason_codes: [],
+    rationale:
+      "The order was delivered 17 days ago and the return was received 5 days ago, inside the 30-day window. Inspection passed and no refund has been issued, so the full paid amount is refundable under section 3 of the refund policy.",
+    source: "ai_generated",
+    verified: false,
+  },
+  agents: [
+    { agent: "classifier", at: at(-50 * MIN), duration_ms: 640, details: { category: "refund", confidence: 0.94 } },
+    { agent: "supervisor", at: at(-50 * MIN), duration_ms: 410, details: { specialists: ["investigator", "policy_agent"], added_by_code: [], extra_round: false } },
+    { agent: "investigator", at: at(-50 * MIN), duration_ms: 3120, details: { tool_calls: 4, failed_calls: 0, facts: 3, dropped_facts: 0, calls_by_code: 1 } },
+    { agent: "policy_agent", at: at(-50 * MIN), duration_ms: 2480, details: { searches: 2, rules: 3, dropped_rules: 1, conflicting_passages: false, no_relevant_policy: false } },
+    { agent: "resolution_agent", at: at(-50 * MIN), duration_ms: 2210, details: { action: "refund", attempts: 2, revisions: 1 } },
+    { agent: "critic", at: at(-50 * MIN), duration_ms: 980, details: { verdict: "approve", reviews: 2 } },
+  ],
+  tools: [
+    { call_id: "call_1", tool: "get_order", agent: "investigator", outcome: "ok", latency_ms: 14, by_code: false },
+    { call_id: "call_2", tool: "get_return_status", agent: "investigator", outcome: "ok", latency_ms: 11, by_code: false },
+    { call_id: "call_3", tool: "get_payment_status", agent: "investigator", outcome: "ok", latency_ms: 19, by_code: false },
+    { call_id: "required_get_shipment", tool: "get_shipment", agent: "investigator", outcome: "ok", latency_ms: 38, by_code: true },
+    { call_id: "search_1", tool: "search_policy", agent: "policy_agent", outcome: "ok", latency_ms: 95, by_code: false },
+    { call_id: "search_2", tool: "search_policy", agent: "policy_agent", outcome: "ok", latency_ms: 88, by_code: false },
+  ],
+  quality: {
+    attempts: 2,
+    revisions: 1,
+    validator_passed: true,
+    validation_codes: [],
+    critic_verdict: "approve",
+    facts_grounded: 3,
+    facts_dropped: 0,
+    citations_verified: 3,
+    citations_dropped: 1,
+    reply_replaced: false,
+  },
+  risk_flags: [
+    { code: "INJECTION_SUSPECTED", codes: ["IGNORE_RULES"], count: 1 },
+    { code: "PROVIDER_FALLBACK", codes: [], count: 1 },
+  ],
+  cost: { llm_calls: 9, input_tokens: 14250, output_tokens: 1830, active_ms: 9840, fallback_calls: 1 },
+};
+
+const CLEAN_ANALYSIS = {
+  ...ANALYSIS,
+  run_id: "run-4",
+  risk_flags: [],
+  quality: { ...ANALYSIS.quality, citations_dropped: 0 },
+  cost: { ...ANALYSIS.cost, fallback_calls: 0 },
+  agents: ANALYSIS.agents.map((row) => (row.agent === "policy_agent" ? { ...row, details: { ...row.details, dropped_rules: 0 } } : row)),
+};
+
+// The escalations inbox (ADR-022).
+const ESCALATIONS = {
+  items: [
+    {
+      ticket_id: "t-5",
+      run_id: "run-7",
+      customer_name: "Priya Sharma",
+      order_number: "ORD-1042",
+      category: "damaged_item",
+      complaint: "The blender jar arrived cracked. The photos are attached to my earlier email.",
+      escalated_at: at(-88 * MIN),
+      reasons: [{ code: "AI_CHOSE_TO_ESCALATE", codes: [] }, { code: "RISK_FLAG", codes: ["DELIVERY_DATE_CONFLICT"] }],
+      specialist_replied: false,
+    },
+    {
+      ticket_id: "t-11",
+      run_id: "run-11",
+      customer_name: "Rohit Kapoor",
+      order_number: "ORD-1120",
+      category: "refund",
+      complaint: "I was charged twice for the same order. Please refund the duplicate payment.",
+      escalated_at: at(-5 * 60 * MIN),
+      reasons: [{ code: "PROPOSAL_REFUSED", codes: ["NOT_ELIGIBLE"] }],
+      specialist_replied: false,
+    },
+    {
+      ticket_id: "t-12",
+      run_id: "run-12",
+      customer_name: "Sneha Rao",
+      order_number: null,
+      category: null,
+      complaint: "Can I change the delivery address on an order that has already shipped?",
+      escalated_at: at(-26 * 60 * MIN),
+      reasons: [{ code: "AI_UNAVAILABLE", codes: [] }],
+      specialist_replied: true,
+    },
+  ],
+};
+
+const ESCALATION_CASE = {
+  ...ESCALATIONS.items[0],
+  ticket_status: "escalated",
+  reply: RUN_WITH_SPECIALIST.run.reply,
+  reply_from: "assistant",
+  facts: { ...CASE_PENDING.facts, paid_amount_minor: 54900, refundable_balance_minor: 54900 },
+  currency: "INR",
+  governing_policy: CASE_PENDING.governing_policy,
+};
+
+const ESCALATED_ANALYSIS = {
+  ...ANALYSIS,
+  run_id: "run-7",
+  status: "escalated",
+  recommendation: { ...ANALYSIS.recommendation, action: "escalate", rationale: "The carrier and the order record disagree on the delivery date, so a person should confirm the facts before anything is promised." },
+  risk_flags: [{ code: "DELIVERY_DATE_CONFLICT", codes: ["EVIDENCE_CONFLICT"], count: 1 }],
+};
+
+const SUMMARY = {
+  days: 7,
+  since: at(-7 * 1440 * MIN),
+  runs: 42,
+  resolved_automatically: 27,
+  sent_for_approval: 9,
+  escalated: 6,
+  median_seconds_to_outcome: 8.4,
+};
+
+const sse = (snapshot, finished = true) =>
+  [
+    `event: status\ndata: ${JSON.stringify(snapshot.run)}\n\n`,
+    ...snapshot.steps.map((s) => `id: ${s.id}\nevent: step\ndata: ${JSON.stringify(s)}\n\n`),
+    ...(finished ? [`event: end\ndata: ${JSON.stringify({ reason: "finished" })}\n\n`] : []),
+  ].join("");
+
+const BASE_ROUTES = {
+  "GET /me/orders": () => ORDERS,
+  "GET /tickets?limit=50": () => TICKETS,
+  "GET /me/memory": () => MEMORY,
+  "GET /runs/run-1/stream": () => ({ sse: sse(RUN_AWAITING) }),
+  "GET /runs/run-1/events": () => RUN_AWAITING,
+  "GET /runs/run-2/stream": () => ({ sse: sse(RUN_COMPLETED) }),
+  "GET /runs/run-2/events": () => RUN_COMPLETED,
+  "GET /approvals": () => APPROVALS,
+  "GET /approvals/a-1": () => CASE_PENDING,
+  "GET /approvals/a-2": () => CASE_APPROVED,
+  // Wrapped: the analysis has its own "status" field, which the router would read as HTTP's.
+  "GET /runs/run-3/analysis": () => ({ status: 200, body: ANALYSIS }),
+  "GET /runs/run-2/analysis": () => ({ status: 200, body: { ...ANALYSIS, run_id: "run-2", status: "completed", risk_flags: [] } }),
+  "GET /reviewer/automation-summary": () => SUMMARY,
+  "GET /approvals/a-3": () => CASE_READY,
+  "GET /runs/run-4/analysis": () => ({ status: 200, body: CLEAN_ANALYSIS }),
+  "GET /runs/run-8/stream": () => ({ sse: sse(RUN_APPROVAL) }),
+  "GET /runs/run-8/events": () => RUN_APPROVAL,
+  // In progress: the stream has no "end" and stays open (hold), so the page reaches "Live".
+  "GET /runs/run-9/stream": () => ({ sse: sse(RUN_PROGRESS, false), hold: true }),
+  "GET /runs/run-9/events": () => RUN_PROGRESS,
+  "GET /runs/run-10/stream": () => ({ sse: sse(RUN_DELIVERED) }),
+  "GET /runs/run-10/events": () => RUN_DELIVERED,
+  "GET /runs/run-6/stream": () => ({ sse: sse(RUN_SPECIALIST_REPLIED) }),
+  "GET /runs/run-6/events": () => RUN_SPECIALIST_REPLIED,
+  "GET /runs/run-7/stream": () => ({ sse: sse(RUN_WITH_SPECIALIST) }),
+  "GET /runs/run-7/events": () => RUN_WITH_SPECIALIST,
+  "GET /runs/run-7/analysis": () => ({ status: 200, body: ESCALATED_ANALYSIS }),
+  "GET /reviewer/escalations": () => ESCALATIONS,
+  "GET /reviewer/escalations/t-5": () => ESCALATION_CASE,
+};
+
+// ------------------------------------------------------------------ pages
+
+const click = (name, role = "button") => async (page) => {
+  await page.getByRole(role, { name, exact: true }).first().click();
+};
+
+// The run page's connection badge must read "Live" (not "Reconnecting…") before we capture.
+// Fails the capture, with a clear message, if the stream never becomes live.
+async function waitForLive(page) {
+  await page.getByTitle("Updates appear as they happen").waitFor({ timeout: 5000 });
+}
+
+const SCENARIOS = [
+  { name: "login", path: "/login", user: null },
+  { name: "customer-home", path: "/home", user: PRIYA },
+  { name: "customer-home-empty", path: "/home", user: PRIYA, routes: { "GET /tickets?limit=50": () => ({ items: [], limit: 50, offset: 0 }) } },
+  { name: "new-request-1-order", path: "/complaints/new?order=ORD-1001", user: PRIYA },
+  { name: "new-request-1-error", path: "/complaints/new", user: PRIYA, action: click("Continue") },
+  {
+    name: "new-request-2-issue",
+    path: "/complaints/new?order=ORD-1001",
+    user: PRIYA,
+    action: async (page) => {
+      await click("Continue")(page);
+      await page.getByText("Refund not received").click(); // the card, as a person would
+    },
+  },
+  {
+    name: "new-request-4-review",
+    path: "/complaints/new?order=ORD-1001",
+    user: PRIYA,
+    action: async (page) => {
+      await click("Continue")(page);
+      await page.getByText("Refund not received").click(); // the card, as a person would
+      await click("Continue")(page);
+      await click("Continue")(page);
+    },
+  },
+  { name: "run-awaiting-customer", path: "/runs/run-1", user: PRIYA },
+  { name: "run-completed", path: "/runs/run-2", user: PRIYA },
+  { name: "run-delivered-next-steps", path: "/runs/run-10", user: PRIYA },
+  { name: "run-awaiting-approval", path: "/runs/run-8", user: PRIYA },
+  {
+    // Reduced motion (the default for every capture): the sweeping bar must not move.
+    name: "run-in-progress",
+    path: "/runs/run-9",
+    user: PRIYA,
+    verify: async (page) => {
+      await page.getByTestId("assistant-work").waitFor();
+      await waitForLive(page);
+      const duration = await page.locator("[data-testid=assistant-work] .animate-progress").evaluate((el) => getComputedStyle(el).animationDuration);
+      return parseFloat(duration) <= 0.001 ? [] : [`reduced motion: the progress bar still animates (${duration})`];
+    },
+  },
+  {
+    // Motion allowed: the animations must really run under the strict CSP.
+    name: "run-in-progress-motion",
+    path: "/runs/run-9",
+    user: PRIYA,
+    motion: true,
+    verify: async (page) => {
+      await page.getByTestId("assistant-work").waitFor();
+      await waitForLive(page);
+      const bar = await page.locator("[data-testid=assistant-work] .animate-progress").evaluate((el) => {
+        const style = getComputedStyle(el);
+        return { name: style.animationName, duration: style.animationDuration, count: style.animationIterationCount };
+      });
+      const shimmer = await page.evaluate(() => {
+        const probe = document.createElement("div");
+        probe.className = "animate-shimmer";
+        document.body.append(probe);
+        const name = getComputedStyle(probe).animationName;
+        probe.remove();
+        return name;
+      });
+      const problems = [];
+      if (bar.name !== "progress" || parseFloat(bar.duration) < 1 || bar.count !== "infinite") problems.push(`progress bar is not animating: ${JSON.stringify(bar)}`);
+      if (shimmer !== "shimmer") problems.push(`shimmer animation missing: ${shimmer}`);
+      return problems;
+    },
+  },
+  { name: "tickets", path: "/tickets", user: PRIYA },
+  { name: "tickets-error", path: "/tickets", user: PRIYA, expectErrors: true, routes: { "GET /tickets?limit=50": () => ({ status: 503, body: { success: false, error_code: "UNAVAILABLE", message: "The service is temporarily unavailable." } }) } },
+  { name: "orders", path: "/orders", user: PRIYA },
+  { name: "memory", path: "/memory", user: PRIYA },
+  { name: "memory-confirm", path: "/memory", user: PRIYA, action: click("Delete all") },
+  { name: "reviewer-queue", path: "/approvals", user: ANITA },
+  { name: "reviewer-queue-empty", path: "/approvals", user: ANITA, routes: { "GET /approvals": () => ({ items: [] }) } },
+  { name: "reviewer-queue-attention", path: "/approvals", user: ANITA, action: async (page) => {
+      await page.getByRole("tab", { name: /Needs attention/ }).click();
+    },
+  },
+  { name: "reviewer-case-ready", path: "/approvals/a-3", user: ANITA },
+  { name: "reviewer-case", path: "/approvals/a-1", user: ANITA },
+  { name: "reviewer-case-confirm", path: "/approvals/a-3", user: ANITA, action: click("Approve refund") },
+  { name: "reviewer-case-approved", path: "/approvals/a-2", user: ANITA },
+  { name: "reviewer-run", path: "/runs/run-2", user: ANITA },
+  {
+    name: "reviewer-run-technical",
+    path: "/runs/run-2",
+    user: ANITA,
+    action: async (page) => {
+      await page.getByText("Technical details", { exact: true }).click();
+      await page.evaluate(() => window.scrollTo(0, 0)); // a full-page capture starts at the top
+    },
+  },
+  { name: "escalations", path: "/escalations", user: ANITA },
+  { name: "escalations-empty", path: "/escalations", user: ANITA, routes: { "GET /reviewer/escalations": () => ({ items: [] }) } },
+  { name: "escalation-case", path: "/escalations/t-5", user: ANITA },
+  {
+    name: "escalation-reply-confirm",
+    path: "/escalations/t-5",
+    user: ANITA,
+    action: async (page) => {
+      await page.getByLabel("Reply to the customer").fill("Hi Priya, I've checked the courier's records and your return. A replacement jar is on its way and should reach you within 3 days.");
+      await click("Send reply")(page);
+    },
+  },
+  { name: "run-with-specialist", path: "/runs/run-7", user: PRIYA },
+  { name: "run-specialist-replied", path: "/runs/run-6", user: PRIYA },
+  { name: "user-menu", path: "/home", user: PRIYA, action: click("Account menu: Priya Sharma") },
+  { name: "mobile-menu", path: "/tickets", user: PRIYA, only: "mobile", action: click("Open menu") },
+];
+
+const VIEWPORTS = [
+  { name: "mobile", width: 375, height: 812 },
+  { name: "desktop", width: 1440, height: 900 },
+];
+
+// ------------------------------------------------------------------ run
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE",
+};
+
+// A playwright `fulfill` sends its whole body and closes the connection, which the page reads as
+// a dropped stream ("Reconnecting…"). For a stream that must stay open, the request is forwarded
+// to this tiny local server instead: it sends the events and then holds the connection.
+const heldBodies = new Map(); // URL path -> SSE body
+const heldResponses = new Set();
+const holdServer = createServer((request, response) => {
+  const body = heldBodies.get(new URL(request.url, "http://localhost").pathname) ?? "";
+  response.writeHead(200, { ...CORS, "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  response.write(body);
+  heldResponses.add(response);
+  response.on("close", () => heldResponses.delete(response));
+});
+await new Promise((resolve) => holdServer.listen(0, "127.0.0.1", resolve));
+const HOLD_ORIGIN = `http://127.0.0.1:${holdServer.address().port}`;
+
+async function shoot(browser, base, viewport, scenario) {
+  const problems = [];
+  const context = await browser.newContext({ viewport, reducedMotion: scenario.motion === true ? "no-preference" : "reduce" });
+  if (scenario.user !== null) {
+    const session = { token: "screenshot-token", user: scenario.user, expiresAt: now + 3_600_000 };
+    await context.addInitScript((value) => {
+      sessionStorage.setItem("support-agent.session", value);
+    }, JSON.stringify(session));
+  }
+  // Collect CSP violations reported by the page itself.
+  await context.addInitScript(() => {
+    window.__csp = [];
+    document.addEventListener("securitypolicyviolation", (event) => {
+      window.__csp.push(`${event.violatedDirective}: ${event.blockedURI || "inline"}`);
+    });
+  });
+
+  const routes = { ...BASE_ROUTES, ...(scenario.routes ?? {}) };
+  await context.route(`${API}/**`, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
+    const key = `${request.method()} ${url.pathname}${url.search}`;
+    const handler = routes[key];
+    if (handler === undefined) {
+      problems.push(`unknown API call: ${key}`);
+      return route.fulfill({ status: 404, headers: CORS, json: { success: false, error_code: "NOT_FOUND", message: "Not found." } });
+    }
+    const result = handler();
+    if (result.hold === true) {
+      heldBodies.set(url.pathname, result.sse);
+      return route.continue({ url: `${HOLD_ORIGIN}${url.pathname}` });
+    }
+    if (result.sse !== undefined) {
+      return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "text/event-stream" }, body: result.sse });
+    }
+    if (result.status !== undefined) return route.fulfill({ status: result.status, headers: CORS, json: result.body });
+    return route.fulfill({ status: 200, headers: CORS, json: result });
+  });
+
+  const page = await context.newPage();
+  page.on("console", (message) => {
+    if (message.type() === "error" && !scenario.expectErrors) problems.push(`console: ${message.text()}`);
+  });
+  page.on("pageerror", (error) => problems.push(`page error: ${error.message}`));
+
+  await page.goto(`${base}${scenario.path.slice(1)}`);
+  await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+  await page.evaluate(() => document.fonts.ready);
+  if (scenario.action !== undefined) {
+    await scenario.action(page);
+    await page.waitForTimeout(300);
+  }
+  await page.waitForTimeout(250);
+  if (scenario.verify !== undefined) problems.push(...(await scenario.verify(page)));
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  if (overflow > 0) problems.push(`page is ${overflow}px wider than the screen`);
+  const csp = await page.evaluate(() => window.__csp);
+  for (const violation of csp) problems.push(`CSP violation: ${violation}`);
+
+  // A modal or menu is pinned to the screen, so capture the viewport; otherwise the full page.
+  const overlay = scenario.action !== undefined && /confirm|menu/.test(scenario.name);
+  await page.screenshot({ path: `${OUT}${viewport.name}-${scenario.name}.png`, fullPage: !overlay });
+  await context.close();
+  return problems;
+}
+
+await mkdir(OUT, { recursive: true });
+const server = await preview();
+const base = server.resolvedUrls?.local[0] ?? "http://localhost:4173/";
+const browser = await chromium.launch();
+let failures = 0;
+try {
+  for (const viewport of VIEWPORTS) {
+    for (const scenario of SCENARIOS) {
+      if (scenario.only !== undefined && scenario.only !== viewport.name) continue;
+      const problems = await shoot(browser, base, viewport, scenario);
+      const label = `${viewport.name}-${scenario.name}`;
+      if (problems.length === 0) console.log(`ok    ${label}`);
+      else {
+        failures += 1;
+        console.log(`FAIL  ${label}\n      ${problems.join("\n      ")}`);
+      }
+    }
+  }
+} finally {
+  await browser.close();
+  for (const response of heldResponses) response.destroy();
+  await new Promise((resolve) => holdServer.close(resolve));
+  await new Promise((resolve) => server.httpServer.close(resolve));
+}
+console.log(failures === 0 ? `\nAll screenshots saved to ${OUT}` : `\n${failures} page(s) had problems.`);
+process.exit(failures === 0 ? 0 : 1);

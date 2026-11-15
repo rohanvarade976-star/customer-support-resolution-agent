@@ -46,6 +46,13 @@ class TicketStatus(StrEnum):
     ESCALATED = "escalated"
 
 
+class ReplyAuthor(StrEnum):
+    """Who wrote a ticket's verified reply (ADR-022)."""
+
+    ASSISTANT = "assistant"  # a run's validated or fixed message
+    SPECIALIST = "specialist"  # a reviewer's reply to an escalated ticket
+
+
 class ResolutionAction(StrEnum):
     """What the resolution agent may propose (PRD "Agent specifications").
     Proposing a refund is not executing one: only a workflow code node moves money."""

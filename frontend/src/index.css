@@ -1,0 +1,241 @@
+/* The design system's tokens and base styles (ADR-020).
+ *
+ * `--color-*: initial` removes Tailwind's default palette, so only the colours below exist:
+ * a class such as `bg-indigo-500` simply does not compile. Every page uses these tokens. */
+
+@import "tailwindcss";
+/* Inter, self-hosted: Vite bundles the font files, so the CSP's 'self' covers them. Each
+ * subset has a unicode-range, so browsers download only the Latin file for our text. */
+@import "@fontsource-variable/inter/wght.css";
+
+@theme {
+  --color-*: initial;
+  --color-white: #ffffff;
+  --color-black: #000000;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+
+  /* Primary: a calm indigo-blue. 600 is the action colour (5.5:1 against white). */
+  --color-primary-50: #eef1ff;
+  --color-primary-100: #e0e5ff;
+  --color-primary-200: #c7cffe;
+  --color-primary-300: #a5b1fc;
+  --color-primary-400: #818df8;
+  --color-primary-500: #6470ef;
+  --color-primary-600: #4f5bd5;
+  --color-primary-700: #4049b8;
+  --color-primary-800: #363d94;
+  --color-primary-900: #303676;
+  --color-primary-950: #1d2045;
+
+  /* Neutral: cool slate grays. Body text 900, secondary text 600, hints 500 (4.7:1 on white). */
+  --color-gray-50: #f8fafc;
+  --color-gray-100: #f1f5f9;
+  --color-gray-200: #e2e8f0;
+  --color-gray-300: #cbd5e1;
+  --color-gray-400: #94a3b8;
+  --color-gray-500: #64748b;
+  --color-gray-600: #475569;
+  --color-gray-700: #334155;
+  --color-gray-800: #1e293b;
+  --color-gray-900: #0f172a;
+  --color-gray-950: #020617;
+
+  /* Semantic colours. Text uses 700/800 on 50/100 backgrounds (AA contrast). */
+  --color-success-50: #ecfdf5;
+  --color-success-100: #d1fae5;
+  --color-success-200: #a7f3d0;
+  --color-success-500: #10b981;
+  --color-success-600: #059669;
+  --color-success-700: #047857;
+  --color-success-800: #065f46;
+
+  --color-warning-50: #fffbeb;
+  --color-warning-100: #fef3c7;
+  --color-warning-200: #fde68a;
+  --color-warning-500: #f59e0b;
+  --color-warning-600: #d97706;
+  --color-warning-700: #b45309;
+  --color-warning-800: #92400e;
+
+  --color-danger-50: #fef2f2;
+  --color-danger-100: #fee2e2;
+  --color-danger-200: #fecaca;
+  --color-danger-500: #ef4444;
+  --color-danger-600: #dc2626;
+  --color-danger-700: #b91c1c;
+  --color-danger-800: #991b1b;
+
+  --color-info-50: #f0f9ff;
+  --color-info-100: #e0f2fe;
+  --color-info-200: #bae6fd;
+  --color-info-500: #0ea5e9;
+  --color-info-600: #0284c7;
+  --color-info-700: #0369a1;
+  --color-info-800: #075985;
+
+  /* AI-generated content only (ADR-021): a purple that no verified fact, status or action
+     uses, so model output can never look like a checked record. 700 on 50 is 7.4:1. */
+  --color-ai-50: #faf5ff;
+  --color-ai-100: #f3e8ff;
+  --color-ai-200: #e9d5ff;
+  --color-ai-500: #a855f7;
+  --color-ai-600: #9333ea;
+  --color-ai-700: #7e22ce;
+  --color-ai-800: #6b21a8;
+  --color-ai-900: #581c87;
+
+  /* Type: one sans-serif family; the scale is 12 / 14 / 16 / 18 / 20 / 24 / 30 px. */
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 1rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl: 1.875rem;
+  --text-3xl--line-height: 2.25rem;
+
+  /* Spacing: a 4 px grid (p-1 = 4 px, p-4 = 16 px, ...). */
+  --spacing: 0.25rem;
+
+  /* Radii: inputs and buttons 8 px, cards 12 px. */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+
+  /* Shadows: xs for controls, sm for cards, lg for menus, dialogs and toasts. */
+  --shadow-xs: 0 1px 2px 0 rgb(15 23 42 / 0.05);
+  --shadow-sm: 0 1px 3px 0 rgb(15 23 42 / 0.06), 0 1px 2px -1px rgb(15 23 42 / 0.06);
+  --shadow-lg: 0 12px 32px -8px rgb(15 23 42 / 0.18), 0 4px 8px -4px rgb(15 23 42 / 0.08);
+
+  --animate-fade-in: fade-in 150ms ease-out;
+  --animate-scale-in: scale-in 150ms ease-out;
+  --animate-slide-in-left: slide-in-left 200ms ease-out;
+  --animate-toast-in: toast-in 200ms ease-out;
+  /* Life: entrances, a gentle pop for a finished state, a pulse for "working", a shimmer for
+     loading, a slow float for empty states. All are switched off by prefers-reduced-motion. */
+  --animate-slide-up: slide-up 320ms ease-out backwards;
+  --animate-page-in: page-in 240ms ease-out backwards;
+  --animate-pop: pop 480ms cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+  --animate-pulse-ring: pulse-ring 1.8s ease-out infinite;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-float: float 3.2s ease-in-out infinite;
+  --animate-progress: progress 1.8s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+@keyframes slide-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+/* The ring is the primary-600 colour at low opacity; the pulse spreads out and fades. */
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgb(79 91 213 / 0.35);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 10px rgb(79 91 213 / 0);
+  }
+}
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@keyframes float {
+  50% {
+    transform: translateY(-4px);
+  }
+}
+@keyframes progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    @apply bg-gray-50 font-sans text-sm text-gray-900;
+  }
+
+  /* One focus ring everywhere, shown for keyboard focus only. */
+  :focus-visible {
+    outline: 2px solid var(--color-primary-600);
+    outline-offset: 2px;
+  }
+
+  /* A modal <dialog> is open: stop the page behind it from scrolling (CSS only, CSP-safe). */
+  html:has(dialog[open]) {
+    overflow: hidden;
+  }
+  dialog::backdrop {
+    background: rgb(15 23 42 / 0.45);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 1ms !important;
+    }
+  }
+}

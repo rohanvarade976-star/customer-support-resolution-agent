@@ -171,8 +171,8 @@ def settings() -> Settings:
 # ---------------------------------------------------------------- committed-world helpers
 
 
-async def reviewer(db: AsyncSession) -> Principal:
-    staff = await db.scalar(select(StaffUser).where(StaffUser.email == "anita@example.com"))
+async def reviewer(db: AsyncSession, email: str) -> Principal:
+    staff = await db.scalar(select(StaffUser).where(StaffUser.email == email))
     assert staff is not None
     return Principal(id=staff.id, role=Role.REVIEWER, name=staff.name, email=staff.email)
 
@@ -187,18 +187,22 @@ async def priya_ticket(db: AsyncSession) -> Ticket:
     return ticket
 
 
-async def manual_proposal(sessions: Sessions, settings: Settings, now: datetime) -> UUID:
+async def manual_proposal(
+    sessions: Sessions, settings: Settings, now: datetime, proposer_email: str
+) -> UUID:
     """Priya's refund proposed by a reviewer (a manual run, approval pending). Committed."""
     async with sessions() as db:
         ticket = await priya_ticket(db)
         await db.commit()
         proposed = await proposal_service.create_refund_proposal(
-            db, await reviewer(db), ticket.id, now=now, settings=settings
+            db, await reviewer(db, proposer_email), ticket.id, now=now, settings=settings
         )
     return proposed.approval_id
 
 
-async def mark_approved(sessions: Sessions, approval_id: UUID, now: datetime) -> UUID:
+async def mark_approved(
+    sessions: Sessions, approval_id: UUID, now: datetime, decider_email: str
+) -> UUID:
     """Store the reviewer's approval exactly as the decision service does before executing."""
     async with sessions() as db:
         approval = await db.get(Approval, approval_id)
@@ -211,7 +215,7 @@ async def mark_approved(sessions: Sessions, approval_id: UUID, now: datetime) ->
             db,
             approval,
             decision=ApprovalDecision.APPROVED,
-            reviewer_id=str((await reviewer(db)).id),
+            reviewer_id=str((await reviewer(db, decider_email)).id),
             decided_at=now,
         )
         await proposal_repo.set_proposal_status(db, proposal, ProposalStatus.APPROVED)
@@ -281,9 +285,11 @@ async def test_two_executions_of_one_approval_give_exactly_one_refund(
     settings: Settings,
     clock: MutableClock,
     monkeypatch: pytest.MonkeyPatch,
+    proposer_email: str,
+    decider_email: str,
 ) -> None:
-    approval_id = await manual_proposal(committed_sessions, settings, clock())
-    proposal_id = await mark_approved(committed_sessions, approval_id, clock())
+    approval_id = await manual_proposal(committed_sessions, settings, clock(), proposer_email)
+    proposal_id = await mark_approved(committed_sessions, approval_id, clock(), decider_email)
 
     # Both executors pass revalidation and the early "already executed?" check before
     # either reserves: only the order lock and the unique constraint stand between them.
@@ -319,15 +325,19 @@ async def test_two_reviewers_approving_at_once_give_exactly_one_refund(
     settings: Settings,
     clock: MutableClock,
     checkpointer: Checkpointer,
+    proposer_email: str,
+    decider_email: str,
 ) -> None:
-    approval_id = await manual_proposal(committed_sessions, settings, clock())
+    approval_id = await manual_proposal(committed_sessions, settings, clock(), proposer_email)
     env = EnqueueEnv(settings, clock, checkpointer)
     body = DecisionRequest(decision="approve")
 
     async def decide() -> str:
         async with committed_sessions() as db, payments.client() as client:
             try:
-                await approvals.decide(db, await reviewer(db), approval_id, body, env, client)
+                await approvals.decide(
+                    db, await reviewer(db, decider_email), approval_id, body, env, client
+                )
             except AppError as exc:
                 return exc.error_code
             return "approved"
@@ -353,6 +363,7 @@ async def test_approve_and_expiry_at_the_same_moment_give_exactly_one_outcome(
     settings: Settings,
     checkpointer: Checkpointer,
     monkeypatch: pytest.MonkeyPatch,
+    decider_email: str,
 ) -> None:
     approval = await workflow_approval(committed_sessions, settings, SEED_NOW)
     # The reviewer is one millisecond early; the sweep, one millisecond late. Both act.
@@ -386,7 +397,7 @@ async def test_approve_and_expiry_at_the_same_moment_give_exactly_one_outcome(
             body = DecisionRequest(decision="approve")
             try:
                 await approvals.decide(
-                    db, await reviewer(db), approval.id, body, reviewer_env, client
+                    db, await reviewer(db, decider_email), approval.id, body, reviewer_env, client
                 )
             except AppError as exc:
                 return exc.error_code
@@ -434,9 +445,11 @@ async def test_a_late_executor_never_overwrites_what_the_reconciler_settled(
     clock: MutableClock,
     provider_clock: MutableClock,
     monkeypatch: pytest.MonkeyPatch,
+    proposer_email: str,
+    decider_email: str,
 ) -> None:
-    approval_id = await manual_proposal(committed_sessions, settings, clock())
-    proposal_id = await mark_approved(committed_sessions, approval_id, clock())
+    approval_id = await manual_proposal(committed_sessions, settings, clock(), proposer_email)
+    proposal_id = await mark_approved(committed_sessions, approval_id, clock(), decider_email)
 
     # The executor's refund reaches the provider, then the executor stalls before recording.
     sent, resume = asyncio.Event(), asyncio.Event()
@@ -488,9 +501,11 @@ async def test_a_late_reconciler_never_overwrites_what_the_executor_recorded(
     clock: MutableClock,
     provider_clock: MutableClock,
     monkeypatch: pytest.MonkeyPatch,
+    proposer_email: str,
+    decider_email: str,
 ) -> None:
-    approval_id = await manual_proposal(committed_sessions, settings, clock())
-    proposal_id = await mark_approved(committed_sessions, approval_id, clock())
+    approval_id = await manual_proposal(committed_sessions, settings, clock(), proposer_email)
+    proposal_id = await mark_approved(committed_sessions, approval_id, clock(), decider_email)
     later = MutableClock(clock() + timedelta(seconds=settings.reconcile_stale_reserved_seconds + 1))
 
     # The executor sends, then stalls until the reconciler has claimed the stale reservation

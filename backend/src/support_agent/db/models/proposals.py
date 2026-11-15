@@ -33,6 +33,9 @@ class ActionProposal(UUIDPrimaryKey, CreatedAt, UpdatedAt, Base):
         default=ProposalStatus.PENDING_APPROVAL,
         server_default=ProposalStatus.PENDING_APPROVAL.value,
     )
+    # The reviewer who created a manual proposal; None when the workflow proposed it.
+    # Separation of duties: this person may not decide the proposal (ADR-022).
+    proposed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("staff_users.id"))
 
 
 class Approval(UUIDPrimaryKey, CreatedAt, Base):
