@@ -10,6 +10,7 @@
 //
 // First time only: `npx playwright install chromium` downloads the browser.
 
+import { createServer } from "node:http";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -549,8 +550,8 @@ const BASE_ROUTES = {
   "GET /runs/run-4/analysis": () => ({ status: 200, body: CLEAN_ANALYSIS }),
   "GET /runs/run-8/stream": () => ({ sse: sse(RUN_APPROVAL) }),
   "GET /runs/run-8/events": () => RUN_APPROVAL,
-  // In progress: the stream has no "end", so the page keeps working state (and polls).
-  "GET /runs/run-9/stream": () => ({ sse: sse(RUN_PROGRESS, false) }),
+  // In progress: the stream has no "end" and stays open (hold), so the page reaches "Live".
+  "GET /runs/run-9/stream": () => ({ sse: sse(RUN_PROGRESS, false), hold: true }),
   "GET /runs/run-9/events": () => RUN_PROGRESS,
   "GET /runs/run-10/stream": () => ({ sse: sse(RUN_DELIVERED) }),
   "GET /runs/run-10/events": () => RUN_DELIVERED,
@@ -568,6 +569,12 @@ const BASE_ROUTES = {
 const click = (name, role = "button") => async (page) => {
   await page.getByRole(role, { name, exact: true }).first().click();
 };
+
+// The run page's connection badge must read "Live" (not "Reconnecting…") before we capture.
+// Fails the capture, with a clear message, if the stream never becomes live.
+async function waitForLive(page) {
+  await page.getByTitle("Updates appear as they happen").waitFor({ timeout: 5000 });
+}
 
 const SCENARIOS = [
   { name: "login", path: "/login", user: null },
@@ -606,6 +613,7 @@ const SCENARIOS = [
     user: PRIYA,
     verify: async (page) => {
       await page.getByTestId("assistant-work").waitFor();
+      await waitForLive(page);
       const duration = await page.locator("[data-testid=assistant-work] .animate-progress").evaluate((el) => getComputedStyle(el).animationDuration);
       return parseFloat(duration) <= 0.001 ? [] : [`reduced motion: the progress bar still animates (${duration})`];
     },
@@ -618,6 +626,7 @@ const SCENARIOS = [
     motion: true,
     verify: async (page) => {
       await page.getByTestId("assistant-work").waitFor();
+      await waitForLive(page);
       const bar = await page.locator("[data-testid=assistant-work] .animate-progress").evaluate((el) => {
         const style = getComputedStyle(el);
         return { name: style.animationName, duration: style.animationDuration, count: style.animationIterationCount };
@@ -692,6 +701,21 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, POST, DELETE",
 };
 
+// A playwright `fulfill` sends its whole body and closes the connection, which the page reads as
+// a dropped stream ("Reconnecting…"). For a stream that must stay open, the request is forwarded
+// to this tiny local server instead: it sends the events and then holds the connection.
+const heldBodies = new Map(); // URL path -> SSE body
+const heldResponses = new Set();
+const holdServer = createServer((request, response) => {
+  const body = heldBodies.get(new URL(request.url, "http://localhost").pathname) ?? "";
+  response.writeHead(200, { ...CORS, "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  response.write(body);
+  heldResponses.add(response);
+  response.on("close", () => heldResponses.delete(response));
+});
+await new Promise((resolve) => holdServer.listen(0, "127.0.0.1", resolve));
+const HOLD_ORIGIN = `http://127.0.0.1:${holdServer.address().port}`;
+
 async function shoot(browser, base, viewport, scenario) {
   const problems = [];
   const context = await browser.newContext({ viewport, reducedMotion: scenario.motion === true ? "no-preference" : "reduce" });
@@ -721,6 +745,10 @@ async function shoot(browser, base, viewport, scenario) {
       return route.fulfill({ status: 404, headers: CORS, json: { success: false, error_code: "NOT_FOUND", message: "Not found." } });
     }
     const result = handler();
+    if (result.hold === true) {
+      heldBodies.set(url.pathname, result.sse);
+      return route.continue({ url: `${HOLD_ORIGIN}${url.pathname}` });
+    }
     if (result.sse !== undefined) {
       return route.fulfill({ status: 200, headers: { ...CORS, "Content-Type": "text/event-stream" }, body: result.sse });
     }
@@ -776,6 +804,8 @@ try {
   }
 } finally {
   await browser.close();
+  for (const response of heldResponses) response.destroy();
+  await new Promise((resolve) => holdServer.close(resolve));
   await new Promise((resolve) => server.httpServer.close(resolve));
 }
 console.log(failures === 0 ? `\nAll screenshots saved to ${OUT}` : `\n${failures} page(s) had problems.`);

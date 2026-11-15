@@ -146,12 +146,28 @@ sequenceDiagram
 
 All screenshots are of the real UI, rendered with fake data.
 
-| | |
-|---|---|
-| ![Login screen with demo account cards](docs/images/login.png) | ![A customer's request in progress, with live checks](docs/images/customer-run-in-progress.png) |
-| _Login. Demo cards fill in the email only._ | _A customer follows the assistant's live checks._ |
-| ![A resolved request with a verified reply and what was found](docs/images/customer-run-completed.png) | ![The reviewer's approval queue with ready and needs-attention tabs](docs/images/reviewer-queue.png) |
-| _Done: a verified reply, and "what we found"._ | _Reviewer queue, sorted by readiness and expiry._ |
+<table>
+  <tr>
+    <td valign="top" width="50%">
+      <img src="docs/images/login.png" width="100%" alt="Login screen with demo account cards"><br>
+      <em>Login. Demo cards fill in the email only.</em>
+    </td>
+    <td valign="top" width="50%">
+      <img src="docs/images/customer-run-in-progress.png" width="100%" alt="A customer's request in progress, with live checks"><br>
+      <em>A customer follows the assistant's live checks.</em>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top" width="50%">
+      <img src="docs/images/customer-run-completed.png" width="100%" alt="A resolved request with a verified reply and what was found"><br>
+      <em>Done: a verified reply, and "what we found".</em>
+    </td>
+    <td valign="top" width="50%">
+      <img src="docs/images/reviewer-queue.png" width="100%" alt="The reviewer's approval queue with ready and needs-attention tabs"><br>
+      <em>Reviewer queue, sorted by readiness and expiry.</em>
+    </td>
+  </tr>
+</table>
 
 ![An escalated case showing why it was escalated, and the reviewer's reply, refund proposal and resolve actions](docs/images/reviewer-escalation.png)
 
