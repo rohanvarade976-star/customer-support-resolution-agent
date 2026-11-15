@@ -1893,7 +1893,7 @@ desktop. Two constraints shape every choice:
 ## ADR-021: Making the AI's work visible, without mixing it up with verified facts
 
 - **Date:** 2026-11-14
-- **Status:** Accepted (supersedes "Showing model rationales to reviewers" in ADR-019's alternatives)
+- **Status:** Accepted (supersedes "Showing model rationales to reviewers" in ADR-019's alternatives; decision 4 refined by ADR-022)
 - **Milestone:** M10
 
 ### Context
@@ -2012,3 +2012,143 @@ the system safe:
 - New design token: the `ai` colour scale (purple), used only for AI-generated content, plus a
   matching `ai` badge tone.
 - Customer event labels now name the assistant.
+
+
+---
+
+## ADR-022: Readiness computed by code, progressive disclosure, and an escalations inbox
+
+- **Date:** 2026-11-14
+- **Status:** Accepted (refines ADR-021 decision 4: the queue's risk column becomes a readiness
+  verdict; the AI analysis moves into collapsible sections)
+- **Milestone:** M10
+
+### Context
+
+After ADR-021 a reviewer saw everything at equal weight: the AI analysis, agent timings, tool
+calls and raw audit events with ids and hashes. It felt as if every case had to be read in full,
+although most cases pass every check. Escalated cases had no place a person could see them: the
+ticket said "a person will follow up", and nothing in the product let a person do so. The aim:
+
+- a normal case is decided in seconds; attention goes only where code found a problem;
+- escalations get a working inbox, without weakening the money rules (CLAUDE.md rules 1, 5, 8).
+
+### Decision
+
+1. **Readiness is a pure function of facts code already has** (`domain/readiness.py`).
+   "Ready to approve" only when all of these hold; otherwise "needs attention" with one reason
+   code per failed rule, most serious first:
+   - the approval is pending and not expired (`APPROVAL_NOT_PENDING`, `APPROVAL_EXPIRED`);
+   - the order can be read now, is still eligible now, and the rules still give the stored amount
+     (`ORDER_UNAVAILABLE`, `NOT_ELIGIBLE_NOW`, `AMOUNT_CHANGED`);
+   - no risk flags (`RISK_FLAG`, carrying the flag codes);
+   - the AI recommended a refund, its draft was accepted and passed the validator, the critic
+     approved, and code dropped no citation (`AI_DID_NOT_RECOMMEND_REFUND`,
+     `VALIDATOR_NOT_PASSED`, `CRITIC_NOT_APPROVED`, `CITATIONS_DROPPED`);
+   - the workflow proposed it: a manual proposal had no AI checks, so it is never "ready"
+     (`REVIEWER_PROPOSED`);
+   - more than 10 minutes left (`EXPIRING_SOON`, the screen's existing "urgent" cut-off).
+   No model is asked and no model text is read. The case endpoint and every queue row call the
+   same function through `services/case_readiness.assess_approval`, so they cannot disagree.
+   Readiness changes nothing: it only orders a reviewer's attention. The amount, the hash check
+   and the confirmation dialog are exactly as before.
+2. **The queue re-reads each row's order.** "Still eligible now" needs the order's current facts,
+   so `GET /approvals` loads them for every pending row (a few small queries each), plus one audit
+   query for all rows. It still reads no checkpoints. Dropped citations come from the audit
+   trail's `dropped_rules` count on both views.
+3. **Progressive disclosure on the case page.** A verdict banner at the top (green with a one-line
+   summary, or amber with the reasons as buttons); key facts (amount, order, checks passed,
+   eligible now, risk, AI action) and the complaint next to the sticky decision panel; then the AI
+   analysis, agent activity, tools used, cited policy and order facts as collapsible sections,
+   closed by default. A reason opens its section and scrolls to it. Sections use the native
+   `<details>` element: keyboard and screen-reader support from the browser, no new dependency,
+   and no injected styles under the strict CSP (ADR-020). The case response gains `readiness`,
+   `ai_action`, `risk_flags`, `proposed_by_reviewer` and `proposed_by_you`.
+4. **The reviewer's run page.** The timeline uses plain words for every event type
+   (`reviewerEventLabel`). Event codes and payload fields (ids, hashes, millisecond timings) move
+   into a collapsed "Technical details" section.
+5. **The queue** has "Ready to approve" and "Needs attention" tabs with counts (ready first,
+   unless empty), a readiness badge per row with its most serious reason, and the automation
+   summary cards as before.
+6. **The escalations inbox** (reviewers only; customers get 403 from `ReviewerDep`):
+   - `GET /reviewer/escalations`: tickets that are escalated and whose latest run escalated,
+     newest escalation first, with customer, order, age and reason codes. The codes are computed
+     by code from the audit trail (`domain/escalations.py`: the AI's own choice, drafts code
+     rejected, an LLM outage, a step's error codes, a refused proposal or refund, an expired
+     approval, a dead job, a blocked reply, risk flags; `UNKNOWN` if none was recorded);
+   - `GET /reviewer/escalations/{ticket_id}`: the same, plus the current reply and the order's
+     facts with the rules applied now;
+   - `POST .../reply`: the reviewer's message to the customer. It passes the same output
+     guardrail as every run's reply (`check_reply`). A failing reply is **refused** with 422
+     `REPLY_REJECTED` and the issue codes, not silently replaced, so the reviewer can fix it.
+     It is stored as the ticket's verified reply with `reply_author = "specialist"` and audited
+     as `ticket.specialist_replied` with ids and its length only. It is never sent to a model;
+   - `POST .../resolve`: needs a specialist reply first (409 `REPLY_REQUIRED`), so the customer
+     is never left with "a person will follow up" on a closed ticket. The note goes only into the
+     `ticket.resolved` audit payload; `note` is not in `REVIEWER_PAYLOAD_KEYS`, so it is never
+     streamed or shown;
+   - a manual refund proposal uses the existing `POST /tickets/{id}/refund-proposals`, with the
+     same eligibility, approval and hash rules. The ticket then leaves the inbox and the approval
+     appears in the queue as "needs attention: proposed by a reviewer";
+   - reply and resolve lock the ticket row, and need it to be still escalated (409
+     `TICKET_NOT_ESCALATED`).
+   The sidebar's "Escalations" item shows the count, re-read on navigation and every minute.
+7. **Separation of duties for manual proposals.** `action_proposals.proposed_by` records the
+   reviewer who created a manual proposal (NULL for the workflow's). That reviewer cannot approve
+   or reject it: 409 `SELF_DECISION_FORBIDDEN`, an `approval.decision_refused` audit event (ids
+   and the code), and the approval stays pending for a colleague. The check runs inside the
+   locked decision transaction, after the "already decided" checks. The UI hides the buttons and
+   says why ("Another reviewer must decide"); the queue marks the row "Proposed by you".
+8. **The customer's side.** `TicketResponse` gains `reply` and `reply_from`; `RunStatusEvent`
+   gains `reply_from`. An escalated ticket shows "A specialist is looking at this" and what to
+   expect; the specialist's reply appears on the run page and the ticket list, labelled as from
+   the support team. The run has finished, so its stream has ended (ADR-019's rules are
+   unchanged): while the ticket is escalated the run page checks `/events` every 30 seconds.
+   New customer-visible event types: `ticket.specialist_replied`, `ticket.resolved`.
+9. **Migration `b7d4e1a9c3f6`**: `tickets.reply_author` (`assistant` | `specialist`, default
+   `assistant`, CHECK constraint) and `action_proposals.proposed_by` (nullable FK to
+   `staff_users`). Existing rows need no conversion.
+
+### Alternatives considered
+
+- **A readiness score from a model ("how safe is this case?"):** a model would decide what a
+  reviewer looks at. Fixed rules are explainable, testable and cannot be talked into "ready".
+- **Readiness computed in the browser:** the browser has the same data, but two copies of the
+  rules drift. One backend function serves both views.
+- **Replacing a guardrail-failing specialist reply with a fixed message** (what runs do): hides
+  the problem from the person who could fix it. Refusing with the codes is clearer.
+- **Keeping the stream open while a ticket is escalated:** a connection per customer for hours or
+  days. A 30-second poll on a finished run costs less and needs no change to ADR-019.
+- **Resolving without a reply:** a closed ticket whose last message promises a follow-up breaks
+  "state only verified outcomes" (rule 8).
+- **A UI kit's accordion:** a dependency and, for some, injected styles. `<details>` does the job.
+
+### Limits
+
+- **The queue does one order read per pending approval.** Fine for a demo-sized queue; a large
+  one would want a batched facts query.
+- **Readiness is advice, not a gate.** A reviewer can still approve a "needs attention" case
+  after reading it; the confirmation dialog states the amount either way.
+- **Separation of duties covers manual proposals only.** Workflow proposals have no human
+  proposer. Two reviewer accounts held by one person defeat it; that is an identity problem.
+- **A specialist reply reaches an open run page within 30 seconds**, not instantly.
+- **The escalation reasons depend on the audit trail.** Runs recorded before an event type
+  existed show fewer reasons, or `UNKNOWN`.
+- **The inbox lists at most 200 tickets** per response.
+- **The bundle crossed Vite's 500 KB warning** (about 525 KB, 160 KB gzipped). Code-splitting the
+  reviewer pages is the obvious fix when it matters.
+
+### Consequences
+
+- New routes: `GET /reviewer/escalations`, `GET /reviewer/escalations/{ticket_id}`,
+  `POST /reviewer/escalations/{ticket_id}/reply`, `POST /reviewer/escalations/{ticket_id}/resolve`.
+- New fields: `PendingApproval.readiness` and `proposed_by_you`; on the case response,
+  `readiness`, `ai_action`, `risk_flags`, `proposed_by_reviewer` and `proposed_by_you`;
+  `TicketResponse.reply` and `reply_from`; `RunStatusEvent.reply_from`.
+- New error codes: `SELF_DECISION_FORBIDDEN`, `REPLY_REJECTED`, `REPLY_REQUIRED`,
+  `TICKET_NOT_ESCALATED`, `ESCALATION_NOT_FOUND`.
+- New audit events: `approval.decision_refused`, `ticket.specialist_replied`, `ticket.resolved`.
+- `QUEUE_EVENT_TYPES` gains `policy.completed` and `reply.guardrail_replaced`.
+- New frontend pieces: `ui/collapsible.tsx`, `case/` (verdict banner, key facts, order facts),
+  `lib/readiness.ts`, the escalations pages and `useEscalationCount`. The screenshots cover the
+  new pages at 375 px and 1440 px.

@@ -42,6 +42,8 @@ def _customer_view(record: TicketRecord, latest_run: WorkflowRun | None = None) 
         created_at=ticket.created_at,
         latest_run_id=None if latest_run is None else latest_run.id,
         latest_run_status=None if latest_run is None else latest_run.status,
+        reply=ticket.customer_reply,
+        reply_from=ticket.reply_author,
     )
 
 

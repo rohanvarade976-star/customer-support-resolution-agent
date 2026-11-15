@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from support_agent.api.routes import (
     approvals,
     auth,
+    escalations,
     health,
     memory,
     metrics,
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(run_events.router)
     app.include_router(run_analysis.router)
     app.include_router(approvals.router)
+    app.include_router(escalations.router)
 
     # Added last, so it is the outermost layer: a browser's preflight (OPTIONS) is answered
     # here. Only the listed origins (ADR-019). No cookies are used (the token travels in the

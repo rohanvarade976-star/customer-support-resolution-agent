@@ -24,6 +24,8 @@ const EVENT_LABELS: Record<string, string> = {
   "refund.failed": "Your refund could not be completed",
   "refund.reconciling": "We couldn't confirm the refund outcome yet; we're checking",
   "ticket.updated": "Your ticket has been updated",
+  "ticket.specialist_replied": "A support specialist replied",
+  "ticket.resolved": "A support specialist closed your request",
   "run.completed": "Resolved",
   "run.escalated": "Passed to a support specialist",
   "run.failed": "Something went wrong; a person will follow up",
@@ -31,6 +33,53 @@ const EVENT_LABELS: Record<string, string> = {
 
 export function eventLabel(type: string): string {
   return EVENT_LABELS[type] ?? type;
+}
+
+// The reviewer's timeline: what happened, in plain words, for every audit event type. The raw
+// code and payload stay one click away under "Technical details" (ADR-022).
+const REVIEWER_EVENT_LABELS: Record<string, string> = {
+  "run.created": "Run started",
+  "run.classified": "Classifier labelled the request",
+  "supervisor.decided": "Supervisor chose the specialists",
+  "investigation.started": "Investigator started",
+  "tool.called": "A record was looked up",
+  "investigation.completed": "Investigator finished",
+  "policy.completed": "Policy agent finished",
+  "resolution.completed": "Resolution agent finished its draft",
+  "validation.passed": "Draft passed the validator",
+  "validation.failed": "Draft failed the validator",
+  "injection_suspected": "Instruction-like customer text detected",
+  "reply.guardrail_replaced": "Output guardrail replaced a reply",
+  "clarification.requested": "Customer asked for more detail",
+  "proposal.created": "Refund proposal stored",
+  "proposal.refused": "Refund proposal refused by the rules",
+  "approval.requested": "Approval requested",
+  "approval.approved": "Refund approved by a reviewer",
+  "approval.rejected": "Refund rejected by a reviewer",
+  "approval.expired": "Approval expired",
+  "approval.decision_refused": "Decision refused: the proposer cannot decide",
+  "refund.reserved": "Refund amount reserved",
+  "refund.submitted": "Payment service accepted the refund",
+  "refund.processing": "Refund processing",
+  "refund.succeeded": "Refund succeeded",
+  "refund.failed": "Refund failed",
+  "refund.reconciling": "Refund outcome unknown; reconciling",
+  "refund.resent": "Refund re-sent during reconciliation",
+  "refund.reconciled": "Refund outcome reconciled",
+  "refund.reconciliation_stopped": "Reconciliation gave up",
+  "ticket.updated": "Ticket status changed",
+  "ticket.specialist_replied": "A reviewer replied to the customer",
+  "ticket.resolved": "A reviewer resolved the ticket",
+  "run.paused": "Run paused",
+  "run.resumed": "Run resumed",
+  "run.usage": "Usage recorded",
+  "run.completed": "Run completed",
+  "run.escalated": "Run escalated to a person",
+  "run.failed": "Run failed",
+};
+
+export function reviewerEventLabel(type: string): string {
+  return REVIEWER_EVENT_LABELS[type] ?? humanize(type);
 }
 
 const RUN_STATUS_LABELS: Record<string, string> = {

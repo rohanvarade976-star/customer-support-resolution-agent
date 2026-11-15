@@ -3,24 +3,30 @@
 // API returned; the amounts are the stored proposals', formatted for display.
 //
 // Above the table, what the system did on its own this week; on each row, the AI's recommended
-// action (labelled as AI) and the risk flags computed by code (ADR-021). Both are codes from
-// the audit trail: the AI's rationale is shown on the case page only.
+// action (labelled as AI) from the audit trail (ADR-021). The AI's rationale is on the case page.
+//
+// Two tabs split the queue by the readiness verdict computed by code (ADR-022): "Ready to
+// approve" and "Needs attention", each with its count. Each row shows its verdict and, when it
+// needs attention, the most serious reason. The tabs only filter the rows the API returned.
 
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
   ChevronRight,
+  CircleCheckBig,
   Clock,
   Inbox,
   RefreshCw,
-  ShieldExclamationPoint,
   Sparkles,
+  TriangleAlert,
+  UserRound,
+  type LucideIcon,
 } from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import type { ApprovalList, PendingApproval } from "../api/types";
+import type { ApprovalList, PendingApproval, ReadinessStatus } from "../api/types";
 import { AutomationSummaryCards } from "../components/ai/AutomationSummaryCards";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState, ErrorState, ListSkeleton } from "../components/states";
@@ -30,9 +36,10 @@ import { Card } from "../components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { useApiGet } from "../hooks/useApiGet";
 import { useNow } from "../hooks/useNow";
-import { actionLabel, riskText } from "../lib/analysis";
+import { actionLabel } from "../lib/analysis";
 import { formatDateTime } from "../lib/labels";
 import { formatMoney } from "../lib/money";
+import { readinessText } from "../lib/readiness";
 import { timeUntil, type Urgency } from "../lib/time";
 import { cn } from "../lib/utils";
 
@@ -52,6 +59,11 @@ const COMPARE: Record<SortKey, (a: PendingApproval, b: PendingApproval) => numbe
   amount: (a, b) => a.amount_minor - b.amount_minor, // integers: an exact comparison
   expiry: (a, b) => a.expires_at.localeCompare(b.expires_at),
 };
+
+const TABS: { key: ReadinessStatus; label: string; icon: LucideIcon; iconClass: string }[] = [
+  { key: "ready_to_approve", label: "Ready to approve", icon: CircleCheckBig, iconClass: "text-success-600" },
+  { key: "needs_attention", label: "Needs attention", icon: TriangleAlert, iconClass: "text-warning-600" },
+];
 
 function ExpiryBadge({ expiresAt, now }: { expiresAt: string; now: number }) {
   const left = timeUntil(expiresAt, now);
@@ -73,17 +85,37 @@ function AiActionBadge({ action }: { action: string | null }) {
   );
 }
 
-// Risk flags are computed by code; the badge lists them in its title and screen-reader text.
-function RiskIndicator({ flags }: { flags: string[] }) {
-  if (flags.length === 0) {
-    return <span className="text-xs text-gray-500">No flags</span>;
+// The verdict computed by code, and for a case that needs attention its most serious reason.
+function ReadinessBadge({ item }: { item: PendingApproval }) {
+  if (item.readiness.status === "ready_to_approve") {
+    return (
+      <Badge tone="success" data-testid="readiness">
+        <CircleCheckBig aria-hidden="true" />
+        Ready
+      </Badge>
+    );
   }
-  const titles = flags.map((code) => riskText(code).title);
+  const reasons = item.readiness.reasons.map((reason) => readinessText(reason).text);
+  const more = reasons.length - 1;
   return (
-    <Badge tone="warning" title={titles.join(" · ")} data-testid="risk-indicator">
-      <ShieldExclamationPoint aria-hidden="true" />
-      {flags.length === 1 ? (titles[0] ?? "1 flag") : `${String(flags.length)} risk flags`}
-      {flags.length > 1 && <span className="sr-only">: {titles.join(", ")}</span>}
+    <span className="flex min-w-0 flex-col items-start gap-1" data-testid="readiness">
+      <Badge tone="warning" title={reasons.join(" · ")}>
+        <TriangleAlert aria-hidden="true" />
+        Needs attention
+      </Badge>
+      <span className="line-clamp-2 text-xs text-gray-600">
+        {reasons[0]}
+        {more > 0 && <span className="text-gray-500"> · +{more} more</span>}
+      </span>
+    </span>
+  );
+}
+
+function YoursBadge() {
+  return (
+    <Badge tone="neutral" title="You proposed this refund, so another reviewer must decide it">
+      <UserRound aria-hidden="true" />
+      Proposed by you
     </Badge>
   );
 }
@@ -124,13 +156,21 @@ export function ApprovalQueuePage() {
   const navigate = useNavigate();
   const now = useNow(30_000);
   const [sort, setSort] = useState<{ key: SortKey; direction: Direction }>({ key: "expiry", direction: "asc" });
+  const [chosenTab, setChosenTab] = useState<ReadinessStatus | null>(null);
 
-  const items = data?.items ?? [];
+  const all = data?.items ?? [];
+  const counts: Record<ReadinessStatus, number> = {
+    ready_to_approve: all.filter((item) => item.readiness.status === "ready_to_approve").length,
+    needs_attention: all.filter((item) => item.readiness.status === "needs_attention").length,
+  };
+  // Until the reviewer picks a tab: the quick decisions first, unless there are none.
+  const tab: ReadinessStatus = chosenTab ?? (counts.ready_to_approve > 0 ? "ready_to_approve" : "needs_attention");
+  const items = all.filter((item) => item.readiness.status === tab);
   const sorted = [...items].sort((a, b) => {
     const result = COMPARE[sort.key](a, b);
     return sort.direction === "asc" ? result : -result;
   });
-  const urgent = items.filter((item) => {
+  const urgent = all.filter((item) => {
     const urgency = timeUntil(item.expires_at, now).urgency;
     return urgency === "urgent" || urgency === "expired";
   }).length;
@@ -162,7 +202,7 @@ export function ApprovalQueuePage() {
         <ErrorState message={error} onRetry={reload} />
       ) : loading ? (
         <ListSkeleton rows={4} />
-      ) : items.length === 0 ? (
+      ) : all.length === 0 ? (
         <Card>
           <EmptyState
             icon={Inbox}
@@ -178,97 +218,132 @@ export function ApprovalQueuePage() {
         </Card>
       ) : (
         <Card>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-gray-100 px-5 py-3 text-sm text-gray-600">
-            <span>
-              <span className="font-semibold text-gray-900 tabular-nums">{items.length}</span> waiting
-            </span>
+          <div className="flex flex-col gap-3 border-b border-gray-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+            <div role="tablist" aria-label="Readiness" className="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 sm:flex">
+              {TABS.map(({ key, label, icon: Icon, iconClass }) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === key}
+                  onClick={() => {
+                    setChosenTab(key);
+                  }}
+                  className={cn(
+                    "flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium whitespace-nowrap transition-colors sm:px-3",
+                    tab === key ? "bg-white text-gray-900 shadow-xs" : "text-gray-600 hover:text-gray-900",
+                  )}
+                >
+                  <Icon className={cn("hidden size-4 sm:block", iconClass)} aria-hidden="true" />
+                  {label}
+                  <span className="text-xs text-gray-500 tabular-nums">{counts[key]}</span>
+                </button>
+              ))}
+            </div>
             {urgent > 0 && (
-              <span className="flex items-center gap-1.5 text-danger-700">
+              <span className="flex items-center gap-1.5 text-sm text-danger-700">
                 <span className="size-1.5 rounded-full bg-danger-500" aria-hidden="true" />
                 {urgent} expiring within 10 minutes
               </span>
             )}
           </div>
 
-          {/* Phones: a list of cards. */}
-          <ul className="divide-y divide-gray-100 md:hidden">
-            {sorted.map((item) => (
-              <li key={item.approval_id}>
-                <Link to={`/approvals/${item.approval_id}`} className="flex items-center gap-3 px-5 py-4 hover:bg-gray-50">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate font-medium text-gray-900">{item.customer_name}</span>
-                      <span className="font-semibold text-gray-900 tabular-nums">{formatMoney(item.amount_minor, item.currency)}</span>
-                    </div>
-                    <p className="mt-0.5 truncate text-sm text-gray-600">
-                      {item.order_number} · {item.reason}
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      <ExpiryBadge expiresAt={item.expires_at} now={now} />
-                      <AiActionBadge action={item.ai_action} />
-                      {item.risk_flags.length > 0 && <RiskIndicator flags={item.risk_flags} />}
-                    </div>
-                  </div>
-                  <ChevronRight className="size-4 shrink-0 text-gray-400" aria-hidden="true" />
-                </Link>
-              </li>
-            ))}
-          </ul>
-
-          {/* Wider screens: a sortable table. */}
-          <div className="hidden md:block">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <SortHeader column="customer" label="Customer" sort={sort} onToggle={toggle} />
-                  <SortHeader column="order" label="Order" sort={sort} onToggle={toggle} />
-                  <SortHeader column="amount" label="Amount" sort={sort} onToggle={toggle} className="text-right" />
-                  <TableHead className="hidden 2xl:table-cell">Reason</TableHead>
-                  <TableHead>AI recommendation</TableHead>
-                  <TableHead>Risk</TableHead>
-                  <SortHeader column="expiry" label="Expires in" sort={sort} onToggle={toggle} />
-                  <TableHead>
-                    <span className="sr-only">Open</span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+          {items.length === 0 ? (
+            <EmptyState
+              icon={tab === "ready_to_approve" ? CircleCheckBig : Inbox}
+              title={tab === "ready_to_approve" ? "Nothing is ready to approve" : "Nothing needs attention"}
+              description={
+                tab === "ready_to_approve"
+                  ? "Every waiting case has something to check first. See Needs attention."
+                  : "Every waiting case passed all checks."
+              }
+            />
+          ) : (
+            <>
+              {/* Phones: a list of cards. */}
+              <ul className="divide-y divide-gray-100 md:hidden">
                 {sorted.map((item) => (
-                  <TableRow
-                    key={item.approval_id}
-                    className="group cursor-pointer hover:bg-gray-50"
-                    onClick={() => void navigate(`/approvals/${item.approval_id}`)}
-                  >
-                    <TableCell className="whitespace-nowrap">
-                      {/* The link makes each row reachable by keyboard; a click anywhere on the row does the same. */}
-                      <Link to={`/approvals/${item.approval_id}`} className="rounded font-medium text-gray-900">
-                        {item.customer_name}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap text-gray-700">{item.order_number}</TableCell>
-                    <TableCell className="text-right font-semibold text-gray-900 tabular-nums">
-                      {formatMoney(item.amount_minor, item.currency)}
-                    </TableCell>
-                    <TableCell className="hidden max-w-60 truncate text-gray-600 2xl:table-cell" title={item.reason}>
-                      {item.reason}
-                    </TableCell>
-                    <TableCell>
-                      <AiActionBadge action={item.ai_action} />
-                    </TableCell>
-                    <TableCell>
-                      <RiskIndicator flags={item.risk_flags} />
-                    </TableCell>
-                    <TableCell>
-                      <ExpiryBadge expiresAt={item.expires_at} now={now} />
-                    </TableCell>
-                    <TableCell className="w-10 text-right">
-                      <ChevronRight className="inline size-4 text-gray-400 transition-transform group-hover:translate-x-0.5 group-hover:text-gray-600" aria-hidden="true" />
-                    </TableCell>
-                  </TableRow>
+                  <li key={item.approval_id}>
+                    <Link to={`/approvals/${item.approval_id}`} className="flex items-center gap-3 px-4 py-4 hover:bg-gray-50">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="truncate font-medium text-gray-900">{item.customer_name}</span>
+                          <span className="font-semibold text-gray-900 tabular-nums">{formatMoney(item.amount_minor, item.currency)}</span>
+                        </div>
+                        <p className="mt-0.5 truncate text-sm text-gray-600">{item.order_number}</p>
+                        <div className="mt-2">
+                          <ReadinessBadge item={item} />
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <ExpiryBadge expiresAt={item.expires_at} now={now} />
+                          <AiActionBadge action={item.ai_action} />
+                          {item.proposed_by_you && <YoursBadge />}
+                        </div>
+                      </div>
+                      <ChevronRight className="size-4 shrink-0 text-gray-400" aria-hidden="true" />
+                    </Link>
+                  </li>
                 ))}
-              </TableBody>
-            </Table>
-          </div>
+              </ul>
+
+              {/* Wider screens: a sortable table. */}
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <SortHeader column="customer" label="Customer" sort={sort} onToggle={toggle} />
+                      <SortHeader column="order" label="Order" sort={sort} onToggle={toggle} />
+                      <SortHeader column="amount" label="Amount" sort={sort} onToggle={toggle} className="text-right" />
+                      <TableHead>Readiness</TableHead>
+                      <TableHead className="hidden xl:table-cell">AI recommendation</TableHead>
+                      <SortHeader column="expiry" label="Expires in" sort={sort} onToggle={toggle} />
+                      <TableHead>
+                        <span className="sr-only">Open</span>
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sorted.map((item) => (
+                      <TableRow
+                        key={item.approval_id}
+                        className="group cursor-pointer hover:bg-gray-50"
+                        onClick={() => void navigate(`/approvals/${item.approval_id}`)}
+                      >
+                        <TableCell className="whitespace-nowrap">
+                          {/* The link makes each row reachable by keyboard; a click anywhere on the row does the same. */}
+                          <Link to={`/approvals/${item.approval_id}`} className="rounded font-medium text-gray-900">
+                            {item.customer_name}
+                          </Link>
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-gray-700">{item.order_number}</TableCell>
+                        <TableCell className="text-right font-semibold text-gray-900 tabular-nums">
+                          {formatMoney(item.amount_minor, item.currency)}
+                        </TableCell>
+                        <TableCell className="max-w-72">
+                          <div className="flex flex-col items-start gap-1">
+                            <ReadinessBadge item={item} />
+                            {item.proposed_by_you && <YoursBadge />}
+                          </div>
+                        </TableCell>
+                        <TableCell className="hidden xl:table-cell">
+                          <AiActionBadge action={item.ai_action} />
+                        </TableCell>
+                        <TableCell>
+                          <ExpiryBadge expiresAt={item.expires_at} now={now} />
+                        </TableCell>
+                        <TableCell className="w-10 text-right">
+                          <ChevronRight
+                            className="inline size-4 text-gray-400 transition-transform group-hover:translate-x-0.5 group-hover:text-gray-600"
+                            aria-hidden="true"
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )}
         </Card>
       )}
     </>

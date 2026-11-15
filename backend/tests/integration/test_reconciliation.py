@@ -54,7 +54,6 @@ from support_agent.worker import queue
 Headers = dict[str, str]
 AuthHeaders = Callable[[str], Awaitable[Headers]]
 
-REVIEWER = "anita@example.com"
 PRIYA_AMOUNT = 249900  # ORD-1001, paise
 
 
@@ -166,22 +165,23 @@ class Case:
     ticket_id: UUID
 
 
-async def approve_priya(client: httpx.AsyncClient, auth_headers: AuthHeaders) -> Case:
-    """Open Priya's ticket, propose the refund, approve it (executed in the request)."""
+async def approve_priya(
+    client: httpx.AsyncClient, auth_headers: AuthHeaders, proposer: Headers, decider: Headers
+) -> Case:
+    """Open Priya's ticket; one reviewer proposes the refund, another approves it."""
     response = await client.post(
         "/tickets",
         json={"message": "I would like a refund", "order_number": "ORD-1001"},
         headers=await auth_headers("priya@example.com"),
     )
     assert response.status_code == 201
-    reviewer = await auth_headers(REVIEWER)
     proposed = await client.post(
-        f"/tickets/{response.json()['id']}/refund-proposals", headers=reviewer
+        f"/tickets/{response.json()['id']}/refund-proposals", headers=proposer
     )
     assert proposed.status_code == 201
     body = proposed.json()
     decided = await client.post(
-        f"/approvals/{body['approval_id']}/decision", json={"decision": "approve"}, headers=reviewer
+        f"/approvals/{body['approval_id']}/decision", json={"decision": "approve"}, headers=decider
     )
     assert decided.status_code == 200
     return Case(UUID(body["proposal_id"]), UUID(body["run_id"]), UUID(body["ticket_id"]))
@@ -245,10 +245,12 @@ async def test_submitted_refund_is_reconciled_and_ticket_resolved_only_on_succes
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     assert (await operation_for(session, case)).status == RefundOperationStatus.SUBMITTED
 
     # Still submitted at the provider: nothing new, the ticket is not resolved.
@@ -280,11 +282,13 @@ async def test_refund_the_provider_declines_later_fails_and_escalates(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     await payments.set_fault(mode="decline", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     clock.advance(10)
 
     await reconcile(session, payments, settings, clock)
@@ -304,11 +308,13 @@ async def test_dropped_response_is_found_by_key_and_adopted(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     await payments.set_fault(mode="drop_response", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     operation = await operation_for(session, case)
     assert operation.status == RefundOperationStatus.PENDING_RECONCILIATION
     assert operation.provider_reference is None
@@ -329,13 +335,15 @@ async def test_missing_refund_is_resent_once_with_the_same_key(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     # A 500 before the provider stored anything: the outcome is unknown to us, but there
     # is in fact no refund.
     await payments.set_fault(mode="error", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     assert (await operation_for(session, case)).status == (
         RefundOperationStatus.PENDING_RECONCILIATION
     )
@@ -364,11 +372,13 @@ async def test_resend_whose_reply_is_lost_is_found_and_never_sent_again(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     await payments.set_fault(mode="error", count=1)  # no refund at the provider
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
 
     # Lookup -> 404 -> re-send, which the provider stores but whose reply is lost.
     async with payments.client(LosePostReplies(payments.app)) as lossy:
@@ -391,6 +401,8 @@ async def test_stale_reserved_refund_is_recovered(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
     monkeypatch: pytest.MonkeyPatch,
@@ -401,7 +413,7 @@ async def test_stale_reserved_refund_is_recovered(
 
     monkeypatch.setattr(refund_execution, "send_refund", crash)
     with pytest.raises(RuntimeError):
-        await approve_priya(client, auth_headers)
+        await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     monkeypatch.undo()
 
     reserved = select(RefundOperation).where(
@@ -441,6 +453,8 @@ async def test_repeated_provider_errors_back_off_then_escalate_without_moving_mo
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     clock: MutableClock,
 ) -> None:
     settings = get_settings().model_copy(
@@ -451,7 +465,7 @@ async def test_repeated_provider_errors_back_off_then_escalate_without_moving_mo
         }
     )
     await payments.set_fault(mode="drop_response", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     await payments.set_fault(mode="error", count=100)  # every lookup now fails
 
     assert await reconcile(session, payments, settings, clock) == 1
@@ -498,11 +512,13 @@ async def test_escalated_run_keeps_its_person_but_money_records_settle(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     await payments.set_fault(mode="drop_response", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     # Its job died meanwhile (ADR-012): the case is already with a person.
     await escalate_after_dead_job(
         session,
@@ -538,11 +554,13 @@ async def test_only_the_current_holder_can_settle_an_operation(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     await payments.set_fault(mode="drop_response", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     clock.advance(10)
     lease = settings.reconcile_lease_seconds
 
@@ -577,11 +595,13 @@ async def test_stale_reconciler_cannot_resend_after_takeover(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     await payments.set_fault(mode="error", count=1)  # no refund at the provider
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     lease = settings.reconcile_lease_seconds
 
     claim_a = await refunds.claim_for_reconciliation(session, now=clock.now, lease_seconds=lease)
@@ -610,11 +630,13 @@ async def test_late_executor_cannot_overwrite_a_settled_operation(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     settings: Settings,
     clock: MutableClock,
 ) -> None:
     await payments.set_fault(mode="drop_response", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     clock.advance(10)
     await reconcile(session, payments, settings, clock)
     operation = await operation_for(session, case)
@@ -640,11 +662,13 @@ async def test_worker_sweep_reconciles_refunds(
     session: AsyncSession,
     payments: Payments,
     auth_headers: AuthHeaders,
+    proposer_headers: Headers,
+    decider_headers: Headers,
     clock: MutableClock,
     drain_jobs: Callable[[], Awaitable[int]],
 ) -> None:
     await payments.set_fault(mode="drop_response", count=1)
-    case = await approve_priya(client, auth_headers)
+    case = await approve_priya(client, auth_headers, proposer_headers, decider_headers)
     clock.advance(10)
 
     scheduled = await queue.schedule_sweep(

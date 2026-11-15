@@ -20,6 +20,7 @@ from support_agent.domain.enums import (
     ReturnStatus,
     TicketStatus,
 )
+from support_agent.domain.readiness import Readiness, ReadinessCode, ReadinessResult
 
 MAX_NOTE_LENGTH = 1000
 
@@ -35,6 +36,25 @@ class ProposalResponse(BaseModel):
     payload_hash: str
     status: ProposalStatus
     expires_at: datetime
+
+
+class ReadinessReasonView(BaseModel):
+    code: ReadinessCode
+    codes: list[str] = []  # e.g. the risk flag codes or the eligibility reason codes
+
+
+class ReadinessView(BaseModel):
+    """Computed by code (domain/readiness.py, ADR-022). Reasons are ordered most serious first."""
+
+    status: Readiness
+    reasons: list[ReadinessReasonView]
+
+    @classmethod
+    def of(cls, result: ReadinessResult) -> "ReadinessView":
+        return cls(
+            status=result.status,
+            reasons=[ReadinessReasonView(code=r.code, codes=r.codes) for r in result.reasons],
+        )
 
 
 class PendingApproval(BaseModel):
@@ -54,6 +74,9 @@ class PendingApproval(BaseModel):
     # recommended action and the risk flags. The rationale is shown on the case page only.
     ai_action: str | None = None
     risk_flags: list[str] = []
+    readiness: ReadinessView
+    # The caller proposed this refund by hand, so another reviewer must decide it (ADR-022).
+    proposed_by_you: bool = False
 
 
 class ApprovalListResponse(BaseModel):
@@ -155,3 +178,11 @@ class ApprovalCaseResponse(BaseModel):
     governing_policy: GoverningPolicy | None
     citations: list[PolicyCitation]
     refund: RefundSummary | None  # None until a refund operation exists
+    readiness: ReadinessView
+    # From the run's audit trail, as on the queue row (ADR-021): codes only, no model text.
+    ai_action: str | None
+    risk_flags: list[str]
+    # A manual proposal: a reviewer created it, so no AI checks were run on it.
+    proposed_by_reviewer: bool
+    # The caller is that reviewer, so they may not decide it (separation of duties, ADR-022).
+    proposed_by_you: bool

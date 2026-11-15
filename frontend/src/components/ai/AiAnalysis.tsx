@@ -1,4 +1,5 @@
-// Reviewers: the AI analysis of one run (GET /runs/{id}/analysis, ADR-021).
+// Reviewers: the AI analysis of one run (GET /runs/{id}/analysis, ADR-021), as collapsible
+// sections that start closed (ADR-022).
 //
 // Two kinds of content, kept visibly apart:
 // - the AI recommendation: model-written, unverified. Purple "ai" tokens, a Sparkles icon and
@@ -32,44 +33,93 @@ import {
 import { humanize } from "../../lib/labels";
 import { Badge } from "../ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { CollapsibleSection } from "../ui/collapsible";
 import { Skeleton } from "../ui/skeleton";
 import { ErrorState } from "../states";
 
-export function AiAnalysisSection({ runId }: { runId: string }) {
+export type AnalysisSection = "ai-analysis" | "agent-activity" | "tools-used";
+
+interface AiAnalysisSectionsProps {
+  runId: string;
+  isOpen: (section: AnalysisSection) => boolean;
+  onOpenChange: (section: AnalysisSection, open: boolean) => void;
+}
+
+// Three collapsible sections from one fetch: the AI's recommendation with the code-computed
+// checks, the agents' activity, and the tools they used. Collapsed unless the page opens them
+// (ADR-022): a normal case needs none of this to be decided.
+export function AiAnalysisSections({ runId, isOpen, onOpenChange }: AiAnalysisSectionsProps) {
   const { data, error, loading, reload } = useApiGet<RunAnalysis>(`/runs/${runId}/analysis`);
+  if (error !== null) return <ErrorState message={error} onRetry={reload} />;
+  if (loading || data === null) {
+    return (
+      <Card className="space-y-3 p-5" aria-busy="true" aria-label="Loading the AI analysis">
+        <Skeleton className="h-5 w-40" />
+        <Skeleton className="h-3 w-full" />
+      </Card>
+    );
+  }
+  const failedTools = data.tools.filter((tool) => tool.outcome !== "ok").length;
+  const flags = data.risk_flags.length;
   return (
-    <section aria-labelledby="ai-analysis-heading" className="space-y-4">
-      <div>
-        <h2 id="ai-analysis-heading" className="flex items-center gap-2 text-lg font-semibold tracking-tight text-gray-900">
-          <Bot className="size-5 text-gray-500" aria-hidden="true" />
-          AI analysis
-        </h2>
-        <p className="mt-1 text-sm text-gray-600">
-          What the agents did on this case. Everything below the recommendation is computed by code from the audit trail.
-        </p>
-      </div>
-      {error !== null ? (
-        <ErrorState message={error} onRetry={reload} />
-      ) : loading || data === null ? (
-        <Card className="space-y-3 p-5" aria-busy="true" aria-label="Loading the AI analysis">
-          <Skeleton className="h-5 w-40" />
-          <Skeleton className="h-3 w-full" />
-          <Skeleton className="h-3 w-4/5" />
-        </Card>
-      ) : (
-        <>
+    <>
+      <CollapsibleSection
+        id="ai-analysis"
+        title="AI analysis"
+        icon={Sparkles}
+        summary={
+          <>
+            Recommends {actionLabel(data.recommendation.action).toLowerCase()} ·{" "}
+            {flags === 0 ? "no risk flags" : `${String(flags)} risk flag${flags === 1 ? "" : "s"}`} · critic{" "}
+            {criticWord(data.quality.critic_verdict)}
+          </>
+        }
+        open={isOpen("ai-analysis")}
+        onOpenChange={(open) => {
+          onOpenChange("ai-analysis", open);
+        }}
+      >
+        <div className="space-y-4">
           <AiRecommendationCard analysis={data} />
           <RiskFlagsCard flags={data.risk_flags} />
-          <AgentActivityCard agents={data.agents} />
           <div className="grid gap-4 md:grid-cols-2">
             <QualityChecksCard quality={data.quality} />
             <CostCard cost={data.cost} />
           </div>
-          <ToolsUsedCard tools={data.tools} />
-        </>
-      )}
-    </section>
+        </div>
+      </CollapsibleSection>
+      <CollapsibleSection
+        id="agent-activity"
+        title="Agent activity"
+        icon={Bot}
+        summary={`${String(data.agents.length)} agent steps · ${formatDuration(data.cost.active_ms)} active`}
+        badge={<ComputedLabel />}
+        open={isOpen("agent-activity")}
+        onOpenChange={(open) => {
+          onOpenChange("agent-activity", open);
+        }}
+      >
+        <AgentActivityList agents={data.agents} />
+      </CollapsibleSection>
+      <CollapsibleSection
+        id="tools-used"
+        title="Tools used"
+        icon={Wrench}
+        summary={`${String(data.tools.length)} lookups · ${failedTools === 0 ? "all succeeded" : `${String(failedTools)} failed`}`}
+        badge={<ComputedLabel />}
+        open={isOpen("tools-used")}
+        onOpenChange={(open) => {
+          onOpenChange("tools-used", open);
+        }}
+      >
+        <ToolsList tools={data.tools} />
+      </CollapsibleSection>
+    </>
   );
+}
+
+function criticWord(verdict: string | null): string {
+  return verdict === null ? "did not run" : verdict === "approve" ? "approved" : "asked for changes";
 }
 
 // The one piece of model text. Plain text only: React escapes it, nothing renders HTML.
@@ -177,42 +227,28 @@ export function RiskFlagsCard({ flags }: { flags: RiskFlag[] }) {
   );
 }
 
-export function AgentActivityCard({ agents }: { agents: AgentActivity[] }) {
+export function AgentActivityList({ agents }: { agents: AgentActivity[] }) {
+  if (agents.length === 0) return <p className="text-sm text-gray-500">No agent has finished yet.</p>;
   return (
-    <Card>
-      <CardHeader>
-        <div>
-          <CardTitle>Agent activity</CardTitle>
-          <CardDescription>Each agent that ran, in order, with what it produced.</CardDescription>
-        </div>
-        <ComputedLabel />
-      </CardHeader>
-      <CardContent>
-        {agents.length === 0 ? (
-          <p className="text-sm text-gray-500">No agent has finished yet.</p>
-        ) : (
-          <ol aria-label="Agent activity">
-            {agents.map((row, i) => (
-              <li key={`${row.agent}-${String(i)}`} className="relative flex gap-3 pb-5 last:pb-0">
-                {i < agents.length - 1 && (
-                  <span aria-hidden="true" className="absolute top-7 -bottom-0.5 left-[13px] w-px bg-gray-200" />
-                )}
-                <span className="grid size-7 shrink-0 place-items-center rounded-full bg-gray-100 text-gray-600" aria-hidden="true">
-                  <Bot className="size-3.5" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="flex flex-wrap items-baseline justify-between gap-x-3">
-                    <span className="text-sm font-medium text-gray-900">{agentLabel(row.agent)}</span>
-                    <span className="text-xs text-gray-500 tabular-nums">{formatDuration(row.duration_ms)}</span>
-                  </p>
-                  <p className="mt-0.5 text-sm text-gray-600">{agentSummary(row)}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
-        )}
-      </CardContent>
-    </Card>
+    <ol aria-label="Agent activity">
+      {agents.map((row, i) => (
+        <li key={`${row.agent}-${String(i)}`} className="relative flex gap-3 pb-5 last:pb-0">
+          {i < agents.length - 1 && (
+            <span aria-hidden="true" className="absolute top-7 -bottom-0.5 left-[13px] w-px bg-gray-200" />
+          )}
+          <span className="grid size-7 shrink-0 place-items-center rounded-full bg-gray-100 text-gray-600" aria-hidden="true">
+            <Bot className="size-3.5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="flex flex-wrap items-baseline justify-between gap-x-3">
+              <span className="text-sm font-medium text-gray-900">{agentLabel(row.agent)}</span>
+              <span className="text-xs text-gray-500 tabular-nums">{formatDuration(row.duration_ms)}</span>
+            </p>
+            <p className="mt-0.5 text-sm text-gray-600">{agentSummary(row)}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -291,41 +327,30 @@ export function CostCard({ cost }: { cost: RunCost }) {
   );
 }
 
-export function ToolsUsedCard({ tools }: { tools: ToolUse[] }) {
+export function ToolsList({ tools }: { tools: ToolUse[] }) {
+  if (tools.length === 0) return <p className="text-sm text-gray-500">No tools were called.</p>;
   return (
-    <Card>
-      <CardHeader>
-        <div>
-          <CardTitle>Tools used</CardTitle>
-          <CardDescription>Every record lookup, from the audit trail. Results are not shown here.</CardDescription>
-        </div>
-        <ComputedLabel />
-      </CardHeader>
-      <CardContent>
-        {tools.length === 0 ? (
-          <p className="text-sm text-gray-500">No tools were called.</p>
-        ) : (
-          <ul className="divide-y divide-gray-100" aria-label="Tools used">
-            {tools.map((tool) => (
-              <li key={tool.call_id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5 first:pt-0 last:pb-0">
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <Wrench className="size-3.5 shrink-0 text-gray-400" aria-hidden="true" />
-                  <span className="text-sm font-medium text-gray-900">{toolLabel(tool.tool)}</span>
-                  <span className="text-xs text-gray-500">by {tool.by_code ? "code" : agentLabel(tool.agent)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {tool.latency_ms !== null && (
-                    <span className="text-xs text-gray-500 tabular-nums">{formatDuration(tool.latency_ms)}</span>
-                  )}
-                  <Badge tone={tool.outcome === "ok" ? "success" : "danger"}>
-                    {tool.outcome === "ok" ? "OK" : humanize(tool.outcome)}
-                  </Badge>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </CardContent>
-    </Card>
+    <>
+      <p className="mb-3 text-xs text-gray-500">Every record lookup, from the audit trail. Results are not shown here.</p>
+      <ul className="divide-y divide-gray-100" aria-label="Tools used">
+        {tools.map((tool) => (
+          <li key={tool.call_id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5 first:pt-0 last:pb-0">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <Wrench className="size-3.5 shrink-0 text-gray-400" aria-hidden="true" />
+              <span className="text-sm font-medium text-gray-900">{toolLabel(tool.tool)}</span>
+              <span className="text-xs text-gray-500">by {tool.by_code ? "code" : agentLabel(tool.agent)}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {tool.latency_ms !== null && (
+                <span className="text-xs text-gray-500 tabular-nums">{formatDuration(tool.latency_ms)}</span>
+              )}
+              <Badge tone={tool.outcome === "ok" ? "success" : "danger"}>
+                {tool.outcome === "ok" ? "OK" : humanize(tool.outcome)}
+              </Badge>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }

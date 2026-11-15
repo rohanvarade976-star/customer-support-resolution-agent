@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import type { ApprovalCase } from "../api/types";
+import type { ApprovalCase, CaseFacts } from "../api/types";
 import { ANALYSIS, RATIONALE } from "../test/fixtures";
 import { ANITA, fakeApi, json, logInAs, renderApp } from "../test/helpers";
 
@@ -41,6 +41,40 @@ const PENDING: ApprovalCase = {
     },
   ],
   refund: null,
+  readiness: { status: "ready_to_approve", reasons: [] },
+  ai_action: "refund",
+  risk_flags: [],
+  proposed_by_reviewer: false,
+  proposed_by_you: false,
+};
+
+const FACTS: CaseFacts = {
+  order_status: "delivered",
+  delivered_at: "2026-11-01T10:00:00Z",
+  return_status: "received",
+  return_requested_at: "2026-11-03T10:00:00Z",
+  return_received_at: "2026-11-06T10:00:00Z",
+  inspection_status: "failed",
+  paid_amount_minor: 249900,
+  succeeded_refunds_minor: 0,
+  in_progress_refunds_minor: 0,
+  refundable_balance_minor: 0,
+  refund_window_days: 30,
+  eligible_now: false,
+  reasons_now: ["INSPECTION_FAILED"],
+};
+
+const NEEDS_ATTENTION: ApprovalCase = {
+  ...PENDING,
+  facts: FACTS,
+  risk_flags: ["INJECTION_SUSPECTED"],
+  readiness: {
+    status: "needs_attention",
+    reasons: [
+      { code: "NOT_ELIGIBLE_NOW", codes: ["INSPECTION_FAILED"] },
+      { code: "RISK_FLAG", codes: ["INJECTION_SUSPECTED"] },
+    ],
+  },
 };
 
 const APPROVED: ApprovalCase = {
@@ -172,7 +206,7 @@ describe("ApprovalCasePage", () => {
     expect(rationale.textContent).toBe(RATIONALE);
     expect(rationale.querySelector("b")).toBeNull();
     // Verified cards keep their label; the AI card never carries it.
-    expect(screen.getAllByText("Verified from records").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Verified from records").length).toBeGreaterThanOrEqual(1);
     expect(within(card).queryByText("Verified from records")).not.toBeInTheDocument();
 
     // Computed by code: risk flags, agents in order, quality checks and tools.
@@ -196,6 +230,102 @@ describe("ApprovalCasePage", () => {
     expect(within(quality).getByText("3 / 1")).toBeInTheDocument(); // citations verified / dropped
     const tools = screen.getByRole("list", { name: "Tools used" });
     expect(within(tools).getByText("Shipment tracking").closest("li")).toHaveTextContent("by code");
+  });
+
+  it("shows a green verdict with key facts, and keeps every detail section collapsed", async () => {
+    fakeApi({ ...ANALYSIS_ROUTE, "GET /approvals/a-1": () => json(PENDING) });
+    logInAs(ANITA);
+    renderApp("/approvals/a-1");
+
+    const verdict = await screen.findByTestId("verdict");
+    expect(verdict).toHaveTextContent("Ready to approve");
+    expect(verdict).toHaveTextContent("All 2 eligibility checks passed and still hold");
+    expect(verdict).toHaveTextContent("critic approved");
+    const facts = screen.getByTestId("key-facts");
+    expect(facts).toHaveTextContent("₹2,499.00");
+    expect(facts).toHaveTextContent("ORD-1001");
+    expect(facts).toHaveTextContent("No flags");
+    expect(within(facts).getByText("Return received")).toBeInTheDocument();
+
+    await screen.findByTestId("section-ai-analysis");
+    for (const id of ["ai-analysis", "agent-activity", "tools-used", "citations", "order-facts"]) {
+      expect(screen.getByTestId(`section-${id}`)).not.toHaveAttribute("open");
+    }
+    // A click opens one.
+    await userEvent.setup().click(screen.getByText("Policy cited"));
+    expect(screen.getByTestId("section-citations")).toHaveAttribute("open");
+  });
+
+  it("lists needs-attention reasons in plain words and opens the sections they point to", async () => {
+    fakeApi({ ...ANALYSIS_ROUTE, "GET /approvals/a-1": () => json(NEEDS_ATTENTION) });
+    logInAs(ANITA);
+    renderApp("/approvals/a-1");
+
+    const verdict = await screen.findByTestId("verdict");
+    expect(verdict).toHaveTextContent("Needs attention");
+    expect(within(verdict).getByRole("button", { name: "No longer eligible: Inspection failed" })).toBeInTheDocument();
+    expect(within(verdict).getByRole("button", { name: "Risk flag: Instruction-like text" })).toBeInTheDocument();
+
+    // The evidence for each reason is open; unrelated sections stay closed.
+    await screen.findByTestId("section-ai-analysis");
+    expect(screen.getByTestId("section-order-facts")).toHaveAttribute("open");
+    expect(screen.getByTestId("section-ai-analysis")).toHaveAttribute("open");
+    expect(screen.getByTestId("section-tools-used")).not.toHaveAttribute("open");
+    expect(screen.getByTestId("key-facts")).toHaveTextContent("Instruction-like text");
+
+    // A reason links to its section: closing it, then clicking the reason, opens it again.
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Order facts"));
+    expect(screen.getByTestId("section-order-facts")).not.toHaveAttribute("open");
+    await user.click(within(verdict).getByRole("button", { name: /No longer eligible/ }));
+    expect(screen.getByTestId("section-order-facts")).toHaveAttribute("open");
+  });
+
+  it("does not let the reviewer who proposed a refund decide it", async () => {
+    const calls = fakeApi({
+      ...ANALYSIS_ROUTE,
+      "GET /approvals/a-1": () =>
+        json({
+          ...PENDING,
+          proposed_by_reviewer: true,
+          proposed_by_you: true,
+          readiness: { status: "needs_attention", reasons: [{ code: "REVIEWER_PROPOSED", codes: [] }] },
+        }),
+    });
+    logInAs(ANITA);
+    renderApp("/approvals/a-1");
+
+    const panel = await screen.findByRole("complementary", { name: "Decision" });
+    expect(within(panel).getByText("Another reviewer must decide")).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Approve refund" })).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("key-facts")).toHaveTextContent("Proposed by a reviewer");
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("shows the API's separation-of-duties refusal", async () => {
+    fakeApi({
+      ...ANALYSIS_ROUTE,
+      "GET /approvals/a-1": () => json(PENDING),
+      "POST /approvals/a-1/decision": () =>
+        json(
+          {
+            success: false,
+            error_code: "SELF_DECISION_FORBIDDEN",
+            message: "You proposed this refund, so another reviewer must approve or reject it.",
+          },
+          409,
+        ),
+    });
+    logInAs(ANITA);
+    renderApp("/approvals/a-1");
+    await screen.findByTestId("amount");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Approve refund" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Approve ₹2,499.00" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("another reviewer must approve or reject it");
   });
 
   it("says when code rejected the AI's draft, with no rationale", async () => {

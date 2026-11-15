@@ -76,6 +76,8 @@ const TICKETS = {
       created_at: at(-25 * MIN),
       latest_run_id: "run-1",
       latest_run_status: "awaiting_customer",
+      reply: null,
+      reply_from: "assistant",
     },
     {
       id: "t-2",
@@ -86,6 +88,8 @@ const TICKETS = {
       created_at: at(-3 * 60 * MIN),
       latest_run_id: "run-3",
       latest_run_status: "awaiting_approval",
+      reply: null,
+      reply_from: "assistant",
     },
     {
       id: "t-3",
@@ -96,6 +100,8 @@ const TICKETS = {
       created_at: at(-12 * 1440 * MIN),
       latest_run_id: "run-2",
       latest_run_status: "completed",
+      reply: null,
+      reply_from: "assistant",
     },
     {
       id: "t-4",
@@ -104,8 +110,22 @@ const TICKETS = {
       status: "escalated",
       summary: "Can I change the delivery address on an order that has already shipped?",
       created_at: at(-2 * 1440 * MIN),
-      latest_run_id: "run-4",
+      latest_run_id: "run-6",
       latest_run_status: "escalated",
+      reply: "Hi Priya, I've checked with the courier. The address can't be changed once an order has shipped, but you can collect it from the nearest pickup point. I've asked them to hold it there for you.",
+      reply_from: "specialist",
+    },
+    {
+      id: "t-5",
+      order_number: "ORD-1042",
+      category: "damaged_item",
+      status: "escalated",
+      summary: "The blender jar arrived cracked. The photos are attached to my earlier email.",
+      created_at: at(-90 * MIN),
+      latest_run_id: "run-7",
+      latest_run_status: "escalated",
+      reply: "Your case needs a closer look from a member of our support team. We are passing it to them and they will follow up with you.",
+      reply_from: "assistant",
     },
   ],
 };
@@ -126,6 +146,7 @@ const RUN_AWAITING = {
     ticket_status: "awaiting_customer",
     reply:
       "Thanks for reaching out. I can see order ORD-1002 was shipped 3 days ago. To check with the courier, could you confirm the PIN code it is being delivered to?",
+    reply_from: "assistant",
     finished: false,
     checked: ["order", "shipment"],
   },
@@ -144,6 +165,7 @@ const RUN_COMPLETED = {
     status: "completed",
     ticket_status: "resolved",
     reply: "Your refund of ₹899.00 for order ORD-1003 is complete. It should appear in your account within 5–7 business days.",
+    reply_from: "assistant",
     finished: true,
     checked: ["order", "return", "payment", "policy"],
   },
@@ -162,11 +184,45 @@ const RUN_COMPLETED = {
   ],
 };
 
+const RUN_WITH_SPECIALIST = {
+  run: {
+    run_id: "run-7",
+    ticket_id: "t-5",
+    status: "escalated",
+    ticket_status: "escalated",
+    reply: "Your case needs a closer look from a member of our support team. We are passing it to them and they will follow up with you.",
+    reply_from: "assistant",
+    finished: true,
+    checked: ["order", "shipment"],
+  },
+  steps: [
+    step("g1", "run.created", 90),
+    step("g2", "run.classified", 89),
+    step("g3", "investigation.started", 89),
+    step("g4", "run.escalated", 88),
+  ],
+};
+
+const RUN_SPECIALIST_REPLIED = {
+  run: {
+    ...RUN_WITH_SPECIALIST.run,
+    run_id: "run-6",
+    ticket_id: "t-4",
+    reply: TICKETS.items[3].reply,
+    reply_from: "specialist",
+  },
+  steps: [...RUN_WITH_SPECIALIST.steps, step("g5", "ticket.specialist_replied", 20)],
+};
+
+const ready = { status: "ready_to_approve", reasons: [] };
+
 const APPROVALS = {
   items: [
-    { approval_id: "a-1", proposal_id: "p-1", ticket_id: "t-2", order_number: "ORD-1001", customer_name: "Priya Sharma", amount_minor: 249900, currency: "INR", reason: "Return received and inspection passed; no refund issued yet", reasons: [], created_at: at(-50 * MIN), expires_at: at(7 * MIN), run_id: "run-3", ai_action: "refund", risk_flags: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"] },
-    { approval_id: "a-3", proposal_id: "p-3", ticket_id: "t-7", order_number: "ORD-1042", customer_name: "Arjun Mehta", amount_minor: 54900, currency: "INR", reason: "Item damaged on arrival; photos verified", reasons: [], created_at: at(-35 * MIN), expires_at: at(24 * MIN), run_id: "run-4", ai_action: "refund", risk_flags: [] },
-    { approval_id: "a-4", proposal_id: "p-4", ticket_id: "t-8", order_number: "ORD-1077", customer_name: "Meera Iyer", amount_minor: 1299900, currency: "INR", reason: "Wrong item delivered; return received", reasons: [], created_at: at(-5 * MIN), expires_at: at(55 * MIN), run_id: "run-5", ai_action: "refund", risk_flags: ["LOW_CLASSIFIER_CONFIDENCE"] },
+    { approval_id: "a-1", proposal_id: "p-1", ticket_id: "t-2", order_number: "ORD-1001", customer_name: "Priya Sharma", amount_minor: 249900, currency: "INR", reason: "Return received and inspection passed; no refund issued yet", reasons: [], created_at: at(-50 * MIN), expires_at: at(7 * MIN), run_id: "run-3", ai_action: "refund", risk_flags: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"], proposed_by_you: false, readiness: { status: "needs_attention", reasons: [{ code: "RISK_FLAG", codes: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"] }, { code: "CITATIONS_DROPPED", codes: ["1"] }, { code: "EXPIRING_SOON", codes: [] }] } },
+    { approval_id: "a-3", proposal_id: "p-3", ticket_id: "t-7", order_number: "ORD-1042", customer_name: "Arjun Mehta", amount_minor: 54900, currency: "INR", reason: "Item damaged on arrival; photos verified", reasons: [], created_at: at(-35 * MIN), expires_at: at(24 * MIN), run_id: "run-4", ai_action: "refund", risk_flags: [], proposed_by_you: false, readiness: ready },
+    { approval_id: "a-5", proposal_id: "p-5", ticket_id: "t-10", order_number: "ORD-1093", customer_name: "Kavya Nair", amount_minor: 189900, currency: "INR", reason: "Return received and inspection passed", reasons: [], created_at: at(-20 * MIN), expires_at: at(40 * MIN), run_id: "run-8", ai_action: "refund", risk_flags: [], proposed_by_you: false, readiness: ready },
+    { approval_id: "a-6", proposal_id: "p-6", ticket_id: "t-9", order_number: "ORD-1050", customer_name: "Rahul Verma", amount_minor: 79900, currency: "INR", reason: "Return received and inspection passed", reasons: [], created_at: at(-3 * MIN), expires_at: at(57 * MIN), run_id: "run-10", ai_action: "escalate", risk_flags: [], proposed_by_you: true, readiness: { status: "needs_attention", reasons: [{ code: "REVIEWER_PROPOSED", codes: [] }] } },
+    { approval_id: "a-4", proposal_id: "p-4", ticket_id: "t-8", order_number: "ORD-1077", customer_name: "Meera Iyer", amount_minor: 1299900, currency: "INR", reason: "Wrong item delivered; return received", reasons: [], created_at: at(-5 * MIN), expires_at: at(55 * MIN), run_id: "run-5", ai_action: "refund", risk_flags: ["LOW_CLASSIFIER_CONFIDENCE"], proposed_by_you: false, readiness: { status: "needs_attention", reasons: [{ code: "RISK_FLAG", codes: ["LOW_CLASSIFIER_CONFIDENCE"] }] } },
   ],
 };
 
@@ -212,12 +268,35 @@ const CASE_PENDING = {
     { citation: "refund_policy_v2:section_2", policy_title: "Refund Policy", version: "v2", section_title: "Return window", text: "Items can be returned within 30 days of delivery, unused and in their original packaging." },
   ],
   refund: null,
+  readiness: APPROVALS.items[0].readiness,
+  ai_action: "refund",
+  risk_flags: ["INJECTION_SUSPECTED", "PROVIDER_FALLBACK"],
+  proposed_by_reviewer: false,
+  proposed_by_you: false,
+};
+
+// A normal case: every check passed, nothing flagged. Decided in seconds.
+const CASE_READY = {
+  ...CASE_PENDING,
+  approval_id: "a-3",
+  proposal_id: "p-3",
+  run_id: "run-4",
+  ticket_id: "t-7",
+  customer_name: "Arjun Mehta",
+  expires_at: at(24 * MIN),
+  complaint: "The blender jar arrived with a crack down the side. I sent it back the same day.",
+  proposal: { ...CASE_PENDING.proposal, order_number: "ORD-1042", amount_minor: 54900, reason: "Item damaged on arrival; return received and inspected" },
+  facts: { ...CASE_PENDING.facts, paid_amount_minor: 54900, refundable_balance_minor: 54900 },
+  citations: CASE_PENDING.citations.slice(0, 1),
+  readiness: ready,
+  risk_flags: [],
 };
 
 const CASE_APPROVED = {
   ...CASE_PENDING,
   approval_id: "a-2",
   approval_status: "approved",
+  readiness: { status: "needs_attention", reasons: [{ code: "APPROVAL_NOT_PENDING", codes: ["approved"] }] },
   decided_at: at(-10 * MIN),
   refund: { refund_id: "r-1", status: "succeeded", amount_minor: 249900, provider_reference: "pay_ref_7f3a91c2" },
   facts: { ...CASE_PENDING.facts, succeeded_refunds_minor: 249900, refundable_balance_minor: 0, eligible_now: false, reasons_now: ["ALREADY_REFUNDED"] },
@@ -272,6 +351,72 @@ const ANALYSIS = {
   cost: { llm_calls: 9, input_tokens: 14250, output_tokens: 1830, active_ms: 9840, fallback_calls: 1 },
 };
 
+const CLEAN_ANALYSIS = {
+  ...ANALYSIS,
+  run_id: "run-4",
+  risk_flags: [],
+  quality: { ...ANALYSIS.quality, citations_dropped: 0 },
+  cost: { ...ANALYSIS.cost, fallback_calls: 0 },
+  agents: ANALYSIS.agents.map((row) => (row.agent === "policy_agent" ? { ...row, details: { ...row.details, dropped_rules: 0 } } : row)),
+};
+
+// The escalations inbox (ADR-022).
+const ESCALATIONS = {
+  items: [
+    {
+      ticket_id: "t-5",
+      run_id: "run-7",
+      customer_name: "Priya Sharma",
+      order_number: "ORD-1042",
+      category: "damaged_item",
+      complaint: "The blender jar arrived cracked. The photos are attached to my earlier email.",
+      escalated_at: at(-88 * MIN),
+      reasons: [{ code: "AI_CHOSE_TO_ESCALATE", codes: [] }, { code: "RISK_FLAG", codes: ["DELIVERY_DATE_CONFLICT"] }],
+      specialist_replied: false,
+    },
+    {
+      ticket_id: "t-11",
+      run_id: "run-11",
+      customer_name: "Rohit Kapoor",
+      order_number: "ORD-1120",
+      category: "refund",
+      complaint: "I was charged twice for the same order. Please refund the duplicate payment.",
+      escalated_at: at(-5 * 60 * MIN),
+      reasons: [{ code: "PROPOSAL_REFUSED", codes: ["NOT_ELIGIBLE"] }],
+      specialist_replied: false,
+    },
+    {
+      ticket_id: "t-12",
+      run_id: "run-12",
+      customer_name: "Sneha Rao",
+      order_number: null,
+      category: null,
+      complaint: "Can I change the delivery address on an order that has already shipped?",
+      escalated_at: at(-26 * 60 * MIN),
+      reasons: [{ code: "AI_UNAVAILABLE", codes: [] }],
+      specialist_replied: true,
+    },
+  ],
+};
+
+const ESCALATION_CASE = {
+  ...ESCALATIONS.items[0],
+  ticket_status: "escalated",
+  reply: RUN_WITH_SPECIALIST.run.reply,
+  reply_from: "assistant",
+  facts: { ...CASE_PENDING.facts, paid_amount_minor: 54900, refundable_balance_minor: 54900 },
+  currency: "INR",
+  governing_policy: CASE_PENDING.governing_policy,
+};
+
+const ESCALATED_ANALYSIS = {
+  ...ANALYSIS,
+  run_id: "run-7",
+  status: "escalated",
+  recommendation: { ...ANALYSIS.recommendation, action: "escalate", rationale: "The carrier and the order record disagree on the delivery date, so a person should confirm the facts before anything is promised." },
+  risk_flags: [{ code: "DELIVERY_DATE_CONFLICT", codes: ["EVIDENCE_CONFLICT"], count: 1 }],
+};
+
 const SUMMARY = {
   days: 7,
   since: at(-7 * 1440 * MIN),
@@ -304,6 +449,15 @@ const BASE_ROUTES = {
   "GET /runs/run-3/analysis": () => ({ status: 200, body: ANALYSIS }),
   "GET /runs/run-2/analysis": () => ({ status: 200, body: { ...ANALYSIS, run_id: "run-2", status: "completed", risk_flags: [] } }),
   "GET /reviewer/automation-summary": () => SUMMARY,
+  "GET /approvals/a-3": () => CASE_READY,
+  "GET /runs/run-4/analysis": () => ({ status: 200, body: CLEAN_ANALYSIS }),
+  "GET /runs/run-6/stream": () => ({ sse: sse(RUN_SPECIALIST_REPLIED) }),
+  "GET /runs/run-6/events": () => RUN_SPECIALIST_REPLIED,
+  "GET /runs/run-7/stream": () => ({ sse: sse(RUN_WITH_SPECIALIST) }),
+  "GET /runs/run-7/events": () => RUN_WITH_SPECIALIST,
+  "GET /runs/run-7/analysis": () => ({ status: 200, body: ESCALATED_ANALYSIS }),
+  "GET /reviewer/escalations": () => ESCALATIONS,
+  "GET /reviewer/escalations/t-5": () => ESCALATION_CASE,
 };
 
 // ------------------------------------------------------------------ pages
@@ -347,10 +501,38 @@ const SCENARIOS = [
   { name: "memory-confirm", path: "/memory", user: PRIYA, action: click("Delete all") },
   { name: "reviewer-queue", path: "/approvals", user: ANITA },
   { name: "reviewer-queue-empty", path: "/approvals", user: ANITA, routes: { "GET /approvals": () => ({ items: [] }) } },
+  { name: "reviewer-queue-attention", path: "/approvals", user: ANITA, action: async (page) => {
+      await page.getByRole("tab", { name: /Needs attention/ }).click();
+    },
+  },
+  { name: "reviewer-case-ready", path: "/approvals/a-3", user: ANITA },
   { name: "reviewer-case", path: "/approvals/a-1", user: ANITA },
-  { name: "reviewer-case-confirm", path: "/approvals/a-1", user: ANITA, action: click("Approve refund") },
+  { name: "reviewer-case-confirm", path: "/approvals/a-3", user: ANITA, action: click("Approve refund") },
   { name: "reviewer-case-approved", path: "/approvals/a-2", user: ANITA },
   { name: "reviewer-run", path: "/runs/run-2", user: ANITA },
+  {
+    name: "reviewer-run-technical",
+    path: "/runs/run-2",
+    user: ANITA,
+    action: async (page) => {
+      await page.getByText("Technical details", { exact: true }).click();
+      await page.evaluate(() => window.scrollTo(0, 0)); // a full-page capture starts at the top
+    },
+  },
+  { name: "escalations", path: "/escalations", user: ANITA },
+  { name: "escalations-empty", path: "/escalations", user: ANITA, routes: { "GET /reviewer/escalations": () => ({ items: [] }) } },
+  { name: "escalation-case", path: "/escalations/t-5", user: ANITA },
+  {
+    name: "escalation-reply-confirm",
+    path: "/escalations/t-5",
+    user: ANITA,
+    action: async (page) => {
+      await page.getByLabel("Reply to the customer").fill("Hi Priya, I've checked the courier's records and your return. A replacement jar is on its way and should reach you within 3 days.");
+      await click("Send reply")(page);
+    },
+  },
+  { name: "run-with-specialist", path: "/runs/run-7", user: PRIYA },
+  { name: "run-specialist-replied", path: "/runs/run-6", user: PRIYA },
   { name: "user-menu", path: "/home", user: PRIYA, action: click("Account menu: Priya Sharma") },
   { name: "mobile-menu", path: "/tickets", user: PRIYA, only: "mobile", action: click("Open menu") },
 ];

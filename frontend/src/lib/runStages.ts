@@ -26,7 +26,7 @@ const STATUS_STAGE: Record<RunStatus, { index: number; tone: StageTone; summary:
   awaiting_approval: { index: 2, tone: "default", summary: "A member of our team is reviewing the proposed refund." },
   executing: { index: 2, tone: "default", summary: "Your refund is being processed with the payment service." },
   completed: { index: 3, tone: "success", summary: "This request is resolved." },
-  escalated: { index: 3, tone: "warning", summary: "A support specialist will take it from here." },
+  escalated: { index: 3, tone: "warning", summary: "A support specialist has your case and will reply here." },
   failed: { index: 3, tone: "danger", summary: "Something went wrong on our side. A person will follow up." },
 };
 

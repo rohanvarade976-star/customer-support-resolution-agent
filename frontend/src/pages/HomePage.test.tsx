@@ -14,6 +14,8 @@ function ticket(id: string, status: Ticket["status"], runStatus: Ticket["latest_
     created_at: "2026-11-10T12:00:00Z",
     latest_run_id: runStatus === null ? null : `run-${id}`,
     latest_run_status: runStatus,
+    reply: null,
+    reply_from: "assistant",
   };
 }
 

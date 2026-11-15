@@ -1,6 +1,6 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RunSnapshot, RunStatusEvent, RunStepEvent } from "../api/types";
 import { ANALYSIS, RATIONALE } from "../test/fixtures";
@@ -12,6 +12,7 @@ const STATUS: RunStatusEvent = {
   status: "awaiting_customer",
   ticket_status: "awaiting_customer",
   reply: "Which order is this about?",
+  reply_from: "assistant",
   finished: false,
   checked: ["order", "shipment", "policy"],
 };
@@ -23,6 +24,10 @@ const STEP: RunStepEvent = {
   at: "2026-11-10T12:00:00Z",
   details: {},
 };
+
+afterEach(() => {
+  vi.useRealTimers(); // in case a test with fake timers failed before restoring them
+});
 
 describe("RunPage", () => {
   it("shows the streamed status, the verified reply and the timeline, and sends a reply", async () => {
@@ -94,6 +99,72 @@ describe("RunPage", () => {
     expect(screen.queryByLabelText("Your reply")).not.toBeInTheDocument();
     expect(await screen.findByTestId("ai-rationale")).toHaveTextContent(RATIONALE);
     expect(screen.queryByTestId("what-we-checked")).not.toBeInTheDocument();
+    // The analysis sections start collapsed.
+    expect(screen.getByTestId("section-ai-analysis")).not.toHaveAttribute("open");
+  });
+
+  it("shows reviewers a readable timeline and keeps raw payloads under collapsed technical details", async () => {
+    const step: RunStepEvent = {
+      id: "e-2",
+      type: "proposal.created",
+      actor: "system",
+      at: "2026-11-10T12:00:00Z",
+      details: { payload_hash: "deadbeefcafe", duration_ms: 812 },
+    };
+    fakeApi({
+      "GET /runs/run-1/stream": () => sseResponse([sseFrame("status", STATUS), sseFrame("step", step)], true),
+      "GET /runs/run-1/analysis": () => json(ANALYSIS),
+    });
+    logInAs(ANITA);
+    renderApp("/runs/run-1");
+
+    const activity = await screen.findByRole("list", { name: "Activity" });
+    expect(await within(activity).findByText("Refund proposal stored")).toBeInTheDocument();
+    expect(within(activity).queryByText("proposal.created")).not.toBeInTheDocument();
+    expect(within(activity).queryByText("deadbeefcafe")).not.toBeInTheDocument();
+
+    const technical = screen.getByTestId("section-technical");
+    expect(technical).not.toHaveAttribute("open");
+    expect(within(technical).getByText("deadbeefcafe")).toBeInTheDocument();
+    await userEvent.setup().click(within(technical).getByText("Technical details"));
+    expect(technical).toHaveAttribute("open");
+  });
+
+  it("tells the customer a specialist has an escalated ticket, then shows the specialist's reply", async () => {
+    const escalated: RunStatusEvent = {
+      ...STATUS,
+      status: "escalated",
+      ticket_status: "escalated",
+      reply: "Your case needs a closer look from a member of our support team.",
+      finished: true,
+    };
+    // Fake timers that still let real time pass, so the 30-second check can be skipped ahead.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let replied = false;
+    fakeApi({
+      "GET /runs/run-1/stream": () => sseResponse([sseFrame("status", escalated), sseFrame("end", { reason: "finished" })]),
+      "GET /runs/run-1/events": () =>
+        json({
+          run: replied ? { ...escalated, reply: "We checked with the warehouse.", reply_from: "specialist" } : escalated,
+          steps: [],
+        } satisfies RunSnapshot),
+    });
+    logInAs(PRIYA);
+    renderApp("/runs/run-1");
+
+    const card = await screen.findByTestId("specialist-card");
+    expect(card).toHaveTextContent("A specialist is looking at this");
+    expect(card).toHaveTextContent("Their reply will appear on this page");
+    // The assistant's escalation message is not repeated under the card.
+    expect(screen.queryByTestId("verified-reply")).not.toBeInTheDocument();
+
+    replied = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(31_000);
+    });
+    expect(await screen.findByTestId("specialist-reply")).toHaveTextContent("We checked with the warehouse.");
+    expect(screen.getByText("Reply from a support specialist")).toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it("shows customers what was checked in plain words, with no AI text or internal codes", async () => {

@@ -47,6 +47,8 @@ CUSTOMER_EVENT_TYPES: frozenset[str] = frozenset(
         "refund.failed",
         "refund.reconciling",
         "ticket.updated",
+        "ticket.specialist_replied",  # a reviewer replied to an escalated ticket (ADR-022)
+        "ticket.resolved",  # a reviewer closed an escalated ticket; the note is never sent
         "run.completed",
         "run.escalated",
         "run.failed",

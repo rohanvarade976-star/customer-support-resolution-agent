@@ -38,16 +38,22 @@ class RiskCode(StrEnum):
     PROVIDER_FALLBACK = "PROVIDER_FALLBACK"  # an answer came from the fallback LLM provider
 
 
-# The event types the review queue needs for its per-row action and risk flags.
+# The event types the review queue needs for its per-row action, risk flags and readiness
+# (ADR-021, ADR-022): everything risk_flags(), recommendation() and quality_checks() read.
 QUEUE_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "run.classified",
         "investigation.completed",
+        "policy.completed",
         "resolution.completed",
+        "reply.guardrail_replaced",
         "injection_suspected",
         "run.usage",
     }
 )
+
+# The escalations inbox's reasons (domain/escalations.py) need these as well.
+ESCALATION_EVENT_TYPES: frozenset[str] = QUEUE_EVENT_TYPES | {"run.escalated", "approval.expired"}
 
 
 @dataclass(frozen=True)
@@ -243,7 +249,7 @@ def _tools(events: list[EventView]) -> list[ToolUse]:
     ]
 
 
-def _quality(events: list[EventView]) -> QualityChecks:
+def quality_checks(events: list[EventView]) -> QualityChecks:
     resolution = _latest(events, "resolution.completed")
     investigation = _of_type(events, "investigation.completed")
     policy = _of_type(events, "policy.completed")
@@ -357,7 +363,7 @@ def analyze_run(events: list[EventView], confidence_threshold: float) -> RunAnal
         recommendation=recommendation(events),
         agents=_agents(events),
         tools=_tools(events),
-        quality=_quality(events),
+        quality=quality_checks(events),
         risk_flags=risk_flags(events, confidence_threshold),
         cost=_cost(events),
     )

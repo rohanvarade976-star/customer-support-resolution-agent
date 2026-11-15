@@ -38,13 +38,19 @@ class PendingApprovalRecord:
 
 
 async def create_proposal(
-    session: AsyncSession, *, run_id: UUID, payload: dict[str, Any], digest: str
+    session: AsyncSession,
+    *,
+    run_id: UUID,
+    payload: dict[str, Any],
+    digest: str,
+    proposed_by: UUID | None = None,  # the reviewer, for a manual proposal
 ) -> ActionProposal:
     proposal = ActionProposal(
         run_id=run_id,
         action_type=ActionType.REQUEST_REFUND_APPROVAL,
         payload=payload,
         payload_hash=digest,
+        proposed_by=proposed_by,
     )
     session.add(proposal)
     await session.flush()

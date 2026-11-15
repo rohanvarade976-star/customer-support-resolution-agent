@@ -5,6 +5,7 @@ import { LifeBuoy } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 
 import { isReviewer, useAuth } from "../auth/auth";
+import { useEscalationCount } from "../hooks/useEscalationCount";
 import { CUSTOMER_NAV, isActive, REVIEWER_NAV } from "../lib/navigation";
 import { cn } from "../lib/utils";
 
@@ -24,6 +25,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { pathname } = useLocation();
   const reviewer = isReviewer(user);
   const items = reviewer ? REVIEWER_NAV : CUSTOMER_NAV;
+  const escalations = useEscalationCount(reviewer, pathname);
 
   return (
     <div className="flex h-full flex-col">
@@ -57,7 +59,16 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                     className={cn("size-4.5 shrink-0", active ? "text-primary-600" : "text-gray-500")}
                     aria-hidden="true"
                   />
-                  {item.label}
+                  <span className="flex-1">{item.label}</span>
+                  {item.count === "escalations" && escalations !== null && escalations > 0 && (
+                    <span
+                      className="min-w-5 rounded-full bg-warning-100 px-1.5 py-0.5 text-center text-xs font-semibold text-warning-800 tabular-nums"
+                      aria-label={`${String(escalations)} open`}
+                      data-testid="escalation-count"
+                    >
+                      {escalations}
+                    </span>
+                  )}
                 </Link>
               </li>
             );

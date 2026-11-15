@@ -73,7 +73,11 @@ export interface Ticket {
   created_at: string;
   latest_run_id: string | null;
   latest_run_status: RunStatus | null;
+  reply: string | null; // the verified reply (checked by the backend's output guardrail)
+  reply_from: ReplyAuthor; // "specialist" once a reviewer has answered an escalated ticket
 }
+
+export type ReplyAuthor = "assistant" | "specialist";
 
 export interface TicketList {
   items: Ticket[];
@@ -97,6 +101,7 @@ export interface RunStatusEvent {
   status: RunStatus;
   ticket_status: TicketStatus;
   reply: string | null; // the verified reply: checked by the backend's output guardrail
+  reply_from: ReplyAuthor;
   finished: boolean;
   // Kinds of records the run checked, as fixed codes: "order", "return", "payment",
   // "shipment", "policy". Never tool names, results or model text (ADR-021).
@@ -150,6 +155,22 @@ export interface PendingApproval {
   run_id: string;
   ai_action: string | null; // the AI's recommended action code, from the audit trail
   risk_flags: string[]; // risk flag codes computed by code (ADR-021)
+  readiness: ReadinessView; // computed by code (ADR-022)
+  proposed_by_you: boolean; // you proposed it by hand: another reviewer must decide
+}
+
+// ---------------------------------------------------------------- readiness (ADR-022)
+
+export type ReadinessStatus = "ready_to_approve" | "needs_attention";
+
+export interface ReadinessReason {
+  code: string; // e.g. "RISK_FLAG", "NOT_ELIGIBLE_NOW" (domain/readiness.py)
+  codes: string[]; // detail codes, e.g. the risk flag or eligibility reason codes
+}
+
+export interface ReadinessView {
+  status: ReadinessStatus;
+  reasons: ReadinessReason[]; // most serious first
 }
 
 export interface ApprovalList {
@@ -240,6 +261,62 @@ export interface ApprovalCase {
   governing_policy: GoverningPolicy | null;
   citations: PolicyCitation[];
   refund: RefundSummary | null;
+  readiness: ReadinessView;
+  ai_action: string | null; // the AI's recommended action code (audit trail)
+  risk_flags: string[]; // risk flag codes computed by code
+  proposed_by_reviewer: boolean; // a manual proposal: no AI checks ran on it
+  proposed_by_you: boolean; // separation of duties: you may not decide it
+}
+
+// ---------------------------------------------------------------- escalations (ADR-022)
+
+export interface EscalationReason {
+  code: string; // e.g. "AI_CHOSE_TO_ESCALATE" (domain/escalations.py)
+  codes: string[];
+}
+
+export interface EscalationItem {
+  ticket_id: string;
+  run_id: string;
+  customer_name: string;
+  order_number: string | null;
+  category: string | null;
+  complaint: string; // the customer's own words: shown as plain text
+  escalated_at: string;
+  reasons: EscalationReason[];
+  specialist_replied: boolean;
+}
+
+export interface EscalationList {
+  items: EscalationItem[];
+}
+
+export interface EscalationCase extends EscalationItem {
+  ticket_status: TicketStatus;
+  reply: string | null;
+  reply_from: ReplyAuthor;
+  facts: CaseFacts | null;
+  currency: string | null;
+  governing_policy: GoverningPolicy | null;
+}
+
+export interface EscalationActionResponse {
+  ticket_id: string;
+  ticket_status: TicketStatus;
+  reply_from: ReplyAuthor;
+}
+
+export interface ProposalResponse {
+  proposal_id: string;
+  approval_id: string;
+  run_id: string;
+  ticket_id: string;
+  order_number: string;
+  amount_minor: number;
+  currency: string;
+  payload_hash: string;
+  status: string;
+  expires_at: string;
 }
 
 // ---------------------------------------------------------------- AI analysis (ADR-021)

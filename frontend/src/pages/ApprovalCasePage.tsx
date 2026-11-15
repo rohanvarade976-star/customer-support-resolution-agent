@@ -1,23 +1,29 @@
-// Reviewers: one approval's case (GET /approvals/{id}). Left: the complaint, the order's facts,
-// the checks passed and the policy text cited. Right: a sticky decision panel with the stored
-// amount, a note, approve or reject (each confirmed in a dialog that states the amount), and
-// then the refund's status.
+// Reviewers: one approval's case (GET /approvals/{id}), built for a quick, safe decision
+// (ADR-022):
 //
-// The page computes nothing: the amount is the stored proposal's, the facts and eligibility
-// come from the backend's rules, and the policy text is our own stored section text.
+// 1. A verdict banner computed by code: green "Ready to approve", or amber "Needs attention"
+//    with the reasons, each opening the section that holds the evidence.
+// 2. Key facts (amount, order, checks, eligibility now, risk, AI action) and the customer's
+//    complaint, next to a sticky decision panel, so a normal case needs no scrolling.
+// 3. Everything else in collapsible sections, closed by default: the AI analysis, agent
+//    activity, tools used, the cited policy text and the order's facts. A section that a
+//    needs-attention reason points to opens by itself.
 //
-// Below the evidence, the AI analysis (ADR-021): what the agents did, and the AI's own
-// recommendation, labelled as AI-generated and unverified. Verified cards carry a "Verified
-// from records" label; AI content uses its own colour, so the two never look alike.
+// The page computes nothing: the verdict, amount, facts and eligibility come from the API.
+// Approve and reject are confirmed in a dialog that states the stored amount. A reviewer who
+// proposed this refund by hand cannot decide it (separation of duties): the panel says so.
 
-import { BadgeCheck, Check, Clock, ExternalLink, FileText, Quote, ShieldCheck, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Check, Clock, ExternalLink, FileText, Package, Quote, ShieldCheck, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { describeError } from "../api/client";
-import type { ApprovalCase, CaseFacts, DecisionResponse } from "../api/types";
+import type { ApprovalCase, DecisionResponse } from "../api/types";
 import { useAuth } from "../auth/auth";
-import { AiAnalysisSection } from "../components/ai/AiAnalysis";
+import { AiAnalysisSections } from "../components/ai/AiAnalysis";
+import { KeyFacts } from "../components/case/KeyFacts";
+import { EligibleBadge, OrderFactsBody, VerifiedLabel } from "../components/case/OrderFacts";
+import { VerdictBanner } from "../components/case/VerdictBanner";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PageHeader } from "../components/PageHeader";
 import { DetailSkeleton, ErrorState } from "../components/states";
@@ -25,13 +31,15 @@ import { StatusBadge } from "../components/StatusBadge";
 import { Alert } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { Card, CardContent } from "../components/ui/card";
+import { CollapsibleSection } from "../components/ui/collapsible";
 import { FieldHint, Label, Textarea } from "../components/ui/form";
 import { useToast } from "../components/ui/toast-context";
 import { useApiGet } from "../hooks/useApiGet";
 import { useNow } from "../hooks/useNow";
-import { formatDateTime, humanize } from "../lib/labels";
+import { formatDateTime } from "../lib/labels";
 import { formatMoney } from "../lib/money";
+import { sectionsFor, type CaseSection } from "../lib/readiness";
 import { timeUntil } from "../lib/time";
 import { cn } from "../lib/utils";
 
@@ -39,16 +47,6 @@ const MAX_NOTE_LENGTH = 1000; // the API's limit (schemas/approvals.py)
 const SETTLED_REFUNDS = new Set(["succeeded", "failed"]);
 
 type Decision = "approve" | "reject";
-
-// Marks a card whose content comes from our own records or rules, never from a model.
-function VerifiedLabel() {
-  return (
-    <Badge tone="primary" title="Read from our records or computed by our rules">
-      <ShieldCheck aria-hidden="true" />
-      Verified from records
-    </Badge>
-  );
-}
 
 // After an approval the worker executes the refund, and reconciliation may settle it later:
 // keep refreshing until the refund has a final status.
@@ -59,11 +57,43 @@ function awaitingRefundOutcome(data: ApprovalCase): boolean {
   );
 }
 
+// Which sections are open. They start from the verdict's reasons (once, when the case first
+// loads) and then follow the reviewer's clicks; a later refresh never closes what they opened.
+function useOpenSections(data: ApprovalCase | null) {
+  const [open, setOpen] = useState<Set<CaseSection>>(new Set());
+  const initialised = useRef(false);
+  useEffect(() => {
+    if (data === null || initialised.current) return;
+    initialised.current = true;
+    setOpen(sectionsFor(data.readiness.reasons));
+  }, [data]);
+
+  function setSection(section: CaseSection, isOpen: boolean) {
+    setOpen((current) => {
+      const next = new Set(current);
+      if (isOpen) next.add(section);
+      else next.delete(section);
+      return next;
+    });
+  }
+
+  // A verdict reason was clicked: open its section, then bring it into view.
+  function show(section: CaseSection) {
+    setSection(section, true);
+    setTimeout(() => {
+      document.getElementById(section)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
+
+  return { isOpen: (section: CaseSection) => open.has(section), setSection, show };
+}
+
 export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
   const { approvalId = "" } = useParams();
   const { api } = useAuth();
   const toast = useToast();
   const { data, error, loading, reload } = useApiGet<ApprovalCase>(`/approvals/${approvalId}`);
+  const sections = useOpenSections(data);
   const [note, setNote] = useState("");
   const [confirming, setConfirming] = useState<Decision | null>(null);
   const [result, setResult] = useState<DecisionResponse | null>(null);
@@ -111,6 +141,7 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
   }
 
   const amount = formatMoney(data.proposal.amount_minor, data.proposal.currency);
+  const droppedCitations = data.readiness.reasons.some((reason) => reason.code === "CITATIONS_DROPPED");
 
   return (
     <>
@@ -131,107 +162,33 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
         }
       />
 
-      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
-        {/* Evidence */}
-        <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>Customer&apos;s complaint</CardTitle>
-                <CardDescription>In the customer&apos;s own words. Untrusted text, shown as written.</CardDescription>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <blockquote className="flex gap-3 rounded-lg bg-gray-50 px-4 py-3.5">
-                <Quote className="mt-0.5 size-4 shrink-0 text-gray-400" aria-hidden="true" />
-                <p className="text-sm leading-relaxed whitespace-pre-line text-gray-800">{data.complaint}</p>
-              </blockquote>
-            </CardContent>
-          </Card>
+      <div className="mb-4">
+        <VerdictBanner readiness={data.readiness} checksPassed={data.proposal.checks_passed.length} onShow={sections.show} />
+      </div>
 
+      <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] lg:grid-rows-[auto_1fr] lg:gap-6">
+        <div className="space-y-4">
+          <KeyFacts data={data} />
           <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>Proposal</CardTitle>
-                <CardDescription>What the system proposed, as stored and checked by code.</CardDescription>
-              </div>
-              <VerifiedLabel />
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-sm text-gray-800">{data.proposal.reason}</p>
-              <div>
-                <h3 className="mb-2 text-xs font-medium tracking-wide text-gray-500 uppercase">Checks passed</h3>
-                {data.proposal.checks_passed.length === 0 ? (
-                  <p className="text-sm text-gray-500">None recorded.</p>
-                ) : (
-                  <ul className="flex flex-wrap gap-2">
-                    {data.proposal.checks_passed.map((check) => (
-                      <li key={check}>
-                        <Badge tone="success">
-                          <Check aria-hidden="true" />
-                          {humanize(check)}
-                        </Badge>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-              <p className="text-xs text-gray-500">
-                Proposal fingerprint <code className="font-mono break-all text-gray-600">{data.proposal.payload_hash}</code>
+            <CardContent className="p-4 sm:p-5">
+              <p className="mb-2 text-xs font-medium text-gray-500">
+                Customer&apos;s complaint <span className="font-normal">· their own words, shown as written</span>
               </p>
-            </CardContent>
-          </Card>
-
-          {data.facts !== null && <FactsCard facts={data.facts} currency={data.proposal.currency} />}
-
-          <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>Policy</CardTitle>
-                <CardDescription>
-                  {data.governing_policy === null ? (
-                    "No policy version was found for this order's date."
-                  ) : (
-                    <>
-                      In force for this order: <span className="font-medium text-gray-800">{data.governing_policy.title}</span>{" "}
-                      {data.governing_policy.version}
-                      {data.governing_policy.refund_window_days !== null &&
-                        ` · ${data.governing_policy.refund_window_days}-day return window`}
-                    </>
-                  )}
-                </CardDescription>
-              </div>
-              <VerifiedLabel />
-            </CardHeader>
-            <CardContent>
-              {data.citations.length === 0 ? (
-                <p className="text-sm text-gray-500">The run cited no policy sections.</p>
-              ) : (
-                <ul className="space-y-3">
-                  {data.citations.map((citation) => (
-                    <li key={citation.citation} className="rounded-lg border border-gray-200">
-                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 bg-gray-50/70 px-4 py-2.5">
-                        <p className="flex items-center gap-2 text-sm font-medium text-gray-900">
-                          <FileText className="size-4 text-gray-400" aria-hidden="true" />
-                          {citation.section_title}
-                        </p>
-                        <span className="text-xs text-gray-500">
-                          {citation.policy_title} {citation.version} ·{" "}
-                          <code className="font-mono">{citation.citation}</code>
-                        </span>
-                      </div>
-                      <p className="px-4 py-3 text-sm leading-relaxed whitespace-pre-line text-gray-700">{citation.text}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <blockquote className="flex gap-3">
+                <Quote className="mt-0.5 size-4 shrink-0 text-gray-400" aria-hidden="true" />
+                <p className="line-clamp-4 text-sm leading-relaxed whitespace-pre-line text-gray-800">{data.complaint}</p>
+              </blockquote>
             </CardContent>
           </Card>
         </div>
 
-        {/* Decision. On phones it comes right after the verified evidence, before the AI analysis;
-            on wide screens it spans both rows so it stays in view (sticky) beside them. */}
-        <aside aria-label="Decision" className="lg:sticky lg:top-20 lg:col-start-2 lg:row-span-2 lg:row-start-1">
+        {/* Decision. On phones it comes right after the key facts, before the sections; on wide
+            screens it spans both rows so it stays in view (sticky) beside them. */}
+        <aside
+          id="decision"
+          aria-label="Decision"
+          className="scroll-mt-20 lg:sticky lg:top-20 lg:col-start-2 lg:row-span-2 lg:row-start-1"
+        >
           <Card>
             <CardContent className="space-y-5">
               <div className="flex items-center justify-between gap-3">
@@ -256,6 +213,7 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
                   note={note}
                   onNote={setNote}
                   busy={busy}
+                  proposedByYou={data.proposed_by_you}
                   onChoose={(decision) => {
                     setActionError(null);
                     setConfirming(decision);
@@ -270,8 +228,77 @@ export function ApprovalCasePage({ refreshMs = 3000 }: { refreshMs?: number }) {
           </Card>
         </aside>
 
-        <div className="lg:col-start-1">
-          <AiAnalysisSection runId={data.run_id} />
+        <div className="space-y-3 lg:col-start-1">
+          <h2 className="pt-2 text-xs font-medium tracking-wide text-gray-500 uppercase">Details</h2>
+          <AiAnalysisSections
+            runId={data.run_id}
+            isOpen={sections.isOpen}
+            onOpenChange={sections.setSection}
+          />
+          <CollapsibleSection
+            id="citations"
+            title="Policy cited"
+            icon={FileText}
+            summary={
+              data.citations.length === 0
+                ? "No policy sections cited"
+                : `${String(data.citations.length)} section${data.citations.length === 1 ? "" : "s"} · our own stored text`
+            }
+            badge={<VerifiedLabel />}
+            open={sections.isOpen("citations")}
+            onOpenChange={(open) => {
+              sections.setSection("citations", open);
+            }}
+          >
+            {droppedCitations && (
+              <Alert tone="warning" className="mb-4">
+                Code dropped policy citations the AI gave that do not exist in our policy records. Only verified
+                sections are shown.
+              </Alert>
+            )}
+            {data.citations.length === 0 ? (
+              <p className="text-sm text-gray-500">The run cited no policy sections.</p>
+            ) : (
+              <ul className="space-y-3">
+                {data.citations.map((citation) => (
+                  <li key={citation.citation} className="rounded-lg border border-gray-200">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 bg-gray-50/70 px-4 py-2.5">
+                      <p className="text-sm font-medium text-gray-900">{citation.section_title}</p>
+                      <span className="text-xs text-gray-500">
+                        {citation.policy_title} {citation.version}
+                      </span>
+                    </div>
+                    <p className="px-4 py-3 text-sm leading-relaxed whitespace-pre-line text-gray-700">{citation.text}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CollapsibleSection>
+          <CollapsibleSection
+            id="order-facts"
+            title="Order facts"
+            icon={Package}
+            summary={data.facts === null ? "The order could not be read now" : "Read just now, rules applied now"}
+            badge={data.facts === null ? <Badge tone="danger">Unavailable</Badge> : <EligibleBadge facts={data.facts} />}
+            open={sections.isOpen("order-facts")}
+            onOpenChange={(open) => {
+              sections.setSection("order-facts", open);
+            }}
+          >
+            {data.facts === null ? (
+              <p className="text-sm text-gray-500">The order's records could not be read. Do not approve until they can.</p>
+            ) : (
+              <OrderFactsBody facts={data.facts} currency={data.proposal.currency} policy={data.governing_policy} />
+            )}
+            <div className="mt-4 space-y-1 border-t border-gray-100 pt-4 text-xs text-gray-500">
+              <p>
+                Proposal: <span className="text-gray-700">{data.proposal.reason}</span>
+              </p>
+              <p>
+                Fingerprint <code className="font-mono break-all text-gray-600">{data.proposal.payload_hash}</code>
+              </p>
+            </div>
+          </CollapsibleSection>
         </div>
       </div>
 
@@ -318,30 +345,45 @@ interface PendingDecisionProps {
   note: string;
   onNote: (note: string) => void;
   busy: boolean;
+  proposedByYou: boolean;
   onChoose: (decision: Decision) => void;
 }
 
-function PendingDecision({ expiresAt, note, onNote, busy, onChoose }: PendingDecisionProps) {
+function PendingDecision({ expiresAt, note, onNote, busy, proposedByYou, onChoose }: PendingDecisionProps) {
   const now = useNow(30_000);
   const left = timeUntil(expiresAt, now);
   const urgent = left.urgency === "urgent" || left.urgency === "expired";
+  const time = (
+    <p
+      className={cn(
+        "flex items-center gap-1.5 text-sm",
+        urgent ? "font-medium text-danger-700" : left.urgency === "soon" ? "text-warning-800" : "text-gray-600",
+      )}
+      title={formatDateTime(expiresAt)}
+    >
+      <Clock className="size-4" aria-hidden="true" />
+      {left.text}
+    </p>
+  );
+  if (proposedByYou) {
+    // Separation of duties: the API refuses this reviewer's decision (SELF_DECISION_FORBIDDEN).
+    return (
+      <>
+        {time}
+        <Alert tone="info" title="Another reviewer must decide">
+          You proposed this refund, so you cannot approve or reject it. It stays in the queue for a colleague.
+        </Alert>
+      </>
+    );
+  }
   return (
     <>
-      <p
-        className={cn(
-          "flex items-center gap-1.5 text-sm",
-          urgent ? "font-medium text-danger-700" : left.urgency === "soon" ? "text-warning-800" : "text-gray-600",
-        )}
-        title={formatDateTime(expiresAt)}
-      >
-        <Clock className="size-4" aria-hidden="true" />
-        {left.text}
-      </p>
+      {time}
       <div>
         <Label htmlFor="note">Note (optional)</Label>
         <Textarea
           id="note"
-          rows={3}
+          rows={2}
           maxLength={MAX_NOTE_LENGTH}
           placeholder="Why you decided this way"
           aria-describedby="note-hint"
@@ -414,67 +456,5 @@ function Outcome({ data, result, waiting }: { data: ApprovalCase; result: Decisi
         </p>
       )}
     </div>
-  );
-}
-
-function FactsCard({ facts, currency }: { facts: CaseFacts; currency: string }) {
-  const rows: [string, string][] = [
-    ["Order status", humanize(facts.order_status)],
-    ["Delivered", formatDateTime(facts.delivered_at)],
-    ["Return", facts.return_status === null ? "None" : humanize(facts.return_status)],
-    ["Return requested", formatDateTime(facts.return_requested_at)],
-    ["Return received", formatDateTime(facts.return_received_at)],
-    ["Inspection", facts.inspection_status === null ? "—" : humanize(facts.inspection_status)],
-    ["Paid", formatMoney(facts.paid_amount_minor, currency)],
-    ["Refunded", formatMoney(facts.succeeded_refunds_minor, currency)],
-    ["Refunds in progress", formatMoney(facts.in_progress_refunds_minor, currency)],
-    ["Refundable balance", formatMoney(facts.refundable_balance_minor, currency)],
-    ["Return window", facts.refund_window_days === null ? "No policy" : `${facts.refund_window_days} days`],
-  ];
-  return (
-    <Card>
-      <CardHeader>
-        <div>
-          <CardTitle>Order facts</CardTitle>
-          <CardDescription>Read from the order records just now, with the rules applied now.</CardDescription>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <VerifiedLabel />
-          {facts.eligible_now ? (
-            <Badge tone="success">
-              <BadgeCheck aria-hidden="true" />
-              Eligible now
-            </Badge>
-          ) : (
-            <Badge tone="danger">
-              <X aria-hidden="true" />
-              Not eligible now
-            </Badge>
-          )}
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-          {rows.map(([label, value]) => (
-            <div key={label} className="flex justify-between gap-4 border-b border-gray-100 pb-2 sm:block sm:border-0 sm:pb-0">
-              <dt className="text-xs text-gray-500">{label}</dt>
-              <dd className="text-sm font-medium text-gray-900 tabular-nums sm:mt-0.5">{value}</dd>
-            </div>
-          ))}
-        </dl>
-        {!facts.eligible_now && facts.reasons_now.length > 0 && (
-          <div>
-            <h3 className="mb-2 text-xs font-medium tracking-wide text-gray-500 uppercase">Why not, now</h3>
-            <ul className="flex flex-wrap gap-2">
-              {facts.reasons_now.map((reason) => (
-                <li key={reason}>
-                  <Badge tone="danger">{humanize(reason)}</Badge>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </CardContent>
-    </Card>
   );
 }

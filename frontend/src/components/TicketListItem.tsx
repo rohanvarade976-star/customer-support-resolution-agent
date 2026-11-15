@@ -1,7 +1,8 @@
 // One ticket in a list (home page and "My tickets"): its status, order, the customer's own
-// words, and the next thing to do: reply, view progress, or start it (again).
+// words, and the next thing to do: reply, view progress, or start it (again). An escalated
+// ticket says a specialist has it, and shows the specialist's reply once there is one (ADR-022).
 
-import { MessageSquareText, RotateCcw } from "lucide-react";
+import { Headset, MessageSquareText, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import type { RunStatus, Ticket } from "../api/types";
@@ -17,7 +18,8 @@ const FINISHED_RUNS = new Set<RunStatus>(["completed", "escalated", "failed"]);
 function canStart(ticket: Ticket): boolean {
   return (
     (ticket.latest_run_status === null || FINISHED_RUNS.has(ticket.latest_run_status)) &&
-    ticket.status !== "resolved"
+    ticket.status !== "resolved" &&
+    ticket.status !== "escalated" // a specialist has it: starting again would only add noise
   );
 }
 
@@ -48,8 +50,23 @@ export function TicketListItem({ ticket, onStart, starting = false }: TicketList
           <p className="mt-1 line-clamp-2 text-sm text-gray-700">{ticket.summary}</p>
           <p className="mt-1 text-xs text-gray-500">
             Raised {formatRelative(ticket.created_at)}
-            {runStatus !== null && !awaitingYou && ` · ${runStatusLabel(runStatus)}`}
+            {runStatus !== null && !awaitingYou && ticket.status !== "escalated" && ` · ${runStatusLabel(runStatus)}`}
           </p>
+          {ticket.status === "escalated" && ticket.reply_from !== "specialist" && (
+            <p className="mt-2 flex items-center gap-1.5 text-xs text-info-800">
+              <Headset className="size-3.5 shrink-0" aria-hidden="true" />
+              A specialist is looking at this. Their reply will appear here.
+            </p>
+          )}
+          {ticket.reply_from === "specialist" && ticket.reply !== null && (
+            <div className="mt-2 rounded-lg border border-primary-100 bg-primary-50/60 px-3 py-2" data-testid="ticket-specialist-reply">
+              <p className="flex items-center gap-1.5 text-xs font-medium text-primary-900">
+                <Headset className="size-3.5 shrink-0" aria-hidden="true" />
+                Reply from a support specialist
+              </p>
+              <p className="mt-1 line-clamp-3 text-sm whitespace-pre-line text-gray-800">{ticket.reply}</p>
+            </div>
+          )}
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">

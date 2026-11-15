@@ -9,6 +9,8 @@ import { AppShell } from "./components/AppShell";
 import { ToastProvider } from "./components/ui/toast";
 import { ApprovalCasePage } from "./pages/ApprovalCasePage";
 import { ApprovalQueuePage } from "./pages/ApprovalQueuePage";
+import { EscalationCasePage } from "./pages/EscalationCasePage";
+import { EscalationsPage } from "./pages/EscalationsPage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
 import { MemoryPage } from "./pages/MemoryPage";
@@ -50,6 +52,8 @@ export function App() {
           <Route element={<RequireRole area="reviewer" />}>
             <Route path="/approvals" element={<ApprovalQueuePage />} />
             <Route path="/approvals/:approvalId" element={<ApprovalCasePage />} />
+            <Route path="/escalations" element={<EscalationsPage />} />
+            <Route path="/escalations/:ticketId" element={<EscalationCasePage />} />
           </Route>
           <Route element={<RequireRole area="any" />}>
             <Route path="/runs/:runId" element={<RunPage />} />

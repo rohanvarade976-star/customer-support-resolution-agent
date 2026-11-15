@@ -356,6 +356,32 @@ def auth_headers(
     return headers_for
 
 
+@pytest.fixture
+def proposer_email() -> str:
+    """The reviewer who proposes a refund by hand (ADR-022: may not decide their own proposal)."""
+    return "anita@example.com"
+
+
+@pytest.fixture
+def decider_email() -> str:
+    """A different seeded reviewer: the one who approves or rejects a manual proposal."""
+    return "karan@example.com"
+
+
+@pytest.fixture
+async def proposer_headers(
+    auth_headers: Callable[[str], Awaitable[dict[str, str]]], proposer_email: str
+) -> dict[str, str]:
+    return await auth_headers(proposer_email)
+
+
+@pytest.fixture
+async def decider_headers(
+    auth_headers: Callable[[str], Awaitable[dict[str, str]]], decider_email: str
+) -> dict[str, str]:
+    return await auth_headers(decider_email)
+
+
 # ---------------------------------------------------------------- the worker, in tests
 
 

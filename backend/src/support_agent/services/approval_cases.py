@@ -8,7 +8,10 @@ Everything shown comes from stored rows or is computed by code now:
 - the refund policy version in force on the order's date;
 - the policy sections the run cited, kept only if they exist in our policy table and shown
   with our own text (the model chose which sections, not what they say);
-- the refund operation's status once one exists, so the reviewer sees what really happened.
+- the refund operation's status once one exists, so the reviewer sees what really happened;
+- the readiness verdict, computed by code from all of the above and the audit trail (ADR-022);
+- whether a reviewer proposed it by hand, and whether that reviewer is the caller, who then
+  may not decide it (separation of duties).
 
 No model text is returned. The complaint is the customer's own words, shown as plain text.
 """
@@ -18,18 +21,20 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.core.config import Settings
 from support_agent.core.errors import AppError
-from support_agent.domain.eligibility import check_eligibility
 from support_agent.repositories import policies, proposals, refunds
 from support_agent.schemas.approvals import (
     ApprovalCaseResponse,
-    CaseFacts,
     CaseProposal,
     GoverningPolicy,
     PolicyCitation,
+    ReadinessView,
     RefundSummary,
 )
-from support_agent.services import eligibility
+from support_agent.schemas.auth import Principal
+from support_agent.services import run_analysis
+from support_agent.services.case_readiness import assess_approval, case_facts, load_order_or_none
 from support_agent.services.eligibility import LoadedOrder
 from support_agent.workflow.graph import Checkpointer, cited_policy_keys
 
@@ -38,27 +43,7 @@ def approval_not_found() -> AppError:
     return AppError(404, "APPROVAL_NOT_FOUND", "Approval not found.")
 
 
-def _facts(loaded: LoadedOrder, now: datetime) -> CaseFacts:
-    facts = loaded.facts
-    decision = check_eligibility(facts, now)
-    return CaseFacts(
-        order_status=facts.order_status,
-        delivered_at=facts.delivered_at,
-        return_status=facts.return_status,
-        return_requested_at=facts.return_requested_at,
-        return_received_at=facts.return_received_at,
-        inspection_status=facts.inspection_status,
-        paid_amount_minor=facts.paid_amount_minor,
-        succeeded_refunds_minor=facts.succeeded_refunds_minor,
-        in_progress_refunds_minor=facts.in_progress_refunds_minor,
-        refundable_balance_minor=facts.balance_minor,
-        refund_window_days=facts.refund_window_days,
-        eligible_now=decision.eligible,
-        reasons_now=decision.reasons,
-    )
-
-
-def _governing_policy(loaded: LoadedOrder) -> GoverningPolicy | None:
+def governing_policy(loaded: LoadedOrder) -> GoverningPolicy | None:
     document = loaded.refund_policy
     if document is None:
         return None
@@ -87,7 +72,12 @@ async def _citations(
 
 
 async def get_case(
-    session: AsyncSession, checkpointer: Checkpointer, approval_id: UUID, now: datetime
+    session: AsyncSession,
+    checkpointer: Checkpointer,
+    settings: Settings,
+    reviewer: Principal,
+    approval_id: UUID,
+    now: datetime,
 ) -> ApprovalCaseResponse:
     """The caller must already be a reviewer (the route's dependency checks it)."""
     record = await proposals.get_approval_case(session, approval_id)
@@ -96,12 +86,12 @@ async def get_case(
     approval, proposal, ticket = record.approval, record.proposal, record.ticket
     payload = proposal.payload
 
-    loaded: LoadedOrder | None
-    try:
-        # Scoped to the ticket's owner, like every other order read.
-        loaded = await eligibility.load_order(session, ticket.customer_id, payload["order_number"])
-    except AppError:
-        loaded = None
+    # Scoped to the ticket's owner, like every other order read.
+    loaded = await load_order_or_none(session, ticket.customer_id, payload["order_number"])
+    signals = (await run_analysis.queue_signals(session, settings, [proposal.run_id]))[
+        proposal.run_id
+    ]
+    readiness = assess_approval(approval, proposal, loaded, signals, now)
 
     operation = await refunds.get_for_proposal(session, proposal.id)
     return ApprovalCaseResponse(
@@ -125,8 +115,8 @@ async def get_case(
             payload_hash=proposal.payload_hash,
             status=proposal.status,
         ),
-        facts=None if loaded is None else _facts(loaded, now),
-        governing_policy=None if loaded is None else _governing_policy(loaded),
+        facts=None if loaded is None else case_facts(loaded, now),
+        governing_policy=None if loaded is None else governing_policy(loaded),
         citations=await _citations(session, checkpointer, record.run.thread_id),
         refund=None
         if operation is None
@@ -136,4 +126,9 @@ async def get_case(
             amount_minor=operation.amount_minor,
             provider_reference=operation.provider_reference,
         ),
+        readiness=ReadinessView.of(readiness),
+        ai_action=signals.ai_action,
+        risk_flags=signals.risk_flags,
+        proposed_by_reviewer=proposal.proposed_by is not None,
+        proposed_by_you=proposal.proposed_by == reviewer.id,
     )

@@ -19,6 +19,7 @@ from support_agent.domain.run_analysis import (
     QUEUE_EVENT_TYPES,
     EventView,
     analyze_run,
+    quality_checks,
     recommendation,
     risk_flags,
 )
@@ -78,18 +79,37 @@ async def get_analysis(
 
 @dataclass(frozen=True)
 class QueueSignals:
-    """What the review queue shows per row: codes only, no model text."""
+    """What the review queue needs per row: codes, flags and counts only, no model text.
+    The last five feed the readiness verdict (domain/readiness.py, ADR-022)."""
 
     ai_action: str | None
     risk_flags: list[str]
+    draft_accepted: bool
+    validator_passed: bool | None
+    validation_codes: list[str]
+    critic_verdict: str | None
+    citations_dropped: int
+
+
+def _signals(views: list[EventView], threshold: float) -> QueueSignals:
+    rec = recommendation(views)
+    quality = quality_checks(views)
+    return QueueSignals(
+        ai_action=rec.action,
+        risk_flags=[flag.code.value for flag in risk_flags(views, threshold)],
+        draft_accepted=rec.accepted,
+        validator_passed=quality.validator_passed,
+        validation_codes=quality.validation_codes,
+        critic_verdict=quality.critic_verdict,
+        citations_dropped=quality.citations_dropped,
+    )
 
 
 async def queue_signals(
     session: AsyncSession, settings: Settings, run_ids: list[UUID]
 ) -> dict[UUID, QueueSignals]:
-    """The AI's recommended action and the risk flag codes for each run, from one query.
-
-    Read from the audit trail only (no checkpoint reads), so the queue stays one cheap call.
+    """The AI's recommended action, risk flag codes and quality checks for each run, from
+    one query. Read from the audit trail only (no checkpoint reads), so the queue stays cheap.
     """
     events = await audit.list_of_types_for_runs(session, run_ids, QUEUE_EVENT_TYPES)
     by_run: dict[UUID, list[EventView]] = {run_id: [] for run_id in run_ids}
@@ -97,13 +117,7 @@ async def queue_signals(
         if event.run_id is not None:
             by_run[event.run_id].append(_view(event))
     threshold = settings.classifier_confidence_threshold
-    return {
-        run_id: QueueSignals(
-            ai_action=recommendation(views).action,
-            risk_flags=[flag.code.value for flag in risk_flags(views, threshold)],
-        )
-        for run_id, views in by_run.items()
-    }
+    return {run_id: _signals(views, threshold) for run_id, views in by_run.items()}
 
 
 async def automation_summary(

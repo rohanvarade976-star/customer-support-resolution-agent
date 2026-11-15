@@ -74,6 +74,7 @@ async def load_snapshot(session: AsyncSession, principal: Principal, run_id: UUI
         status=run.status,
         ticket_status=ticket.status,
         reply=ticket.customer_reply,
+        reply_from=ticket.reply_author,
         finished=is_finished(run.status, ticket.status),
         checked=_checked(events),
     )

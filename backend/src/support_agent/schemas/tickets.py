@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from support_agent.domain.enums import RunStatus, TicketCategory, TicketStatus
+from support_agent.domain.enums import ReplyAuthor, RunStatus, TicketCategory, TicketStatus
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
@@ -30,6 +30,10 @@ class TicketResponse(BaseModel):
     # The ticket's newest run, so the customer can open its live status. None before a run.
     latest_run_id: UUID | None = None
     latest_run_status: RunStatus | None = None
+    # The ticket's verified reply (checked by the output guardrail before it was saved) and who
+    # wrote it: the assistant, or a specialist answering an escalated ticket (ADR-022).
+    reply: str | None = None
+    reply_from: ReplyAuthor = ReplyAuthor.ASSISTANT
 
 
 class ReviewerTicketResponse(TicketResponse):

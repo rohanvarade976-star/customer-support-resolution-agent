@@ -10,13 +10,15 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly retryAfterSeconds: number | null;
+  readonly details: unknown; // the API's optional `details` (e.g. a refused reply's codes)
 
-  constructor(status: number, code: string, message: string, retryAfterSeconds: number | null) {
+  constructor(status: number, code: string, message: string, retryAfterSeconds: number | null, details?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.retryAfterSeconds = retryAfterSeconds;
+    this.details = details ?? null;
   }
 }
 
@@ -42,7 +44,7 @@ export async function errorFromResponse(response: Response): Promise<ApiError> {
     // not JSON (a proxy error page, for example)
   }
   if (isErrorBody(body)) {
-    return new ApiError(response.status, body.error_code, body.message, retryAfterSeconds);
+    return new ApiError(response.status, body.error_code, body.message, retryAfterSeconds, body.details);
   }
   return new ApiError(response.status, "HTTP_ERROR", `Request failed (${response.status}).`, retryAfterSeconds);
 }

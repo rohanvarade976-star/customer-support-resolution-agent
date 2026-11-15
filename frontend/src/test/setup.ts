@@ -25,6 +25,11 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   };
 }
 
+// A verdict reason scrolls its section into view; jsdom does no layout, so there is nothing to do.
+if (typeof Element.prototype.scrollIntoView !== "function") {
+  Element.prototype.scrollIntoView = function scrollIntoView(): void {};
+}
+
 afterEach(() => {
   cleanup();
   sessionStorage.clear();

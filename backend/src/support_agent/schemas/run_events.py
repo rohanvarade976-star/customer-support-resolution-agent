@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from support_agent.domain.enums import RunStatus, TicketStatus
+from support_agent.domain.enums import ReplyAuthor, RunStatus, TicketStatus
 
 
 class RunStatusEvent(BaseModel):
@@ -19,6 +19,8 @@ class RunStatusEvent(BaseModel):
     # The latest message the run gave the customer. Checked by the output guardrail and
     # stating only verified outcomes; None until the run has written one.
     reply: str | None
+    # Who wrote it: the assistant, or a specialist answering an escalated ticket (ADR-022).
+    reply_from: ReplyAuthor = ReplyAuthor.ASSISTANT
     # True when nothing more will happen on its own (clients stop listening).
     finished: bool
     # The kinds of records the run checked successfully, as fixed codes from

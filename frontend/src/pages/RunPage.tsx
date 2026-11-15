@@ -1,27 +1,33 @@
 // A run's live page (customer owner or reviewer): a progress stepper, the verified reply, a
 // reply box while the run waits for the customer, a live-connection indicator, and the
-// detailed timeline. Everything shown comes from useRunStream (SSE with polling fallback).
+// timeline in plain words. Everything shown comes from useRunStream (SSE with polling fallback).
 //
-// Reviewers also get the AI analysis (ADR-021). Customers get "What we checked": plain words
-// for the kinds of records the run looked at, never model text or internal codes.
+// Reviewers also get the AI analysis (ADR-021) and, collapsed, the raw audit events
+// ("Technical details": ids, codes, timings; ADR-022). Customers get "What we checked": plain
+// words for the kinds of records the run looked at, never model text or internal codes.
+//
+// An escalated ticket tells the customer a specialist is on it and what to expect. The run has
+// finished, so its live stream has ended: the page checks for the specialist's reply every
+// ESCALATED_POLL_MS instead, and shows it, labelled as from a specialist, when it arrives.
 
-import { ArrowLeft, MessageSquareText, Send, ShieldCheck } from "lucide-react";
-import { useState, type SyntheticEvent } from "react";
+import { ArrowLeft, Code, Headset, MessageSquareText, Send, ShieldCheck } from "lucide-react";
+import { useEffect, useState, type SyntheticEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { describeError } from "../api/client";
-import type { Run } from "../api/types";
+import type { Run, RunStatusEvent } from "../api/types";
 import { isReviewer, useAuth } from "../auth/auth";
-import { AiAnalysisSection } from "../components/ai/AiAnalysis";
+import { AiAnalysisSections, type AnalysisSection } from "../components/ai/AiAnalysis";
 import { PageHeader } from "../components/PageHeader";
 import { RunProgress } from "../components/RunProgress";
-import { RunTimeline } from "../components/RunTimeline";
+import { RunTimeline, TechnicalDetails } from "../components/RunTimeline";
 import { ErrorState } from "../components/states";
 import { WhatWeCheckedCard } from "../components/WhatWeCheckedCard";
 import { Alert } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { CollapsibleSection } from "../components/ui/collapsible";
 import { FieldHint, Label, Textarea } from "../components/ui/form";
 import { Skeleton } from "../components/ui/skeleton";
 import { useToast } from "../components/ui/toast-context";
@@ -30,6 +36,9 @@ import { runProgress } from "../lib/runStages";
 import { cn } from "../lib/utils";
 
 const MAX_REPLY_LENGTH = 2000; // the API's limit (schemas/messages.py)
+const ESCALATED_POLL_MS = 30_000; // how often an escalated ticket checks for a specialist's reply
+
+type Section = AnalysisSection | "technical";
 
 const MODE: Record<StreamMode, { text: string; dot: string; title: string }> = {
   connecting: { text: "Connecting…", dot: "bg-gray-400 animate-pulse", title: "Opening a live connection" },
@@ -66,12 +75,36 @@ export function RunPage({ streamOptions }: { streamOptions?: RunStreamOptions })
   const live = useRunStream(api, runId, streamOptions);
   const status = live.status;
   const progress = status === null ? null : runProgress(status.status);
+  const [openSections, setOpenSections] = useState<Set<Section>>(new Set());
+
+  function setSection(section: Section, open: boolean) {
+    setOpenSections((current) => {
+      const next = new Set(current);
+      if (open) next.add(section);
+      else next.delete(section);
+      return next;
+    });
+  }
+
+  // A specialist's reply arrives after the run has finished: check for it now and then.
+  const { refresh } = live;
+  const waitingOnSpecialist = !reviewer && status?.ticket_status === "escalated";
+  useEffect(() => {
+    if (!waitingOnSpecialist) return;
+    const timer = setInterval(() => void refresh(), ESCALATED_POLL_MS);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [waitingOnSpecialist, refresh]);
+
+  // The run escalated and a specialist then answered and closed the ticket.
+  const resolvedBySpecialist = status?.status === "escalated" && status.ticket_status === "resolved";
 
   return (
     <div className="mx-auto max-w-3xl">
       <PageHeader
         title={reviewer ? "Run timeline" : "Your request"}
-        description={reviewer ? "Every recorded step of this run." : "Updates appear here as we work on it. You can leave and come back."}
+        description={reviewer ? "What happened on this run, step by step." : "Updates appear here as we work on it. You can leave and come back."}
         actions={<LiveIndicator mode={live.mode} />}
       />
 
@@ -105,40 +138,31 @@ export function RunPage({ streamOptions }: { streamOptions?: RunStreamOptions })
           <Card>
             <CardContent className="space-y-6 p-6">
               <div>
-                <h2 className="text-xl font-semibold tracking-tight text-gray-900">{progress.headline}</h2>
-                <p className={cn("mt-1 text-sm", SUMMARY_TONE[progress.tone])}>
-                  {progress.summary}
+                <h2 className="text-xl font-semibold tracking-tight text-gray-900">
+                  {resolvedBySpecialist ? "Resolved by a specialist" : progress.headline}
+                </h2>
+                <p className={cn("mt-1 text-sm", resolvedBySpecialist ? SUMMARY_TONE.success : SUMMARY_TONE[progress.tone])}>
+                  {resolvedBySpecialist ? "A support specialist answered and closed this request." : progress.summary}
                 </p>
               </div>
               <RunProgress status={status.status} />
             </CardContent>
           </Card>
 
-          {status.reply !== null && (
-            <section
-              aria-labelledby="reply-heading"
-              className="overflow-hidden rounded-xl border border-primary-200 bg-white shadow-sm"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary-100 bg-primary-50/70 px-6 py-3">
-                <h2 id="reply-heading" className="flex items-center gap-2 text-sm font-semibold text-primary-900">
-                  <MessageSquareText className="size-4 text-primary-600" aria-hidden="true" />
-                  Latest update from Support
-                </h2>
-                <Badge tone="primary" title="Checked against your records before it was sent">
-                  <ShieldCheck aria-hidden="true" />
-                  Verified
-                </Badge>
-              </div>
-              {/* Verified by the backend before it was saved; shown as plain text. */}
-              <p className="px-6 py-5 text-base leading-relaxed whitespace-pre-line text-gray-900" data-testid="verified-reply">
-                {status.reply}
-              </p>
-            </section>
-          )}
+          {waitingOnSpecialist && <SpecialistCard status={status} />}
+
+          {status.reply !== null &&
+            (status.reply_from === "specialist" ? (
+              <SpecialistReply reply={status.reply} />
+            ) : (
+              // While a specialist has the ticket, the card above says what the assistant's
+              // fixed escalation message says, so customers see it once.
+              !waitingOnSpecialist && <AssistantReply reply={status.reply} />
+            ))}
 
           {status.status === "awaiting_customer" && !reviewer && <ReplyBox runId={runId} onSent={live.refresh} />}
 
-          {reviewer ? <AiAnalysisSection runId={runId} /> : <WhatWeCheckedCard checked={status.checked} />}
+          {!reviewer && <WhatWeCheckedCard checked={status.checked} />}
 
           <Card>
             <CardHeader className="px-6 pt-6">
@@ -148,9 +172,99 @@ export function RunPage({ streamOptions }: { streamOptions?: RunStreamOptions })
               <RunTimeline steps={live.steps} reviewer={reviewer} />
             </CardContent>
           </Card>
+
+          {reviewer && (
+            <div className="space-y-3">
+              <AiAnalysisSections
+                runId={runId}
+                isOpen={(section) => openSections.has(section)}
+                onOpenChange={setSection}
+              />
+              <CollapsibleSection
+                id="technical"
+                title="Technical details"
+                icon={Code}
+                summary={`${String(live.steps.length)} audit events with ids, codes and timings`}
+                open={openSections.has("technical")}
+                onOpenChange={(open) => {
+                  setSection("technical", open);
+                }}
+              >
+                <TechnicalDetails steps={live.steps} />
+              </CollapsibleSection>
+            </div>
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+function AssistantReply({ reply }: { reply: string }) {
+  return (
+    <section aria-labelledby="reply-heading" className="overflow-hidden rounded-xl border border-primary-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary-100 bg-primary-50/70 px-6 py-3">
+        <h2 id="reply-heading" className="flex items-center gap-2 text-sm font-semibold text-primary-900">
+          <MessageSquareText className="size-4 text-primary-600" aria-hidden="true" />
+          Latest update from Support
+        </h2>
+        <Badge tone="primary" title="Checked against your records before it was sent">
+          <ShieldCheck aria-hidden="true" />
+          Verified
+        </Badge>
+      </div>
+      {/* Verified by the backend before it was saved; shown as plain text. */}
+      <p className="px-6 py-5 text-base leading-relaxed whitespace-pre-line text-gray-900" data-testid="verified-reply">
+        {reply}
+      </p>
+    </section>
+  );
+}
+
+// The customer's escalated ticket: who has it and what happens next.
+function SpecialistCard({ status }: { status: RunStatusEvent }) {
+  const replied = status.reply_from === "specialist";
+  return (
+    <section
+      aria-labelledby="specialist-heading"
+      data-testid="specialist-card"
+      className="flex gap-4 rounded-xl border border-info-200 bg-info-50 px-5 py-4"
+    >
+      <span className="grid size-10 shrink-0 place-items-center rounded-full bg-white text-info-700 shadow-xs">
+        <Headset className="size-5" aria-hidden="true" />
+      </span>
+      <div className="min-w-0">
+        <h2 id="specialist-heading" className="text-base font-semibold text-info-900">
+          A specialist is looking at this
+        </h2>
+        <p className="mt-1 text-sm text-info-800">
+          {replied
+            ? "They have replied below and may follow up here if anything else is needed."
+            : "A member of our support team is reviewing your case. Their reply will appear on this page as soon as it's sent. You don't need to do anything."}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function SpecialistReply({ reply }: { reply: string }) {
+  return (
+    <section
+      aria-labelledby="specialist-reply-heading"
+      className="overflow-hidden rounded-xl border border-primary-200 bg-white shadow-sm"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary-100 bg-primary-50/70 px-6 py-3">
+        <h2 id="specialist-reply-heading" className="flex items-center gap-2 text-sm font-semibold text-primary-900">
+          <Headset className="size-4 text-primary-600" aria-hidden="true" />
+          Reply from a support specialist
+        </h2>
+        <Badge tone="primary">From our team</Badge>
+      </div>
+      {/* Checked by the backend's output guardrail before it was saved; shown as plain text. */}
+      <p className="px-6 py-5 text-base leading-relaxed whitespace-pre-line text-gray-900" data-testid="specialist-reply">
+        {reply}
+      </p>
+    </section>
   );
 }
 

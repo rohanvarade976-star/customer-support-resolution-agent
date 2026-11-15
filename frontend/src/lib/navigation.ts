@@ -2,6 +2,7 @@
 
 import {
   FilePlus,
+  Headset,
   House,
   Inbox,
   Package,
@@ -16,6 +17,8 @@ export interface NavItem {
   icon: LucideIcon;
   // Other URL prefixes that belong to this item (a run page belongs to "My tickets").
   also?: string[];
+  // A live count shown next to the label (the sidebar fetches it).
+  count?: "escalations";
 }
 
 export const CUSTOMER_NAV: NavItem[] = [
@@ -28,6 +31,7 @@ export const CUSTOMER_NAV: NavItem[] = [
 
 export const REVIEWER_NAV: NavItem[] = [
   { to: "/approvals", label: "Approval queue", icon: Inbox, also: ["/runs/"] },
+  { to: "/escalations", label: "Escalations", icon: Headset, count: "escalations" },
 ];
 
 export function isActive(item: NavItem, pathname: string): boolean {
@@ -45,6 +49,10 @@ export function breadcrumbsFor(pathname: string, reviewer: boolean): Crumb[] {
   if (reviewer) {
     const queue = { label: "Approval queue", to: "/approvals" };
     if (pathname.startsWith("/approvals/")) return [queue, { label: "Refund case" }];
+    if (pathname.startsWith("/escalations/")) {
+      return [{ label: "Escalations", to: "/escalations" }, { label: "Escalated case" }];
+    }
+    if (pathname === "/escalations") return [{ label: "Escalations" }];
     if (pathname.startsWith("/runs/")) return [queue, { label: "Run timeline" }];
     return [{ label: "Approval queue" }];
   }

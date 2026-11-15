@@ -17,6 +17,10 @@ Two kinds of run reach this endpoint:
   execute; reject -> reopen; expired or changed -> escalate. The worker gives that job a
   disabled LLM client, so no model can run there.
 
+Separation of duties (ADR-022): a reviewer who proposed a refund by hand (from an escalated
+ticket) may not approve or reject that proposal; another reviewer must. The refusal is a 409
+SELF_DECISION_FORBIDDEN, audited, and nothing about the approval changes.
+
 The worker also sweeps approvals that expired with no decision (`expire_overdue_approvals`):
 each is recorded as expired and its paused run is claimed and queued the same way, so the
 graph escalates it.
@@ -41,6 +45,7 @@ from support_agent.domain.enums import (
     TicketStatus,
 )
 from support_agent.domain.proposals import payload_hash
+from support_agent.domain.readiness import ReadinessResult
 from support_agent.integrations.payments import PaymentClient
 from support_agent.repositories import audit, proposals
 from support_agent.schemas.approvals import (
@@ -48,11 +53,13 @@ from support_agent.schemas.approvals import (
     DecisionRequest,
     DecisionResponse,
     PendingApproval,
+    ReadinessView,
     RefundSummary,
 )
 from support_agent.schemas.auth import Principal
 from support_agent.services import refund_execution, run_analysis
 from support_agent.services import runs as runs_service
+from support_agent.services.case_readiness import assess_approval, load_order_or_none
 from support_agent.services.case_updates import load_case, set_run_status, set_ticket_status
 
 ACTOR = "reviewer"
@@ -78,6 +85,14 @@ def _expired_error() -> AppError:
     )
 
 
+def _self_decision_error() -> AppError:
+    return AppError(
+        409,
+        "SELF_DECISION_FORBIDDEN",
+        "You proposed this refund, so another reviewer must approve or reject it.",
+    )
+
+
 def _changed_error() -> AppError:
     return AppError(
         409, "PROPOSAL_CHANGED", "The proposal no longer matches what was submitted for review."
@@ -85,32 +100,50 @@ def _changed_error() -> AppError:
 
 
 async def list_pending(
-    session: AsyncSession, settings: Settings, now: datetime
+    session: AsyncSession, settings: Settings, reviewer: Principal, now: datetime
 ) -> ApprovalListResponse:
     records = await proposals.list_pending(session, now)
     signals = await run_analysis.queue_signals(
         session, settings, list({record.proposal.run_id for record in records})
     )
-    items = [
-        PendingApproval(
-            approval_id=record.approval.id,
-            proposal_id=record.proposal.id,
-            ticket_id=record.ticket_id,
-            order_number=record.order_number,
-            customer_name=record.customer_name,
-            amount_minor=record.proposal.payload["amount_minor"],
-            currency=record.proposal.payload["currency"],
-            reason=record.proposal.payload["reason"],
-            reasons=record.proposal.payload["checks_passed"],
-            created_at=record.approval.created_at,
-            expires_at=record.approval.expires_at,
-            run_id=record.proposal.run_id,
-            ai_action=signals[record.proposal.run_id].ai_action,
-            risk_flags=signals[record.proposal.run_id].risk_flags,
+    items: list[PendingApproval] = []
+    for record in records:
+        payload = record.proposal.payload
+        # One order read per row, so "still eligible now" is checked for every row (ADR-022).
+        # Scoped to the proposal's customer, which came from the ticket row.
+        loaded = await load_order_or_none(
+            session, UUID(payload["customer_id"]), payload["order_number"]
         )
-        for record in records
-    ]
+        row_signals = signals[record.proposal.run_id]
+        readiness = assess_approval(record.approval, record.proposal, loaded, row_signals, now)
+        items.append(_pending_row(record, row_signals, readiness, reviewer))
     return ApprovalListResponse(items=items)
+
+
+def _pending_row(
+    record: proposals.PendingApprovalRecord,
+    signals: run_analysis.QueueSignals,
+    readiness: ReadinessResult,
+    reviewer: Principal,
+) -> PendingApproval:
+    return PendingApproval(
+        approval_id=record.approval.id,
+        proposal_id=record.proposal.id,
+        ticket_id=record.ticket_id,
+        order_number=record.order_number,
+        customer_name=record.customer_name,
+        amount_minor=record.proposal.payload["amount_minor"],
+        currency=record.proposal.payload["currency"],
+        reason=record.proposal.payload["reason"],
+        reasons=record.proposal.payload["checks_passed"],
+        created_at=record.approval.created_at,
+        expires_at=record.approval.expires_at,
+        run_id=record.proposal.run_id,
+        ai_action=signals.ai_action,
+        risk_flags=signals.risk_flags,
+        readiness=ReadinessView.of(readiness),
+        proposed_by_you=record.proposal.proposed_by == reviewer.id,
+    )
 
 
 async def decide(
@@ -132,6 +165,8 @@ async def decide(
         raise AppError(409, "ALREADY_DECIDED", "This approval has already been decided.")
     if proposal.status != ProposalStatus.PENDING_APPROVAL:
         raise AppError(409, "PROPOSAL_NOT_PENDING", "This proposal is no longer awaiting review.")
+    if proposal.proposed_by is not None and proposal.proposed_by == reviewer.id:
+        await _refuse_self_decision(session, approval, proposal, run.id, reviewer)
 
     if run.mode == RunMode.MANUAL:
         response = await _decide_manual(
@@ -140,6 +175,30 @@ async def decide(
         return DecisionOutcome(response, queued=False)
     response = await _decide_and_queue(session, env, approval, proposal, run, reviewer, body, now)
     return DecisionOutcome(response, queued=True)
+
+
+async def _refuse_self_decision(
+    session: AsyncSession,
+    approval: Approval,
+    proposal: ActionProposal,
+    run_id: UUID,
+    reviewer: Principal,
+) -> NoReturn:
+    """Record the refused attempt (ids and a code only) and refuse. The approval is unchanged."""
+    await audit.record(
+        session,
+        run_id=run_id,
+        actor=ACTOR,
+        event_type="approval.decision_refused",
+        payload={
+            "approval_id": str(approval.id),
+            "proposal_id": str(proposal.id),
+            "error_code": "SELF_DECISION_FORBIDDEN",
+            "reviewer_id": str(reviewer.id),
+        },
+    )
+    await session.commit()  # keeps the audit event and releases the approval lock
+    raise _self_decision_error()
 
 
 # ---------------------------------------------------------------- workflow runs

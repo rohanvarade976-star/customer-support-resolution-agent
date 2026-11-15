@@ -48,6 +48,7 @@ async def _store_proposal(
     settings: Settings,
     actor: str,
     extra_audit: dict[str, Any],
+    proposed_by: UUID | None = None,
 ) -> _Stored:
     """The immutable payload, its hash, the proposal, the pending approval and their events.
 
@@ -63,7 +64,7 @@ async def _store_proposal(
     ).to_json_dict()
     digest = payload_hash(payload)
     proposal = await proposals.create_proposal(
-        session, run_id=run_id, payload=payload, digest=digest
+        session, run_id=run_id, payload=payload, digest=digest, proposed_by=proposed_by
     )
     approval = await proposals.create_approval(
         session,
@@ -212,6 +213,8 @@ async def create_refund_proposal(
         settings=settings,
         actor=ACTOR,
         extra_audit={"reviewer_id": str(reviewer.id)},
+        # Recorded so this reviewer cannot also decide it (separation of duties, ADR-022).
+        proposed_by=reviewer.id,
     )
     proposal, approval = stored.proposal, stored.approval
     await set_ticket_status(session, ticket, TicketStatus.IN_PROGRESS, run_id=run.id, actor=ACTOR)
