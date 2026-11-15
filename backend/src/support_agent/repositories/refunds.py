@@ -25,7 +25,7 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from support_agent.db.models import RefundOperation
+from support_agent.db.models import ActionProposal, RefundOperation
 from support_agent.domain.enums import RefundOperationStatus
 from support_agent.domain.refund_outcomes import UNSETTLED_STATUSES
 
@@ -62,6 +62,20 @@ async def list_for_order(session: AsyncSession, order_id: UUID) -> list[RefundOp
         .order_by(RefundOperation.created_at, RefundOperation.id)
     )
     return list((await session.scalars(stmt)).all())
+
+
+async def latest_status_for_run(
+    session: AsyncSession, run_id: UUID
+) -> RefundOperationStatus | None:
+    """The status of the newest refund made for this run's proposals, if there is one."""
+    stmt = (
+        select(RefundOperation.status)
+        .join(ActionProposal, ActionProposal.id == RefundOperation.proposal_id)
+        .where(ActionProposal.run_id == run_id)
+        .order_by(RefundOperation.created_at.desc(), RefundOperation.id)
+        .limit(1)
+    )
+    return await session.scalar(stmt)
 
 
 async def get_for_proposal(session: AsyncSession, proposal_id: UUID) -> RefundOperation | None:

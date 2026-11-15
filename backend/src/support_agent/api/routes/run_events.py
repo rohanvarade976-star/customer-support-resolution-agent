@@ -17,7 +17,9 @@ from support_agent.api.deps import (
     SessionDep,
     SessionFactoryDep,
     SettingsDep,
+    ShippingClientDep,
     ShortSessionDep,
+    ShortShippingClientDep,
     StreamingPrincipalDep,
 )
 from support_agent.schemas.run_events import RunSnapshot
@@ -31,8 +33,16 @@ _STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 @router.get("/runs/{run_id}/events")
-async def get_run_events(run_id: UUID, principal: PrincipalDep, session: SessionDep) -> RunSnapshot:
-    return await run_events_service.load_snapshot(session, principal, run_id)
+async def get_run_events(
+    run_id: UUID,
+    principal: PrincipalDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    shipping: ShippingClientDep,
+) -> RunSnapshot:
+    return await run_events_service.load_snapshot(
+        session, principal, run_id, settings, shipping=shipping
+    )
 
 
 @router.get("/runs/{run_id}/stream", response_class=StreamingResponse)
@@ -42,8 +52,12 @@ async def stream_run_events(
     session: ShortSessionDep,
     sessions: SessionFactoryDep,
     settings: SettingsDep,
+    shipping: ShortShippingClientDep,
 ) -> StreamingResponse:
-    # Checked here, before any byte is sent, so a stranger's run is a plain 404.
-    first = await run_events_service.load_snapshot(session, principal, run_id)
+    # Checked here, before any byte is sent, so a stranger's run is a plain 404. The carrier is
+    # asked once, here; the stream's later polls reuse the answer.
+    first = await run_events_service.load_snapshot(
+        session, principal, run_id, settings, shipping=shipping
+    )
     events = run_events_service.stream_run(sessions, principal, first, settings)
     return StreamingResponse(events, media_type="text/event-stream", headers=_STREAM_HEADERS)

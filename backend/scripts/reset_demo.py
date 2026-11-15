@@ -1,7 +1,9 @@
 """Reset the demo database to its starting state, ready for another demo run.
 
 Deletes what demos and workflow runs created (tickets, runs, proposals, approvals,
-refund operations, audit events, and the mock payment and ticketing records), then
+refund operations, audit events, and the mock payment and ticketing records), together with
+the eval harness's customers, orders, tickets, runs and jobs (so leftover eval escalations
+never appear in a demo), then
 seeds the scenarios again from the demo anchor date, so every scenario matches the PRD
 (for example Priya's refund is eligible again). Refuses to run when APP_ENV=production.
 
@@ -14,7 +16,12 @@ Needs DATABASE_URL and DEMO_PASSWORD in .env. Policies are not touched.
 import asyncio
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
+# Scripts run with scripts/ on sys.path; the eval package lives next to it in backend/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from evals.cases import EVAL_SEED_FILE
 from support_agent.core.config import get_settings
 from support_agent.core.demo_anchor import resolve_demo_now
 from support_agent.core.security import hash_password
@@ -29,7 +36,13 @@ async def run(password_hash: str) -> DemoResetReport:
     try:
         # session.begin() commits on success and rolls back on any error.
         async with get_sessionmaker()() as session, session.begin():
-            return await reset_demo(session, load_scenarios(), now, password_hash)
+            return await reset_demo(
+                session,
+                load_scenarios(),
+                now,
+                password_hash,
+                leftovers=[load_scenarios(EVAL_SEED_FILE)],  # eval-only data is removed, not seeded
+            )
     finally:
         await get_engine().dispose()
 

@@ -138,6 +138,24 @@ const MEMORY = [
 
 const step = (id, type, minutesAgo, details = {}) => ({ id, type, actor: "system", at: at(-minutesAgo * MIN), details });
 
+const DELIVERED_FACTS = {
+  order_number: "ORD-1001",
+  order_status: "delivered",
+  delivered_at: at(-12 * 1440 * MIN),
+  return_status: "received",
+  refund_status: null,
+  shipment: null,
+};
+
+const IN_TRANSIT_FACTS = {
+  order_number: "ORD-1002",
+  order_status: "shipped",
+  delivered_at: null,
+  return_status: null,
+  refund_status: null,
+  shipment: { status: "in_transit", expected_delivery: new Date(now + 3 * 1440 * MIN).toISOString().slice(0, 10) },
+};
+
 const RUN_AWAITING = {
   run: {
     run_id: "run-1",
@@ -149,6 +167,8 @@ const RUN_AWAITING = {
     reply_from: "assistant",
     finished: false,
     checked: ["order", "shipment"],
+    facts: IN_TRANSIT_FACTS,
+    specialist_reply_business_days: 1,
   },
   steps: [
     step("e1", "run.created", 25),
@@ -164,10 +184,13 @@ const RUN_COMPLETED = {
     ticket_id: "t-3",
     status: "completed",
     ticket_status: "resolved",
-    reply: "Your refund of ₹899.00 for order ORD-1003 is complete. It should appear in your account within 5–7 business days.",
+    reply:
+      "Thanks for getting in touch about your returned speaker. We confirmed that your return arrived and passed inspection, and your refund has now been completed by our payment service. You can see it on this page, and there is nothing more you need to do.",
     reply_from: "assistant",
     finished: true,
     checked: ["order", "return", "payment", "policy"],
+    facts: { ...DELIVERED_FACTS, order_number: "ORD-1003", refund_status: "succeeded" },
+    specialist_reply_business_days: 1,
   },
   steps: [
     step("f1", "run.created", 900, { ticket_id: "t-3" }),
@@ -194,6 +217,8 @@ const RUN_WITH_SPECIALIST = {
     reply_from: "assistant",
     finished: true,
     checked: ["order", "shipment"],
+    facts: IN_TRANSIT_FACTS,
+    specialist_reply_business_days: 1,
   },
   steps: [
     step("g1", "run.created", 90),
@@ -212,6 +237,77 @@ const RUN_SPECIALIST_REPLIED = {
     reply_from: "specialist",
   },
   steps: [...RUN_WITH_SPECIALIST.steps, step("g5", "ticket.specialist_replied", 20)],
+};
+
+// A refund waiting for a person's approval.
+const RUN_APPROVAL = {
+  run: {
+    run_id: "run-8",
+    ticket_id: "t-6",
+    status: "awaiting_approval",
+    ticket_status: "in_progress",
+    reply:
+      "Thanks for getting in touch about your returned headphones. Your order was delivered, and we've confirmed that the return arrived and passed inspection, which falls within our refund window. That means a refund has been proposed, and it now needs approval from our team before it can go ahead. You'll see the outcome on this page.",
+    reply_from: "assistant",
+    finished: false,
+    checked: ["order", "return", "payment", "policy"],
+    facts: DELIVERED_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [
+    step("h1", "run.created", 12),
+    step("h2", "run.classified", 12),
+    step("h3", "investigation.started", 11),
+    step("h4", "policy.completed", 11),
+    step("h5", "resolution.completed", 10),
+    step("h6", "proposal.created", 10),
+    step("h7", "approval.requested", 10),
+    step("h8", "ticket.updated", 10),
+  ],
+};
+
+// In progress: the assistant has understood the request and is checking the order.
+const RUN_PROGRESS = {
+  run: {
+    run_id: "run-9",
+    ticket_id: "t-8",
+    status: "investigating",
+    ticket_status: "in_progress",
+    reply: null,
+    reply_from: "assistant",
+    finished: false,
+    checked: ["order", "shipment"],
+    facts: DELIVERED_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [step("i1", "run.created", 0.2), step("i2", "run.classified", 0.15), step("i3", "investigation.started", 0.1)],
+};
+
+// Finished, a delivered order and no refund: the customer may report a problem with the item.
+const RUN_DELIVERED = {
+  run: {
+    run_id: "run-10",
+    ticket_id: "t-9",
+    status: "completed",
+    ticket_status: "resolved",
+    reply:
+      "Thanks for checking on your order. It was delivered on the date shown below, and the carrier's records agree. There is nothing outstanding on it right now. If something is wrong with the item, you can tell us about it and we'll take a look.",
+    reply_from: "assistant",
+    finished: true,
+    checked: ["order", "shipment", "policy"],
+    facts: DELIVERED_FACTS,
+    specialist_reply_business_days: 1,
+  },
+  steps: [
+    step("j1", "run.created", 5),
+    step("j2", "run.classified", 5),
+    step("j3", "investigation.started", 5),
+    step("j4", "policy.completed", 4),
+    step("j5", "resolution.completed", 4),
+    step("j6", "validation.passed", 4),
+    step("j7", "run.completed", 4),
+    step("j8", "ticket.updated", 4),
+  ],
 };
 
 const ready = { status: "ready_to_approve", reasons: [] };
@@ -427,11 +523,11 @@ const SUMMARY = {
   median_seconds_to_outcome: 8.4,
 };
 
-const sse = (snapshot) =>
+const sse = (snapshot, finished = true) =>
   [
     `event: status\ndata: ${JSON.stringify(snapshot.run)}\n\n`,
     ...snapshot.steps.map((s) => `id: ${s.id}\nevent: step\ndata: ${JSON.stringify(s)}\n\n`),
-    `event: end\ndata: ${JSON.stringify({ reason: "finished" })}\n\n`,
+    ...(finished ? [`event: end\ndata: ${JSON.stringify({ reason: "finished" })}\n\n`] : []),
   ].join("");
 
 const BASE_ROUTES = {
@@ -451,6 +547,13 @@ const BASE_ROUTES = {
   "GET /reviewer/automation-summary": () => SUMMARY,
   "GET /approvals/a-3": () => CASE_READY,
   "GET /runs/run-4/analysis": () => ({ status: 200, body: CLEAN_ANALYSIS }),
+  "GET /runs/run-8/stream": () => ({ sse: sse(RUN_APPROVAL) }),
+  "GET /runs/run-8/events": () => RUN_APPROVAL,
+  // In progress: the stream has no "end", so the page keeps working state (and polls).
+  "GET /runs/run-9/stream": () => ({ sse: sse(RUN_PROGRESS, false) }),
+  "GET /runs/run-9/events": () => RUN_PROGRESS,
+  "GET /runs/run-10/stream": () => ({ sse: sse(RUN_DELIVERED) }),
+  "GET /runs/run-10/events": () => RUN_DELIVERED,
   "GET /runs/run-6/stream": () => ({ sse: sse(RUN_SPECIALIST_REPLIED) }),
   "GET /runs/run-6/events": () => RUN_SPECIALIST_REPLIED,
   "GET /runs/run-7/stream": () => ({ sse: sse(RUN_WITH_SPECIALIST) }),
@@ -494,6 +597,45 @@ const SCENARIOS = [
   },
   { name: "run-awaiting-customer", path: "/runs/run-1", user: PRIYA },
   { name: "run-completed", path: "/runs/run-2", user: PRIYA },
+  { name: "run-delivered-next-steps", path: "/runs/run-10", user: PRIYA },
+  { name: "run-awaiting-approval", path: "/runs/run-8", user: PRIYA },
+  {
+    // Reduced motion (the default for every capture): the sweeping bar must not move.
+    name: "run-in-progress",
+    path: "/runs/run-9",
+    user: PRIYA,
+    verify: async (page) => {
+      await page.getByTestId("assistant-work").waitFor();
+      const duration = await page.locator("[data-testid=assistant-work] .animate-progress").evaluate((el) => getComputedStyle(el).animationDuration);
+      return parseFloat(duration) <= 0.001 ? [] : [`reduced motion: the progress bar still animates (${duration})`];
+    },
+  },
+  {
+    // Motion allowed: the animations must really run under the strict CSP.
+    name: "run-in-progress-motion",
+    path: "/runs/run-9",
+    user: PRIYA,
+    motion: true,
+    verify: async (page) => {
+      await page.getByTestId("assistant-work").waitFor();
+      const bar = await page.locator("[data-testid=assistant-work] .animate-progress").evaluate((el) => {
+        const style = getComputedStyle(el);
+        return { name: style.animationName, duration: style.animationDuration, count: style.animationIterationCount };
+      });
+      const shimmer = await page.evaluate(() => {
+        const probe = document.createElement("div");
+        probe.className = "animate-shimmer";
+        document.body.append(probe);
+        const name = getComputedStyle(probe).animationName;
+        probe.remove();
+        return name;
+      });
+      const problems = [];
+      if (bar.name !== "progress" || parseFloat(bar.duration) < 1 || bar.count !== "infinite") problems.push(`progress bar is not animating: ${JSON.stringify(bar)}`);
+      if (shimmer !== "shimmer") problems.push(`shimmer animation missing: ${shimmer}`);
+      return problems;
+    },
+  },
   { name: "tickets", path: "/tickets", user: PRIYA },
   { name: "tickets-error", path: "/tickets", user: PRIYA, expectErrors: true, routes: { "GET /tickets?limit=50": () => ({ status: 503, body: { success: false, error_code: "UNAVAILABLE", message: "The service is temporarily unavailable." } }) } },
   { name: "orders", path: "/orders", user: PRIYA },
@@ -552,7 +694,7 @@ const CORS = {
 
 async function shoot(browser, base, viewport, scenario) {
   const problems = [];
-  const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
+  const context = await browser.newContext({ viewport, reducedMotion: scenario.motion === true ? "no-preference" : "reduce" });
   if (scenario.user !== null) {
     const session = { token: "screenshot-token", user: scenario.user, expiresAt: now + 3_600_000 };
     await context.addInitScript((value) => {
@@ -600,6 +742,7 @@ async function shoot(browser, base, viewport, scenario) {
     await page.waitForTimeout(300);
   }
   await page.waitForTimeout(250);
+  if (scenario.verify !== undefined) problems.push(...(await scenario.verify(page)));
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   if (overflow > 0) problems.push(`page is ${overflow}px wider than the screen`);

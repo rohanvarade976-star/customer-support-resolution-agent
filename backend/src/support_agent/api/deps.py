@@ -109,6 +109,11 @@ async def get_shipping_client(settings: SettingsDep) -> AsyncIterator[ShippingCl
         yield client
 
 
+ShippingClientDep = Annotated[ShippingClient, Depends(get_shipping_client)]
+# Closed when the route function returns, before a stream's body is sent (like ShortSessionDep).
+ShortShippingClientDep = Annotated[ShippingClient, Depends(get_shipping_client, scope="function")]
+
+
 def get_embedder(settings: SettingsDep) -> embeddings.Embedder:
     """The process-wide embedder (loaded on first use). Tests override it with a fake."""
     return embeddings.get_embedder(settings)

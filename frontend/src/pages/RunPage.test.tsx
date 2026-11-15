@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RunSnapshot, RunStatusEvent, RunStepEvent } from "../api/types";
-import { ANALYSIS, RATIONALE } from "../test/fixtures";
+import { ANALYSIS, DELIVERED_FACTS, IN_TRANSIT_FACTS, RATIONALE } from "../test/fixtures";
 import { ANITA, fakeApi, json, logInAs, PRIYA, renderApp, sseFrame, sseResponse } from "../test/helpers";
 
 const STATUS: RunStatusEvent = {
@@ -15,6 +15,8 @@ const STATUS: RunStatusEvent = {
   reply_from: "assistant",
   finished: false,
   checked: ["order", "shipment", "policy"],
+  facts: DELIVERED_FACTS,
+  specialist_reply_business_days: 1,
 };
 
 const STEP: RunStepEvent = {
@@ -154,7 +156,7 @@ describe("RunPage", () => {
 
     const card = await screen.findByTestId("specialist-card");
     expect(card).toHaveTextContent("A specialist is looking at this");
-    expect(card).toHaveTextContent("Their reply will appear on this page");
+    expect(card).toHaveTextContent("Our specialists usually reply within one business day. Their reply will appear here.");
     // The assistant's escalation message is not repeated under the card.
     expect(screen.queryByTestId("verified-reply")).not.toBeInTheDocument();
 
@@ -194,6 +196,130 @@ describe("RunPage", () => {
     expect(screen.queryByTestId("ai-recommendation")).not.toBeInTheDocument();
     // The assistant is named in the customer's timeline.
     expect(screen.getByText("Our assistant is checking your order details")).toBeInTheDocument();
+  });
+
+  it("shows the assistant's checks as events arrive, then a finished reply with what we found and next steps", async () => {
+    const encoder = new TextEncoder();
+    let push: (frame: string) => void = () => undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (frame) => {
+          controller.enqueue(encoder.encode(frame));
+        };
+      },
+    });
+    const working: RunStatusEvent = { ...STATUS, status: "investigating", ticket_status: "in_progress", reply: null, checked: [] };
+    fakeApi({
+      "GET /runs/run-1/stream": () => new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    });
+    logInAs(PRIYA);
+    renderApp("/runs/run-1");
+    act(() => {
+      push(sseFrame("status", working));
+      push(sseFrame("step", { ...STEP, id: "e-1", type: "run.created" }));
+    });
+
+    // Only the first check shows, and it is still running.
+    const card = await screen.findByTestId("assistant-work");
+    expect(within(card).getByTestId("check-understand")).toHaveAttribute("data-state", "active");
+    expect(within(card).queryByTestId("check-order")).not.toBeInTheDocument();
+
+    // The classification arrives: the first check ticks and the next appears.
+    act(() => {
+      push(sseFrame("step", { ...STEP, id: "e-2", type: "run.classified", at: "2026-11-10T12:00:01Z" }));
+      push(sseFrame("status", { ...working, checked: ["order", "shipment"] }));
+    });
+    await waitFor(() => {
+      expect(within(card).getByTestId("check-understand")).toHaveAttribute("data-state", "done");
+    });
+    expect(within(card).getByTestId("check-order")).toHaveTextContent("Order ORD-1001");
+    expect(within(card).getByTestId("check-delivery")).toHaveTextContent("Delivered 3 Nov");
+
+    // It finishes: the checks card goes, the reply card and the next steps appear.
+    act(() => {
+      push(
+        sseFrame("status", {
+          ...working,
+          status: "completed",
+          ticket_status: "resolved",
+          finished: true,
+          checked: ["order", "shipment", "policy"],
+          reply: "Your order was delivered on 3 November.",
+        }),
+      );
+    });
+    expect(await screen.findByTestId("verified-reply")).toHaveTextContent("Your order was delivered on 3 November.");
+    expect(screen.queryByTestId("assistant-work")).not.toBeInTheDocument();
+    expect(screen.getByText("Hi Priya,")).toBeInTheDocument();
+    expect(screen.getByTestId("run-hero")).toHaveAttribute("data-tone", "success");
+    const found = screen.getByTestId("what-we-found");
+    expect(found).toHaveTextContent("ORD-1001 · Delivered on 3 Nov");
+    expect(found).toHaveTextContent("Return received");
+    expect(screen.getByRole("link", { name: /Report a problem with this item/ })).toHaveAttribute(
+      "href",
+      "/complaints/new?order=ORD-1001&issue=damaged",
+    );
+    expect(screen.getByRole("link", { name: /Start another request/ })).toHaveAttribute("href", "/complaints/new");
+  });
+
+  it("explains what happens next while a refund waits for approval, and shows the carrier's report in transit", async () => {
+    fakeApi({
+      "GET /runs/run-1/stream": () =>
+        sseResponse(
+          [
+            sseFrame("status", {
+              ...STATUS,
+              status: "awaiting_approval",
+              ticket_status: "in_progress",
+              reply: "A refund is proposed and needs approval.",
+              facts: IN_TRANSIT_FACTS,
+            }),
+          ],
+          true,
+        ),
+    });
+    logInAs(PRIYA);
+    renderApp("/runs/run-1");
+
+    const step = await screen.findByTestId("next-step-approval");
+    expect(step).toHaveTextContent("What happens next");
+    expect(screen.getByTestId("what-we-found")).toHaveTextContent("In transit with the carrier · expected 18 Nov");
+    expect(screen.queryByRole("link", { name: /Report a problem/ })).not.toBeInTheDocument();
+  });
+
+  it("words the specialist reply time from the server's setting", async () => {
+    fakeApi({
+      "GET /runs/run-1/stream": () =>
+        sseResponse([
+          sseFrame("status", {
+            ...STATUS,
+            status: "escalated",
+            ticket_status: "escalated",
+            finished: true,
+            specialist_reply_business_days: 3,
+          }),
+          sseFrame("end", { reason: "finished" }),
+        ]),
+    });
+    logInAs(PRIYA);
+    renderApp("/runs/run-1");
+
+    expect(await screen.findByTestId("specialist-card")).toHaveTextContent(
+      "Our specialists usually reply within 3 business days. Their reply will appear here.",
+    );
+  });
+
+  it("does not show the customer's checks card or reply greeting to a reviewer", async () => {
+    fakeApi({
+      "GET /runs/run-1/stream": () => sseResponse([sseFrame("status", { ...STATUS, status: "investigating", reply: null })], true),
+      "GET /runs/run-1/analysis": () => json(ANALYSIS),
+    });
+    logInAs(ANITA);
+    renderApp("/runs/run-1");
+
+    expect(await screen.findByText("Our assistant is on it")).toBeInTheDocument();
+    expect(screen.queryByTestId("assistant-work")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Hi /)).not.toBeInTheDocument();
   });
 
   it("stops with the API's message when the run is not yours", async () => {

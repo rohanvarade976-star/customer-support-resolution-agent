@@ -94,6 +94,27 @@ export interface Run {
   completed_at: string | null;
 }
 
+export type OrderStatusCode = "placed" | "shipped" | "delivered" | "cancelled";
+export type ReturnStatusCode = "requested" | "in_transit" | "received" | "cancelled";
+
+// What a customer may be told about a refund: coarse, never an amount or an internal state.
+export type CustomerRefundStatus = "in_progress" | "succeeded" | "failed";
+
+export interface ShipmentFacts {
+  status: "in_transit" | "delivered"; // the carrier's report
+  expected_delivery: string; // a date, "2026-11-12"
+}
+
+// Verified facts about the ticket's order, read from our records (ADR-023). No model text.
+export interface RunFacts {
+  order_number: string;
+  order_status: OrderStatusCode;
+  delivered_at: string | null;
+  return_status: ReturnStatusCode | null; // the latest return, if any
+  refund_status: CustomerRefundStatus | null; // this run's refund, if one exists
+  shipment: ShipmentFacts | null; // only while the order is in transit
+}
+
 // The live status (GET /runs/{id}/events and the stream's "status" event).
 export interface RunStatusEvent {
   run_id: string;
@@ -106,6 +127,8 @@ export interface RunStatusEvent {
   // Kinds of records the run checked, as fixed codes: "order", "return", "payment",
   // "shipment", "policy". Never tool names, results or model text (ADR-021).
   checked: string[];
+  facts: RunFacts | null; // null when the ticket has no order
+  specialist_reply_business_days: number; // the expectation shown while a specialist has it
 }
 
 export type DetailValue = string | number | boolean | (string | number | boolean)[];

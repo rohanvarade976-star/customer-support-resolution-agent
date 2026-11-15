@@ -303,7 +303,7 @@ async def test_stream_sends_a_change_when_it_happens(
     priya = await session.scalar(select(Customer).where(Customer.email == "priya@example.com"))
     assert priya is not None
     principal = Principal(id=priya.id, role=Role.CUSTOMER, name=priya.name, email=priya.email)
-    first = await run_events.load_snapshot(session, principal, UUID(paused_run))
+    first = await run_events.load_snapshot(session, principal, UUID(paused_run), wire_app)
     stream = run_events.stream_run(branch_sessions, principal, first, wire_app)
 
     initial = [await anext(stream) for _ in range(1 + len(first.steps))]
@@ -321,6 +321,98 @@ async def test_stream_sends_a_change_when_it_happens(
     assert name == "status"
     assert data["status"] == "executing"
     await stream.aclose()
+
+
+# ---------------------------------------------------------------- verified facts (ADR-023)
+
+
+async def test_customer_status_carries_verified_order_facts_only(
+    client: httpx.AsyncClient, paused_run: str, auth_headers: HeadersFor, wire_app: Settings
+) -> None:
+    response = await client.get(
+        f"/runs/{paused_run}/events", headers=await auth_headers("priya@example.com")
+    )
+    run = response.json()["run"]
+
+    assert run["facts"] == {
+        "order_number": "ORD-1001",
+        "order_status": "delivered",
+        "delivered_at": run["facts"]["delivered_at"],
+        "return_status": "received",
+        "refund_status": None,  # the refund waits for approval; none exists yet
+        "shipment": None,  # delivered: no carrier lookup
+    }
+    assert run["facts"]["delivered_at"].startswith("2026-10-29")  # 12 days before NOW
+    assert run["specialist_reply_business_days"] == wire_app.specialist_reply_business_days == 1
+    # No ids or internal codes in the facts.
+    assert str(run["run_id"]) not in str(run["facts"])
+
+
+async def test_specialist_reply_expectation_is_a_setting(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    paused_run: str,
+    auth_headers: HeadersFor,
+    wire_app: Settings,
+) -> None:
+    app.dependency_overrides[get_settings] = lambda: wire_app.model_copy(
+        update={"specialist_reply_business_days": 3}
+    )
+    response = await client.get(
+        f"/runs/{paused_run}/events", headers=await auth_headers("priya@example.com")
+    )
+    assert response.json()["run"]["specialist_reply_business_days"] == 3
+
+
+async def test_refund_status_is_coarse_and_has_no_amount(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    paused_run: str,
+    auth_headers: HeadersFor,
+    drain_jobs: Drain,
+) -> None:
+    approval_id = await _approval_id(session, paused_run)
+    body = {"decision": "approve", "note": "ok"}
+    decided = await client.post(
+        f"/approvals/{approval_id}/decision", json=body, headers=await auth_headers(REVIEWER)
+    )
+    assert decided.status_code == 202
+    await drain_jobs()
+
+    response = await client.get(
+        f"/runs/{paused_run}/events", headers=await auth_headers("priya@example.com")
+    )
+    facts = response.json()["run"]["facts"]
+    assert facts["refund_status"] in ("in_progress", "succeeded")
+    assert "amount" not in str(facts)
+
+
+async def test_an_order_in_transit_shows_the_carriers_status_and_expected_date(
+    client: httpx.AsyncClient, auth_headers: HeadersFor
+) -> None:
+    headers = await auth_headers("arjun@example.com")
+    body = {"message": "Where is my order?", "order_number": "ORD-1002"}
+    created = await client.post("/tickets", json=body, headers=headers)
+    started = await client.post(f"/tickets/{created.json()['id']}/runs", headers=headers)
+    run_id = started.json()["run_id"]
+
+    response = await client.get(f"/runs/{run_id}/events", headers=headers)
+    facts = response.json()["run"]["facts"]
+    assert facts["order_number"] == "ORD-1002"
+    assert facts["order_status"] == "shipped"
+    assert facts["shipment"]["status"] == "in_transit"
+    assert facts["shipment"]["expected_delivery"]  # a date from the carrier
+
+
+async def test_a_ticket_without_an_order_has_no_facts(
+    client: httpx.AsyncClient, auth_headers: HeadersFor
+) -> None:
+    headers = await auth_headers("arjun@example.com")
+    created = await client.post("/tickets", json={"message": "Hello there"}, headers=headers)
+    started = await client.post(f"/tickets/{created.json()['id']}/runs", headers=headers)
+
+    response = await client.get(f"/runs/{started.json()['run_id']}/events", headers=headers)
+    assert response.json()["run"]["facts"] is None
 
 
 # ---------------------------------------------------------------- "My tickets"

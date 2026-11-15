@@ -22,6 +22,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { TicketListItem } from "../components/TicketListItem";
 import { Button } from "../components/ui/button";
 import { Card, CardHeader, CardTitle } from "../components/ui/card";
+import { CountUp } from "../components/ui/count-up";
 import { Skeleton } from "../components/ui/skeleton";
 import { useApiGet } from "../hooks/useApiGet";
 import { formatMoney } from "../lib/money";
@@ -41,25 +42,37 @@ interface StatProps {
   highlight?: boolean;
 }
 
-const STAT_ICON = {
-  primary: "bg-primary-50 text-primary-600",
-  warning: "bg-warning-50 text-warning-600",
-  success: "bg-success-50 text-success-600",
+// Each stat has its own accent: a coloured top edge, a tinted icon tile and a soft glow.
+const STAT_ACCENT = {
+  primary: { edge: "border-t-primary-500", icon: "bg-primary-100 text-primary-700", glow: "from-primary-50" },
+  warning: { edge: "border-t-warning-500", icon: "bg-warning-100 text-warning-700", glow: "from-warning-50" },
+  success: { edge: "border-t-success-500", icon: "bg-success-100 text-success-700", glow: "from-success-50" },
 };
 
 function Stat({ label, value, hint, icon: Icon, tone, highlight = false }: StatProps) {
+  const accent = STAT_ACCENT[tone];
   return (
-    <Card className={cn("p-5", highlight && "border-warning-200 ring-1 ring-warning-200")}>
+    <Card
+      interactive
+      className={cn(
+        "animate-slide-up overflow-hidden border-t-4 bg-linear-to-br to-white p-5",
+        accent.edge,
+        accent.glow,
+        highlight && "ring-1 ring-warning-200",
+      )}
+    >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-sm font-medium text-gray-600">{label}</p>
-          <p className="mt-2 text-3xl font-semibold tracking-tight text-gray-900 tabular-nums">{value}</p>
+          <p className="text-sm font-medium text-gray-700">{label}</p>
+          <p className="mt-2 text-3xl font-semibold tracking-tight text-gray-900 tabular-nums">
+            <CountUp value={value} />
+          </p>
         </div>
-        <span className={cn("grid size-10 place-items-center rounded-lg", STAT_ICON[tone])}>
-          <Icon className="size-5" aria-hidden="true" />
+        <span className={cn("grid size-11 place-items-center rounded-xl", accent.icon)}>
+          <Icon className="size-5.5" aria-hidden="true" />
         </span>
       </div>
-      <p className="mt-3 text-xs text-gray-500">{hint}</p>
+      <p className="mt-3 text-xs text-gray-600">{hint}</p>
     </Card>
   );
 }
@@ -194,7 +207,7 @@ function OrdersCard({ orders, loading, error, onRetry }: OrdersCardProps) {
       ) : (
         <ul className="divide-y divide-gray-100 border-t border-gray-100">
           {orders.slice(0, 4).map((order) => (
-            <li key={order.order_number} className="px-5 py-3.5">
+            <li key={order.order_number} className="px-5 py-3.5 transition-colors hover:bg-gray-50/70">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm font-medium text-gray-900">{order.order_number}</span>
                 <StatusBadge status={order.status} />

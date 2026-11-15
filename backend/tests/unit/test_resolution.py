@@ -152,6 +152,26 @@ async def test_priya_style_case_reaches_a_valid_refund_draft() -> None:
     assert [r.forced_tool for r in fake.requests] == ["resolution_draft", "critic_verdict"]
 
 
+async def test_a_warm_complete_reply_still_passes_the_validator_untouched() -> None:
+    """The prompt asks for acknowledge / verified outcome / what happens next (ADR-023). A reply
+    in that shape must be accepted as written, with no revision: warmer wording, same rules."""
+    warm = (
+        "Thanks for getting in touch about your returned headphones. Your order was delivered, "
+        "and we've confirmed that the return arrived and passed inspection, which falls within "
+        "our refund window. That means a refund has been proposed, and it now needs approval "
+        "from our team before it can go ahead. You'll see the outcome on this page."
+    )
+    draft = draft_reply("refund", message=warm, citations=[CITATION])
+
+    outcome, fake = await run([draft, critique_reply("approve")])
+
+    assert outcome.action == ResolutionAction.REFUND
+    assert outcome.message == warm
+    assert outcome.reason_codes == []
+    assert outcome.failure is None
+    assert len(fake.requests) == 2  # one draft and one critique: no revision was needed
+
+
 async def test_untrusted_text_is_marked_as_data_and_never_in_the_system_message() -> None:
     _, fake = await run([good_draft(), critique_reply("approve")])
 

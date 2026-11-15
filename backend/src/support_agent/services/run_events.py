@@ -16,11 +16,12 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support_agent.core.config import Settings
-from support_agent.db.models import AuditEvent
-from support_agent.domain.enums import Role
+from support_agent.db.models import AuditEvent, Ticket
+from support_agent.domain.enums import OrderStatus, Role
 from support_agent.domain.run_events import (
     checked_sources,
     compact_json,
+    customer_refund_status,
     is_finished,
     reviewer_details,
     safe_actor,
@@ -28,9 +29,18 @@ from support_agent.domain.run_events import (
     sse_frame,
     visible_to_customer,
 )
-from support_agent.repositories import audit
+from support_agent.integrations.errors import IntegrationError
+from support_agent.integrations.shipping import ShippingClient
+from support_agent.repositories import audit, orders, refunds
 from support_agent.schemas.auth import Principal
-from support_agent.schemas.run_events import RunSnapshot, RunStatusEvent, RunStepEvent
+from support_agent.schemas.run_events import (
+    RunFacts,
+    RunSnapshot,
+    RunStatusEvent,
+    RunStepEvent,
+    ShipmentFacts,
+)
+from support_agent.services import order_status
 from support_agent.services.runs import load_visible_run
 
 # Opens a short-lived session: `async with sessions() as session: ...`
@@ -58,8 +68,68 @@ def _step(event: AuditEvent, reviewer: bool) -> RunStepEvent:
     )
 
 
-async def load_snapshot(session: AsyncSession, principal: Principal, run_id: UUID) -> RunSnapshot:
-    """The run's status, verified reply and steps, as this caller may see them."""
+_SHIPMENT_STATUSES = ("in_transit", "delivered")
+
+
+async def _shipment_facts(
+    session: AsyncSession, shipping: ShippingClient, customer_id: UUID, order_number: str
+) -> ShipmentFacts | None:
+    """The carrier's report, or None if it cannot be had: the panel then simply omits it."""
+    try:
+        shipment = await order_status.get_shipment(session, shipping, customer_id, order_number)
+    except IntegrationError:
+        return None
+    if shipment.status not in _SHIPMENT_STATUSES:
+        return None  # an unknown carrier word is never shown
+    return ShipmentFacts(
+        status="delivered" if shipment.status == "delivered" else "in_transit",
+        expected_delivery=shipment.expected_delivery,
+    )
+
+
+async def _facts(
+    session: AsyncSession,
+    ticket: Ticket,
+    run_id: UUID,
+    shipping: ShippingClient | None,
+    known_shipment: ShipmentFacts | None,
+) -> RunFacts | None:
+    """Verified facts about the ticket's order. Looked up with the ticket's owner, so the
+    order can only be one that customer owns (rule 3)."""
+    if ticket.order_id is None:
+        return None
+    order = await orders.get_by_id_for_customer(session, ticket.customer_id, ticket.order_id)
+    if order is None:
+        return None
+    shipment = known_shipment
+    if shipment is None and shipping is not None and order.status == OrderStatus.SHIPPED:
+        shipment = await _shipment_facts(session, shipping, ticket.customer_id, order.order_number)
+    latest_return = max(order.returns, key=lambda ret: ret.created_at, default=None)
+    refund = await refunds.latest_status_for_run(session, run_id)
+    return RunFacts(
+        order_number=order.order_number,
+        order_status=order.status,
+        delivered_at=order.delivered_at,
+        return_status=None if latest_return is None else latest_return.status,
+        refund_status=None if refund is None else customer_refund_status(refund),
+        shipment=shipment,
+    )
+
+
+async def load_snapshot(
+    session: AsyncSession,
+    principal: Principal,
+    run_id: UUID,
+    settings: Settings,
+    *,
+    shipping: ShippingClient | None = None,
+    known_shipment: ShipmentFacts | None = None,
+) -> RunSnapshot:
+    """The run's status, verified reply and steps, as this caller may see them.
+
+    `shipping` is asked about an order in transit; a stream passes the answer it already has
+    as `known_shipment`, so one open stream asks the carrier once, not every second.
+    """
     run, ticket = await load_visible_run(session, principal, run_id)  # 404 if not theirs
     reviewer = principal.role in (Role.REVIEWER, Role.ADMIN)
     events = await audit.list_for_run(session, run.id)
@@ -77,6 +147,8 @@ async def load_snapshot(session: AsyncSession, principal: Principal, run_id: UUI
         reply_from=ticket.reply_author,
         finished=is_finished(run.status, ticket.status),
         checked=_checked(events),
+        facts=await _facts(session, ticket, run.id, shipping, known_shipment),
+        specialist_reply_business_days=settings.specialist_reply_business_days,
     )
     return RunSnapshot(run=status, steps=steps)
 
@@ -121,7 +193,10 @@ async def stream_run(
     while monotonic() < deadline:
         await asyncio.sleep(settings.sse_poll_interval_seconds)
         async with sessions() as session:
-            snapshot = await load_snapshot(session, principal, first.run.run_id)
+            known = None if first.run.facts is None else first.run.facts.shipment
+            snapshot = await load_snapshot(
+                session, principal, first.run.run_id, settings, known_shipment=known
+            )
 
         frames = [_step_frame(step) for step in snapshot.steps if step.id not in seen]
         seen.update(step.id for step in snapshot.steps)

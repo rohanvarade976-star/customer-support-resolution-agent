@@ -4,10 +4,17 @@ import type { ComponentProps } from "react";
 
 import { cn } from "../../lib/utils";
 
-export function Card({ className, ...props }: ComponentProps<"section">) {
+// `interactive` adds a hover lift and a focus ring around whatever inside is focused, for cards
+// that are (or contain) links or buttons.
+export function Card({ className, interactive = false, ...props }: ComponentProps<"section"> & { interactive?: boolean }) {
   return (
     <section
-      className={cn("rounded-xl border border-gray-200 bg-white shadow-sm", className)}
+      className={cn(
+        "rounded-xl border border-gray-200 bg-white shadow-sm",
+        interactive &&
+          "transition-[box-shadow,border-color,transform] duration-200 hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-md focus-within:border-primary-300 focus-within:ring-2 focus-within:ring-primary-100",
+        className,
+      )}
       {...props}
     />
   );

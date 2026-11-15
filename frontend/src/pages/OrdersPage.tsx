@@ -97,7 +97,7 @@ export function OrdersPage() {
 
 function OrderCard({ order }: { order: Order }) {
   return (
-    <Card className="flex w-full min-w-0 flex-col">
+    <Card interactive className="flex w-full min-w-0 flex-col">
       <div className="flex items-start justify-between gap-3 px-5 pt-5">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-gray-900">{order.order_number}</h2>

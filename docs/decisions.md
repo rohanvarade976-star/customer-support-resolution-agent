@@ -2152,3 +2152,131 @@ ticket said "a person will follow up", and nothing in the product let a person d
 - New frontend pieces: `ui/collapsible.tsx`, `case/` (verdict banner, key facts, order facts),
   `lib/readiness.ts`, the escalations pages and `useEscalationCount`. The screenshots cover the
   new pages at 375 px and 1440 px.
+
+
+---
+
+## ADR-023: A product that feels alive: live checks, verified facts, next steps and a warmer reply
+
+- **Date:** 2026-11-15
+- **Status:** Accepted (extends ADR-019's run status and ADR-020's design system; the escalated-ticket
+  card of ADR-022 decision 8 becomes a "next step")
+- **Milestone:** M10
+
+### Context
+
+After ADR-020 to ADR-022 the product worked but felt basic. A finished run showed one line ("Your
+order has been delivered on November 3, 2026.") with no context or next step; the Activity list
+showed six entries all "2 minutes ago", with "Your ticket has been updated" after "Resolved";
+nothing moved while the AI worked; the three stat cards looked identical; and escalations left
+behind by the eval harness appeared in the demo. The rules did not change: the UI only displays
+what the API returns (ADR-019), the strict CSP stays (ADR-020), customer messages state only
+verified outcomes (CLAUDE.md rule 8), and no money rule is touched.
+
+### Decision
+
+1. **Verified facts in the customer run status.** `RunStatusEvent` gains `facts` (and
+   `specialist_reply_business_days`, decision 5): `order_number`, `order_status`, `delivered_at`,
+   `return_status` (the latest return), `refund_status` and `shipment`. They are read from our own
+   records at each snapshot, **owner-scoped** (the order is looked up by the ticket's customer id,
+   never from text), and contain no model text, no internal ids or codes and no amounts.
+   - `refund_status` is three words (`in_progress`, `succeeded`, `failed`), mapped by code from the
+     refund operation of this run's proposals (`domain/run_events.customer_refund_status`);
+     reserved, submitted, processing and pending-reconciliation all read as "in progress".
+   - `shipment` (the carrier's status and expected date) is fetched only for an order that is in
+     transit, through `order_status.get_shipment` (ownership checked first). A provider error
+     leaves it out; an unknown carrier word is never shown. An open stream asks the carrier once
+     (the first snapshot) and reuses the answer, so a stream does not call the provider every
+     second.
+   - Reviewers receive the same field (it is the order's own facts; the case page already shows
+     more).
+2. **A live "assistant at work" card** (`AssistantWorkCard`, `lib/runChecks.ts`) while the run is
+   `created` or `investigating`. It shows up to five checks (understanding, order, delivery
+   tracking, policy, preparing an answer). A check appears when its event arrives, shows a spinner,
+   and becomes a tick with a short detail ("Delivered 3 Nov", "In transit · expected 18 Nov") from
+   `facts` once the kinds of records the run checked (`checked`) include it. Delivery tracking is
+   dropped if the run never looked at it. Customers only; reviewers keep the plain timeline.
+   Finished states are a tinted `RunHero` (success, waiting on approval, waiting on you, with a
+   specialist, failed) with a gentle pop. While the card is showing, "What we checked" is hidden
+   so the page does not say the same thing twice.
+3. **A structured reply and code-chosen next steps.** `ReplyCard`: a greeting (the first name from
+   `/me`, not from model text), the verified reply, and "What we found" built from `facts` by fixed
+   wording (`lib/foundFacts.ts`). `NextSteps` come from `lib/nextSteps.ts`, which reads only
+   statuses: a completed run on a delivered order with no refund offers "Report a problem with this
+   item" (the New request wizard at `?order=...&issue=damaged`, which now preselects the problem);
+   awaiting approval explains what happens next; a refund in progress explains that; a resolved
+   ticket offers "Start another request". There is no "Track delivery" button (there is no tracking
+   page): an order in transit shows the carrier's status and expected date in "What we found"
+   instead. No AI text chooses an action, and a test feeds it a reply full of instructions to
+   prove it.
+4. **A better reply prompt, inside the same validator.** `resolution.md` now asks for three to five
+   sentences: acknowledge the request, state the verified outcome with specifics, say what
+   happens next using only what the system really does, with two examples. `domain/validation.py`
+   is unchanged: no money figure, no claim that a refund is done, no promise of an investigation,
+   compensation or a specialist the facts do not support. Tests (`test_validation.py`,
+   `test_resolution.py`) show that a well-formed reply passes untouched, and that warmth does not
+   buy an unverified claim.
+5. **The specialist reply time is a setting.** `SPECIALIST_REPLY_BUSINESS_DAYS` (default 1, 1-10)
+   is sent as `specialist_reply_business_days`, and the page words it as an expectation: "Our
+   specialists usually reply within one business day. Their reply will appear here." It is not a
+   guarantee and no deadline is enforced by code.
+6. **The activity list tells a story.** `lib/timeline.ts` groups events into Understanding,
+   Checking, Deciding and Done, oldest first; orders by time, then (for events stored at the same
+   instant, as before the `clock_timestamp()` fix of ADR-019) by where the event belongs in a run;
+   drops a "ticket updated" within 10 seconds of a run's end or an approval request (it restates
+   it); counts identical consecutive sentences ("x2"); and shows the exact time next to the
+   relative one. Entries slide in.
+7. **Visual polish, CSS only.** Animations are CSS keyframes in `index.css` (slide-up, pop, pulse
+   ring, shimmer, float, sweep, page-in) and Tailwind. Stat cards have their own accent colour,
+   icon and an animated counter (`ui/count-up.tsx`); cards have hover and focus states; skeletons
+   shimmer; the empty state floats; pages ease in. No motion library was added.
+   - **`prefers-reduced-motion`:** the global rule turns every CSS animation and transition off, and
+     the counter checks the preference itself (it also treats a browser that cannot answer as
+     "reduced"). `npm run screenshots` verifies both in a real browser: with reduced motion the
+     sweep bar has no duration; with motion allowed the animations run under the strict CSP.
+8. **Demo data.** `scripts/reset_demo.py` now also deletes the eval harness's customers, orders,
+   tickets, runs, proposals, approvals, refunds, audit events and jobs (`reset_demo(...,
+   leftovers=[eval seed])`), so a leftover eval escalation can never show in the demo. The eval
+   data is deleted, not seeded again.
+
+### Alternatives considered
+
+- **A motion library (Framer Motion):** richer, but it injects styles and adds weight; CSS covered
+  every effect here and the CSP check is simple.
+- **Putting the facts in the reply text:** the model would be the source of "what we found". The
+  panel is built from records, so it is true even if the reply is vague.
+- **Letting the model suggest the next step:** nicer phrasing, but unverified text deciding what a
+  customer is invited to do. Statuses decide, and the wording is fixed.
+- **Calling the carrier on every stream poll:** simpler, but one provider call per second per open
+  page.
+- **A `GET /runs/{id}/facts` endpoint:** an extra round trip and a second place to keep in step
+  with the status. The status already changes when the facts do.
+
+### Limits
+
+- **Eval results recorded before this change were measured on the old resolution prompt.** The
+  committed `evals/reports/` (and any earlier run in `resolution_results.jsonl`) describe the
+  previous wording. They are not evidence about the new prompt until the eval is run again with
+  the real LLM; this ADR does not claim any change in the scores.
+- **A warmer reply is still bounded by the validator,** so a reply may be revised or replaced by
+  the fixed escalation message more often than before. That is a quality trade the eval should
+  measure.
+- **The shipment fact is fetched once per stream** (and once per `/events` call). A change at the
+  carrier shows up on the next connection or reload.
+- **The checks card is inferred from events and `checked`.** A run that skips a step (for example,
+  no policy search) shows fewer checks; it never shows a tick for something that was not checked.
+- **The facts are the order's state now,** not at the time of the reply, so a reply written before a
+  refund completed sits next to "Refund completed". That is accurate, and the timeline shows the
+  order of events.
+- **The expected reply time is an expectation.** Nothing measures or enforces it.
+
+### Consequences
+
+- New setting: `SPECIALIST_REPLY_BUSINESS_DAYS`. New customer-visible fields: `facts`,
+  `specialist_reply_business_days`. No migration.
+- `load_snapshot` takes `settings` and an optional shipping client, so the run routes depend on the
+  shipping client (closed before a stream's body is sent).
+- New frontend pieces: `components/run/` (`RunHero`, `AssistantWorkCard`, `ReplyCard`,
+  `NextSteps`), `ui/count-up.tsx`, `hooks/usePrefersReducedMotion.ts`, `lib/runChecks.ts`,
+  `foundFacts.ts`, `nextSteps.ts`, `timeline.ts`, `dates.ts`. The screenshot run covers an
+  in-progress run, an approval wait and a delivered order with next steps, at 375 px and 1440 px.

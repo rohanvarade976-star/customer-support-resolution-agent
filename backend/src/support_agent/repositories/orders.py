@@ -35,6 +35,18 @@ async def get_for_customer(
     return await session.scalar(stmt)
 
 
+async def get_by_id_for_customer(
+    session: AsyncSession, customer_id: UUID, order_id: UUID
+) -> Order | None:
+    """An order by id, only if it belongs to this customer (the ticket's owner)."""
+    stmt = (
+        select(Order)
+        .where(Order.customer_id == customer_id, Order.id == order_id)
+        .options(*_LOAD_CHILDREN)
+    )
+    return await session.scalar(stmt)
+
+
 async def find_id_for_customer(
     session: AsyncSession, customer_id: UUID, order_number: str
 ) -> UUID | None:

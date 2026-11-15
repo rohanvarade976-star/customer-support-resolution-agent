@@ -229,6 +229,9 @@ class Settings(BaseSettings):
     sse_max_stream_seconds: float = Field(default=300.0, gt=0, le=3600)
     # A comment line sent when nothing else was, so proxies do not close an idle stream.
     sse_heartbeat_seconds: float = Field(default=15.0, gt=0, le=300)
+    # What the customer is told to expect while a specialist has their ticket ("usually reply
+    # within one business day"). An expectation shown to customers, not a guarantee (ADR-023).
+    specialist_reply_business_days: int = Field(default=1, ge=1, le=10)
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod

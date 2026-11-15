@@ -2,7 +2,7 @@
 // small ones), the top bar, and a centred content column with a consistent width.
 
 import { useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
@@ -10,6 +10,7 @@ import { Sheet } from "./ui/dialog";
 
 export function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const location = useLocation();
   const closeMenu = () => {
     setMenuOpen(false);
   };
@@ -37,7 +38,10 @@ export function AppShell() {
           }}
         />
         <main id="main" tabIndex={-1} className="mx-auto w-full max-w-6xl px-4 py-6 outline-none sm:px-6 lg:px-8 lg:py-8">
-          <Outlet />
+          {/* Keyed by the path, so each page eases in when you move between them. */}
+          <div key={location.pathname} className="animate-page-in">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

@@ -13,7 +13,7 @@ ADR-020 (design system, CSP-safe components) in `docs/decisions.md`.
 | `/complaints/new` | customer | "New request" wizard: order → what went wrong → describe → review. Creates the ticket, starts its run, opens the run |
 | `/tickets` | customer | Your tickets, searchable and filtered by status, with each one's next action |
 | `/orders` | customer | Your orders as cards, searchable, with "Get help" |
-| `/runs/:runId` | owner, reviewer | Progress stepper, the verified reply, a reply box when asked, live indicator (SSE), timeline |
+| `/runs/:runId` | owner, reviewer | Status card, the assistant's live checks, the verified reply with "What we found", next steps, a reply box when asked, live indicator (SSE), grouped timeline (ADR-023) |
 | `/memory` | customer | "Privacy and memory": what is remembered about past cases; delete all (confirmed) |
 | `/approvals` | reviewer | Pending refund approvals: sortable table, time to expiry by urgency |
 | `/approvals/:approvalId` | reviewer | Evidence and policy text on the left; the stored amount, approve or reject (confirmed), and the refund's status on the right |
@@ -35,6 +35,7 @@ src/
     AppShell.tsx, Sidebar.tsx, TopBar.tsx   the frame around every signed-in page
     PageHeader.tsx, states.tsx (empty, error, skeletons), StatusBadge.tsx, ConfirmDialog.tsx,
     RunProgress.tsx, RunTimeline.tsx, TicketListItem.tsx
+    run/      RunHero, AssistantWorkCard (live checks), ReplyCard (reply + what we found), NextSteps
   pages/      one file per page, with tests for the key flows
   test/       setup.ts (DOM matchers, <dialog> and ResizeObserver stand-ins), helpers.tsx (fake API)
 scripts/      screenshots.mjs (Playwright: every page at phone and desktop width)
@@ -46,6 +47,9 @@ scripts/      screenshots.mjs (Playwright: every page at phone and desktop width
   default colours are switched off, so `bg-indigo-500` does not compile.
 - Build pages from `components/ui` and the shared states: a skeleton while loading, an empty state
   with a next step, an error state with a retry.
+- Animate with CSS only (keyframes in `index.css`, Tailwind). Every animation must stop under
+  `prefers-reduced-motion`; script-driven motion (`ui/count-up.tsx`) checks the preference itself.
+  Next steps and facts are chosen by code from API statuses, never from AI text (ADR-023).
 - Never add a library that injects `<style>` tags at runtime: the CSP blocks them (ADR-020).
   Dialogs use the native `<dialog>`; the dropdown menu is non-modal; toasts are our own.
 

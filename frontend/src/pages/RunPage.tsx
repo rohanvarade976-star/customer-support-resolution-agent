@@ -6,6 +6,10 @@
 // ("Technical details": ids, codes, timings; ADR-022). Customers get "What we checked": plain
 // words for the kinds of records the run looked at, never model text or internal codes.
 //
+// While the assistant works, customers see its checks appear and tick off (AssistantWorkCard);
+// when it finishes they get a structured reply with what we found and code-chosen next steps
+// (ReplyCard, NextSteps; ADR-023).
+//
 // An escalated ticket tells the customer a specialist is on it and what to expect. The run has
 // finished, so its live stream has ended: the page checks for the specialist's reply every
 // ESCALATED_POLL_MS instead, and shows it, labelled as from a specialist, when it arrives.
@@ -15,11 +19,14 @@ import { useEffect, useState, type SyntheticEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { describeError } from "../api/client";
-import type { Run, RunStatusEvent } from "../api/types";
+import type { Run } from "../api/types";
 import { isReviewer, useAuth } from "../auth/auth";
 import { AiAnalysisSections, type AnalysisSection } from "../components/ai/AiAnalysis";
 import { PageHeader } from "../components/PageHeader";
-import { RunProgress } from "../components/RunProgress";
+import { AssistantWorkCard } from "../components/run/AssistantWorkCard";
+import { NextSteps } from "../components/run/NextSteps";
+import { ReplyCard } from "../components/run/ReplyCard";
+import { RunHero } from "../components/run/RunHero";
 import { RunTimeline, TechnicalDetails } from "../components/RunTimeline";
 import { ErrorState } from "../components/states";
 import { WhatWeCheckedCard } from "../components/WhatWeCheckedCard";
@@ -32,7 +39,7 @@ import { FieldHint, Label, Textarea } from "../components/ui/form";
 import { Skeleton } from "../components/ui/skeleton";
 import { useToast } from "../components/ui/toast-context";
 import { useRunStream, type RunStreamOptions, type StreamMode } from "../hooks/useRunStream";
-import { runProgress } from "../lib/runStages";
+import { isAssistantWorking } from "../lib/runChecks";
 import { cn } from "../lib/utils";
 
 const MAX_REPLY_LENGTH = 2000; // the API's limit (schemas/messages.py)
@@ -60,21 +67,13 @@ function LiveIndicator({ mode }: { mode: StreamMode }) {
   );
 }
 
-const SUMMARY_TONE = {
-  default: "text-gray-600",
-  attention: "text-warning-800",
-  warning: "text-warning-800",
-  danger: "text-danger-700",
-  success: "text-success-700",
-};
-
 export function RunPage({ streamOptions }: { streamOptions?: RunStreamOptions }) {
   const { runId = "" } = useParams();
   const { api, user } = useAuth();
   const reviewer = isReviewer(user);
+  const firstName = (user?.name ?? "").split(" ")[0] ?? "";
   const live = useRunStream(api, runId, streamOptions);
   const status = live.status;
-  const progress = status === null ? null : runProgress(status.status);
   const [openSections, setOpenSections] = useState<Set<Section>>(new Set());
 
   function setSection(section: Section, open: boolean) {
@@ -120,7 +119,7 @@ export function RunPage({ streamOptions }: { streamOptions?: RunStreamOptions })
             </Button>
           }
         />
-      ) : status === null || progress === null ? (
+      ) : status === null ? (
         <div className="space-y-6" aria-busy="true" aria-label="Loading">
           <Card className="space-y-5 p-6">
             <Skeleton className="h-6 w-48" />
@@ -135,34 +134,30 @@ export function RunPage({ streamOptions }: { streamOptions?: RunStreamOptions })
         </div>
       ) : (
         <div className="space-y-6">
-          <Card>
-            <CardContent className="space-y-6 p-6">
-              <div>
-                <h2 className="text-xl font-semibold tracking-tight text-gray-900">
-                  {resolvedBySpecialist ? "Resolved by a specialist" : progress.headline}
-                </h2>
-                <p className={cn("mt-1 text-sm", resolvedBySpecialist ? SUMMARY_TONE.success : SUMMARY_TONE[progress.tone])}>
-                  {resolvedBySpecialist ? "A support specialist answered and closed this request." : progress.summary}
-                </p>
-              </div>
-              <RunProgress status={status.status} />
-            </CardContent>
-          </Card>
+          <RunHero status={status} resolvedBySpecialist={resolvedBySpecialist} />
 
-          {waitingOnSpecialist && <SpecialistCard status={status} />}
+          {!reviewer && isAssistantWorking(status) && <AssistantWorkCard status={status} steps={live.steps} />}
+
+          {/* With a specialist, the explanation comes before any reply, as it always has. */}
+          {waitingOnSpecialist && <NextSteps status={status} />}
 
           {status.reply !== null &&
             (status.reply_from === "specialist" ? (
               <SpecialistReply reply={status.reply} />
+            ) : reviewer ? (
+              <AssistantReply reply={status.reply} />
             ) : (
               // While a specialist has the ticket, the card above says what the assistant's
               // fixed escalation message says, so customers see it once.
-              !waitingOnSpecialist && <AssistantReply reply={status.reply} />
+              !waitingOnSpecialist && <ReplyCard reply={status.reply} firstName={firstName} facts={status.facts} />
             ))}
+
+          {!reviewer && !waitingOnSpecialist && <NextSteps status={status} />}
 
           {status.status === "awaiting_customer" && !reviewer && <ReplyBox runId={runId} onSent={live.refresh} />}
 
-          {!reviewer && <WhatWeCheckedCard checked={status.checked} />}
+          {/* While the assistant works, its live checks card already says this. */}
+          {!reviewer && !isAssistantWorking(status) && <WhatWeCheckedCard checked={status.checked} />}
 
           <Card>
             <CardHeader className="px-6 pt-6">
@@ -217,32 +212,6 @@ function AssistantReply({ reply }: { reply: string }) {
       <p className="px-6 py-5 text-base leading-relaxed whitespace-pre-line text-gray-900" data-testid="verified-reply">
         {reply}
       </p>
-    </section>
-  );
-}
-
-// The customer's escalated ticket: who has it and what happens next.
-function SpecialistCard({ status }: { status: RunStatusEvent }) {
-  const replied = status.reply_from === "specialist";
-  return (
-    <section
-      aria-labelledby="specialist-heading"
-      data-testid="specialist-card"
-      className="flex gap-4 rounded-xl border border-info-200 bg-info-50 px-5 py-4"
-    >
-      <span className="grid size-10 shrink-0 place-items-center rounded-full bg-white text-info-700 shadow-xs">
-        <Headset className="size-5" aria-hidden="true" />
-      </span>
-      <div className="min-w-0">
-        <h2 id="specialist-heading" className="text-base font-semibold text-info-900">
-          A specialist is looking at this
-        </h2>
-        <p className="mt-1 text-sm text-info-800">
-          {replied
-            ? "They have replied below and may follow up here if anything else is needed."
-            : "A member of our support team is reviewing your case. Their reply will appear on this page as soon as it's sent. You don't need to do anything."}
-        </p>
-      </div>
     </section>
   );
 }

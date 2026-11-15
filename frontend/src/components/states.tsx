@@ -19,9 +19,10 @@ interface EmptyStateProps {
 
 export function EmptyState({ icon: Icon, title, description, action, className }: EmptyStateProps) {
   return (
-    <div className={cn("flex flex-col items-center px-6 py-12 text-center", className)}>
-      <div className="grid size-12 place-items-center rounded-full bg-primary-50 text-primary-600 ring-8 ring-primary-50/50">
-        <Icon className="size-6" aria-hidden="true" />
+    <div className={cn("animate-slide-up flex flex-col items-center px-6 py-12 text-center", className)}>
+      {/* The soft rings and the slow float make an empty page feel calm, not broken. */}
+      <div className="animate-float grid size-14 place-items-center rounded-full bg-primary-50 text-primary-600 ring-8 ring-primary-50/60 outline-1 outline-offset-[14px] outline-primary-100">
+        <Icon className="size-7" aria-hidden="true" />
       </div>
       <h2 className="mt-4 text-base font-semibold text-gray-900">{title}</h2>
       <p className="mt-1 max-w-sm text-sm text-gray-600">{description}</p>

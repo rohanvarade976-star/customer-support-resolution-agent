@@ -86,7 +86,11 @@ export function NewComplaintPage() {
 
   const [step, setStep] = useState(0);
   const [orderNumber, setOrderNumber] = useState<string | null>(params.get("order")); // null: not chosen
-  const [issueKey, setIssueKey] = useState<string | null>(null);
+  // ?issue= (from a run's "Report a problem" action) pre-selects the problem; unknown keys are ignored.
+  const [issueKey, setIssueKey] = useState<string | null>(() => {
+    const wanted = params.get("issue");
+    return ISSUES.some((candidate) => candidate.key === wanted) ? wanted : null;
+  });
   const [message, setMessage] = useState("");
   const [starterUsed, setStarterUsed] = useState(""); // the starter sentence we last filled in
   const [stepError, setStepError] = useState<string | null>(null);

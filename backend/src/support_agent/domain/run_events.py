@@ -20,9 +20,9 @@ guardrail has already checked (ADR-017) and which states only verified outcomes.
 
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
-from support_agent.domain.enums import RunStatus, TicketStatus
+from support_agent.domain.enums import RefundOperationStatus, RunStatus, TicketStatus
 
 # The PRD's customer-facing events. Internal ones (tool calls, usage, supervisor steps,
 # injection signals) are for reviewers, traces and logs.
@@ -149,6 +149,17 @@ def checked_sources(tool_calls: list[tuple[str, str]]) -> list[str]:
     """The kinds of records successfully checked, from (tool, outcome) pairs, in fixed order."""
     found = {_SOURCE_FOR_TOOL.get(tool) for tool, outcome in tool_calls if outcome == "ok"}
     return [source for source in CHECKED_SOURCES if source in found]
+
+
+def customer_refund_status(
+    status: RefundOperationStatus,
+) -> Literal["in_progress", "succeeded", "failed"]:
+    """A refund's status in the three words a customer is shown (never an internal state)."""
+    if status == RefundOperationStatus.SUCCEEDED:
+        return "succeeded"
+    if status == RefundOperationStatus.FAILED:
+        return "failed"
+    return "in_progress"  # reserved, submitted, processing, pending reconciliation
 
 
 def is_finished(run_status: RunStatus, ticket_status: TicketStatus) -> bool:

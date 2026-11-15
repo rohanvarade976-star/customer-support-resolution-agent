@@ -101,4 +101,15 @@ describe("NewComplaintPage (wizard)", () => {
     expect(calls.find((call) => call.method === "POST")?.body).toEqual({ message: "How long do refunds take?" });
     expect(screen.getByRole("button", { name: "Submit request" })).toBeEnabled();
   });
+
+  it("preselects the order and the problem from a run's report-a-problem link", async () => {
+    fakeApi({ "GET /me/orders": () => json(ORDERS) });
+    logInAs(PRIYA);
+    renderApp("/complaints/new?order=ORD-1001&issue=damaged");
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole("radio", { name: /ORD-1001/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.getByRole("radio", { name: /Damaged or wrong item/ })).toBeChecked();
+  });
 });

@@ -1,6 +1,6 @@
 // Shared API answers for the AI analysis (ADR-021), used by page tests.
 
-import type { AutomationSummary, RunAnalysis } from "../api/types";
+import type { AutomationSummary, RunAnalysis, RunFacts } from "../api/types";
 
 // Model text that looks like markup: it must render as text, never as HTML.
 export const RATIONALE = "The return was received on day 12. <b>Approve</b> the full amount.";
@@ -58,4 +58,24 @@ export const SUMMARY: AutomationSummary = {
   sent_for_approval: 9,
   escalated: 6,
   median_seconds_to_outcome: 8.4,
+};
+
+// Verified order facts as the run status carries them (ADR-023): a delivered order whose return
+// was received, and one still in transit with the carrier's expected date.
+export const DELIVERED_FACTS: RunFacts = {
+  order_number: "ORD-1001",
+  order_status: "delivered",
+  delivered_at: "2026-11-03T10:00:00Z",
+  return_status: "received",
+  refund_status: null,
+  shipment: null,
+};
+
+export const IN_TRANSIT_FACTS: RunFacts = {
+  order_number: "ORD-1002",
+  order_status: "shipped",
+  delivered_at: null,
+  return_status: null,
+  refund_status: null,
+  shipment: { status: "in_transit", expected_delivery: "2026-11-18" },
 };
