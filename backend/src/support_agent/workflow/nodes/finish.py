@@ -10,7 +10,8 @@
 (The parameter must be named `state`: LangGraph's node type requires that name.)
 
 Customer-facing text is either the validated draft message (explain, request_info) or a
-fixed line written here, never an unchecked model message (CLAUDE.md rule 8).
+fixed line written here, never an unchecked model message
+(engineering rule 8 in docs/engineering-rules.md).
 The amount for a refund proposal comes from the eligibility decision via the outcome,
 and the proposal service checks it against the database again before storing anything.
 """

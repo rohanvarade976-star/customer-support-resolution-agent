@@ -393,10 +393,4 @@ Ideas for later:
 
 ## Built with AI assistance
 
-This project was built with [Claude Code](https://claude.com/claude-code), Anthropic's coding agent, which
-did much of the implementation under rules in [CLAUDE.md](CLAUDE.md): for every task it explains the goal and
-lists the files it will touch, waits for approval before writing code, and afterwards walks through what
-it built. The product spec, scope, acceptance of each task and the engineering trade-offs were directed by
-the author, and [docs/decisions.md](docs/decisions.md) records the reasoning, including the experiments that
-failed. The agents inside the product follow the same principle as the process: the AI proposes, code and a
-person decide.
+I used Claude Code as a coding assistant. I wrote the product spec, chose the architecture, reviewed and approved each change, and made the engineering trade-offs, which are recorded with their reasoning in [docs/decisions.md](docs/decisions.md).

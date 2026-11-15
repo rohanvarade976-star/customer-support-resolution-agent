@@ -12,7 +12,7 @@ refund operation that is due a check:
     threshold                      handled exactly like pending_reconciliation
 
 Each check is three short steps, and no transaction is open during a provider call
-(CLAUDE.md rule 7):
+(engineering rule 7 in docs/engineering-rules.md):
 
 1. Claim (repositories/refunds.py): one locked, committed UPDATE that adds one to
    `reconcile_checks` and pushes `next_reconcile_at` to the end of a lease.

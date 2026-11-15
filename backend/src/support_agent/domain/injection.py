@@ -1,8 +1,9 @@
 """Detect text that tries to give instructions to the system (prompt injection). Pure, no I/O.
 
-Customer text is always data (CLAUDE.md rule 9). This module adds a signal on top of that:
-code finds phrases that look like orders to the model (a fake "SYSTEM" message, "ignore your
-rules", a pre-approval, pasted tool output, a role-play setup) and does two things with them:
+Customer text is always data (engineering rule 9 in docs/engineering-rules.md). This module adds a
+signal on top of that: code finds phrases that look like orders to the model (a fake "SYSTEM"
+message, "ignore your rules", a pre-approval, pasted tool output, a role-play setup) and does
+two things with them:
 
 - `mark_suspicious` wraps the sentences that contain a match in visible markers. Nothing is
   deleted, so the model still sees everything the customer wrote, and the rest of the

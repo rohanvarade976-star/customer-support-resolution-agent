@@ -1,6 +1,6 @@
 """Check a customer-facing reply for things that must never reach the customer. Pure, no I/O.
 
-Rules (PRD "Safety and guardrails", CLAUDE.md rule 8, ADR-017):
+Rules (PRD "Safety and guardrails"; engineering rule 8 in docs/engineering-rules.md; ADR-017):
 
 - No internal identifiers: UUIDs, tool call ids, policy citation codes, validator codes.
 - No order number the customer does not own (checked against the customer's own order

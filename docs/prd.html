@@ -732,7 +732,7 @@ error_details, final_response</code></pre>
 ├── docs/                         # prd.html, architecture.md, decisions.md, diagrams/
 ├── docker-compose.yml            # local: Postgres, API, worker, mocks
 ├── .env.example, .gitignore, .pre-commit-config.yaml
-└── CLAUDE.md, LICENSE, README.md</code></pre>
+└── LICENSE, README.md</code></pre>
   <h3>Dependency rules</h3>
   <ul>
     <li>Calls flow one way: <code>api → services → repositories → db</code>. Routes contain no business logic; repositories contain all SQL.</li>

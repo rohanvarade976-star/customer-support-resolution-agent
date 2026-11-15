@@ -4,7 +4,8 @@
 stream sends). `stream_run` then polls the database and sends only what changed.
 
 Each poll opens and closes its own short session. A stream never holds a transaction or a
-row lock while it waits (CLAUDE.md rule 7), and it checks ownership again on every poll.
+row lock while it waits (engineering rule 7 in docs/engineering-rules.md), and it checks
+ownership again on every poll.
 """
 
 import asyncio
